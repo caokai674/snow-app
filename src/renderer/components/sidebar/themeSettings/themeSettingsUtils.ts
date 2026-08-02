@@ -5,7 +5,11 @@ import type {
   ThemeMode,
   ThemeStreamCursor,
 } from "./types";
-import { DEFAULT_THEME_PRESET_ID, getPresetById } from "./themePresets";
+import {
+  DEFAULT_THEME_PRESET_ID,
+  getPresetById,
+  resolvePresetId,
+} from "./themePresets";
 import { themeBgUrl } from "../../../utils/themeBgUrl";
 
 export const THEME_SETTING_NAME = "Theme settings";
