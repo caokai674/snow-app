@@ -38,3 +38,6 @@ Thumbs.db
 
 # Snow local state
 .snow/
+
+# Local agent guidance
+/AGENTS.md
