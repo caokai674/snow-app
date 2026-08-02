@@ -4920,6 +4920,37 @@ input {
   overflow: visible;
   justify-content: flex-start;
 }
+
+/* Keep the composer in the viewport on short windows. The greeting remains
+   reachable by scrolling in the upper area instead of pushing the composer
+   below the window. */
+@media (max-height: 800px) {
+  .chat-content.is-empty {
+    overflow: hidden;
+    padding-top: clamp(12px, 6vh, 48px);
+    padding-bottom: 0;
+  }
+
+  .chat-content.is-empty .chat-area {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .chat-empty-greeting-title {
+    margin-top: 20px;
+  }
+
+  .chat-empty-quick-actions {
+    gap: 8px;
+    margin-top: 28px;
+  }
+
+  .chat-empty-quick-card {
+    padding: 12px 14px;
+  }
+}
+
 /* Has-messages state: chat-area grows to fill, pushing input to bottom */
 .chat-content.has-messages {
   padding-bottom: 0;
@@ -22344,6 +22375,12 @@ input {
 :root[data-theme-preset="anthropic"] .app-shell > .app-layout {
   position: relative;
   z-index: 1;
+}
+
+/* The app layout follows the top bar in the DOM. Keep the top-bar stacking
+   context above it so its New Tab dropdown can extend into the layout. */
+:root[data-theme-preset="anthropic"] .app-shell > .top-bar {
+  z-index: 2;
 }
 
 :root[data-theme-preset="anthropic"] .pixel-logo.is-frozen {

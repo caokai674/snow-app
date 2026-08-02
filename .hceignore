@@ -1,0 +1,28 @@
+# Electron and frontend build outputs
+out/**
+release/**
+dist/**
+*.tsbuildinfo
+*.map
+*.blockmap
+
+# Rust and napi-rs generated artifacts
+native/target/**
+native/*.node
+native/*.d.ts
+native/*.js
+
+# Project-local state and caches
+.snow/**
+.cache/**
+coverage/**
+tmp/**
+temp/**
+
+# Repository and local tooling metadata
+.git/**
+.vscode/**
+.idea/**
+*.log
+.DS_Store
+Thumbs.db
