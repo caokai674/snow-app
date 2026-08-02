@@ -1,0 +1,70 @@
+name: Debian 12 DEB
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-deb:
+    # Ubuntu 22.04's glibc 2.35 is compatible with Debian 12's glibc 2.36.
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      - name: Package Debian archive
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --linux deb --x64 --publish never
+
+      - name: Validate package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_file="$(find release -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$package_file"
+          dpkg-deb --info "$package_file"
+          dpkg-deb --contents "$package_file"
+
+      - name: Install package on Debian 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/release:/release:ro" debian:12-slim bash -ec '
+            apt-get update
+            apt-get install -y /release/*.deb
+            package_name="$(dpkg-deb -f /release/*.deb Package)"
+            dpkg-query -W -f="\${Status}\n" "$package_name" | grep -Fx "install ok installed"
+          '
+
+      - name: Upload Debian 12 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: snow-app-debian12-deb
+          path: release/*.deb
+          if-no-files-found: error

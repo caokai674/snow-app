@@ -511,6 +511,64 @@ const gruvboxDark: ThemePalette = {
   focusRing: "rgba(235, 219, 178, 0.12)",
 };
 
+const anthropicLight: ThemePalette = {
+  bgPrimary: "#faf9f5",
+  bgSecondary: "#f2f0e8",
+  bgTertiary: "#e8e6dc",
+  bgHover: "#eeece4",
+  bgActive: "#dedbd0",
+  chromeBg: "#f7f6f1",
+  appBg: "#efede5",
+  borderColor: "#d9d6ca",
+  borderLight: "#e8e6dc",
+  borderSubtle: "#c4c0b4",
+  textPrimary: "#141413",
+  textSecondary: "#484640",
+  textTertiary: "#706e66",
+  textMuted: "#98958b",
+  accentGreen: "#788c5d",
+  accentGreenBg: "#e9eee3",
+  accentGreenText: "#53653f",
+  accentRed: "#c35d45",
+  accentRedBg: "#f7e4df",
+  accentRedText: "#8b3e31",
+  accentBlue: "#6a9bcc",
+  accentBlueBg: "#e4eef8",
+  accentBlueText: "#3f668c",
+  onSolid: "#faf9f5",
+  selectionBg: "rgba(106, 155, 204, 0.22)",
+  focusRing: "rgba(217, 119, 87, 0.24)",
+};
+
+const anthropicDark: ThemePalette = {
+  bgPrimary: "#141413",
+  bgSecondary: "#1f1f1c",
+  bgTertiary: "#292824",
+  bgHover: "#252521",
+  bgActive: "#37352f",
+  chromeBg: "#191917",
+  appBg: "#0f0f0e",
+  borderColor: "#393831",
+  borderLight: "#262520",
+  borderSubtle: "#504d43",
+  textPrimary: "#faf9f5",
+  textSecondary: "#e8e6dc",
+  textTertiary: "#b0aea5",
+  textMuted: "#7f7d74",
+  accentGreen: "#9cad7d",
+  accentGreenBg: "rgba(120, 140, 93, 0.2)",
+  accentGreenText: "#c1d0a5",
+  accentRed: "#e18a72",
+  accentRedBg: "rgba(217, 119, 87, 0.18)",
+  accentRedText: "#f0b1a0",
+  accentBlue: "#8db6df",
+  accentBlueBg: "rgba(106, 155, 204, 0.2)",
+  accentBlueText: "#b5d2ed",
+  onSolid: "#141413",
+  selectionBg: "rgba(106, 155, 204, 0.3)",
+  focusRing: "rgba(217, 119, 87, 0.28)",
+};
+
 export const THEME_PRESETS: ThemePreset[] = [
   {
     id: "snow",
@@ -581,6 +639,13 @@ export const THEME_PRESETS: ThemePreset[] = [
     defaultName: "Gruvbox",
     light: gruvboxLight,
     dark: gruvboxDark,
+  },
+  {
+    id: "anthropic",
+    nameKey: "settings.themePresetAnthropic",
+    defaultName: "Anthropic",
+    light: anthropicLight,
+    dark: anthropicDark,
   },
 ];
 

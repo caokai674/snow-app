@@ -1123,6 +1123,7 @@ export const zhTW = {
   "settings.themePresets": "預設主題",
   "settings.themePresetsInfo": "選擇內建配色方案，淺色和深色變體打包在一起。",
   "settings.themePresetSnow": "Snow",
+  "settings.themePresetAnthropic": "Anthropic",
   "settings.themePresetMidnightBlue": "午夜藍",
   "settings.themePresetForestGreen": "森林綠",
   "settings.themePresetRosePink": "玫瑰粉",

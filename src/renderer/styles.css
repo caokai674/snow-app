@@ -20672,6 +20672,70 @@ input {
   border-color: var(--border-color);
 }
 
+/* ===== Anthropic preset refinement =====
+   The palette carries the official brand colors. These additional tokens keep
+   the developer workspace restrained while giving the preset a recognizable
+   editorial voice through typography, warmer surfaces, and tighter geometry. */
+:root[data-theme-preset="anthropic"] {
+  --font-sans: "Poppins", "Arial", sans-serif;
+  --font-brand-body: "Lora", "Georgia", serif;
+  --accent-orange: #d97757;
+  --accent-orange-bg: rgba(217, 119, 87, 0.14);
+  --accent-orange-text: #8c4533;
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+}
+
+:root[data-theme-preset="anthropic"][data-theme="light"] {
+  --surface-island: rgba(250, 249, 245, 0.86);
+  --surface-island-strong: #faf9f5;
+  --surface-island-muted: rgba(242, 240, 232, 0.84);
+  --island-shadow: 0 14px 34px rgba(20, 20, 19, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+:root[data-theme-preset="anthropic"][data-theme="dark"] {
+  --surface-island: rgba(31, 31, 28, 0.9);
+  --surface-island-strong: #1f1f1c;
+  --surface-island-muted: rgba(25, 25, 23, 0.82);
+  --island-shadow: 0 16px 40px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(250, 249, 245, 0.045);
+}
+
+:root[data-theme-preset="anthropic"] .chat-empty-greeting-title,
+:root[data-theme-preset="anthropic"] .ai-message {
+  font-family: var(--font-brand-body);
+}
+
+:root[data-theme-preset="anthropic"] .ai-message h2,
+:root[data-theme-preset="anthropic"] .ai-message h3,
+:root[data-theme-preset="anthropic"] .chat-empty-quick-card-title,
+:root[data-theme-preset="anthropic"] .api-settings-title-group strong {
+  font-family: var(--font-sans);
+}
+
+:root[data-theme-preset="anthropic"] .chat-empty-greeting-logo {
+  color: var(--accent-orange);
+}
+
+:root[data-theme-preset="anthropic"] .chat-empty-quick-card.is-theme
+  .chat-empty-quick-card-icon {
+  color: var(--accent-orange);
+}
+
+:root[data-theme-preset="anthropic"] .api-settings-form-btn.primary,
+:root[data-theme-preset="anthropic"] .model-manual-btn.primary {
+  background: var(--accent-orange);
+  color: #fffaf5;
+}
+
+:root[data-theme-preset="anthropic"] .api-settings-form-btn.primary:hover:not(:disabled),
+:root[data-theme-preset="anthropic"] .model-manual-btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-orange) 88%, #141413);
+}
+
 /* ===== Theme Background Layer =====
    当用户启用背景图时，useTheme 在 :root 上设置 --theme-bg-image 等变量
    并添加 data-theme-bg="on" 属性。
