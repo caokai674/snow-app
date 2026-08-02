@@ -55,7 +55,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/release:/release:ro" debian:12-slim bash -ec '
+          for attempt in 1 2 3; do
+            if docker pull debian:12-slim; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$((attempt * 10))"
+          done
+          docker run --rm --pull=never -v "$PWD/release:/release:ro" debian:12-slim bash -ec '
             apt-get update
             apt-get install -y /release/*.deb
             package_name="$(dpkg-deb -f /release/*.deb Package)"
