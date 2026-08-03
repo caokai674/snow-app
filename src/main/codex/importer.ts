@@ -1,10 +1,7 @@
 import {
-  cpSync,
   existsSync,
-  mkdirSync,
   readdirSync,
   readFileSync,
-  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -15,14 +12,21 @@ import type {
   SystemPromptItemInput,
   WorkspaceDirectoryRecord,
 } from "../native/types";
-import { SNOW_CLI_CONFIG_DIR } from "../snowCli/paths";
 import { isRecord, toBoolean } from "../utils/value";
 import { getCodexConfigPath, getCodexHome } from "./paths";
 import type { CodexImportPreview, CodexImportResult } from "./types";
+import {
+  buildImportDiscovery,
+  hashImportPath,
+  hashImportValue,
+  skillLogicalId,
+  type ImportCandidateInput,
+  type ImportSourceDiscovery,
+} from "../importConfig/discovery";
+import type { ImportSource } from "../../shared/importDiscovery";
 
 const CODEX_MCP_SOURCE = "codex";
 const CODEX_PLUGIN_MCP_SOURCE = "codex-plugin";
-const CODEX_PLUGIN_REGISTRY_FILE = join(SNOW_CLI_CONFIG_DIR, "codex-plugins.json");
 const SKILL_FILE_NAME = "SKILL.md";
 const MAX_SCAN_DEPTH = 10;
 
@@ -60,22 +64,18 @@ type PluginDescriptor = {
   defaultPrompts: string[];
 };
 
-type SkillCopy = {
+type DiscoveredSkill = {
   sourceDir: string;
-  destinationDir: string;
+  scope: ImportScope;
+  projectId?: string;
+  projectRoot?: string;
 };
 
 type CodexImportContext = {
-  preview: CodexImportPreview;
-  globalCodexMcpSourceFound: boolean;
-  globalPluginMcpSourceFound: boolean;
-  projectCodexMcpSourceIds: Set<string>;
-  projectPluginMcpSourceIds: Set<string>;
-  codexPromptSourceFound: boolean;
-  pluginPromptSourceFound: boolean;
+  source: ImportSource;
   mcpServers: ImportedMcp[];
   prompts: ImportedPrompt[];
-  skills: SkillCopy[];
+  skills: DiscoveredSkill[];
   plugins: PluginDescriptor[];
 };
 
@@ -632,47 +632,52 @@ const collectSkillCopies = (
   codexHome: string,
   projects: WorkspaceDirectoryRecord[],
   plugins: PluginDescriptor[]
-): SkillCopy[] => {
-  const copies: SkillCopy[] = [];
-  const destinationPaths = new Set<string>();
-  const addCopy = (sourceDir: string, destinationDir: string): void => {
-    if (destinationPaths.has(destinationDir)) {
+): DiscoveredSkill[] => {
+  const skills: DiscoveredSkill[] = [];
+  const sourcePaths = new Set<string>();
+  const addSkill = (
+    sourceDir: string,
+    scope: ImportScope,
+    projectId?: string,
+    projectRoot?: string
+  ): void => {
+    const key = resolve(sourceDir);
+    if (sourcePaths.has(key)) {
       return;
     }
-    destinationPaths.add(destinationDir);
-    copies.push({ sourceDir, destinationDir });
+    sourcePaths.add(key);
+    skills.push({
+      sourceDir,
+      scope,
+      ...(projectId ? { projectId } : {}),
+      ...(projectRoot ? { projectRoot } : {}),
+    });
   };
-  const globalDestination = join(SNOW_CLI_CONFIG_DIR, "skills", "codex");
   const globalSkillRoots = [
     join(codexHome, "skills"),
     join(homedir(), ".agents", "skills"),
   ];
   for (const sourceRoot of globalSkillRoots) {
     for (const skillDir of collectSkillDirectories(sourceRoot)) {
-      const rel = relative(sourceRoot, skillDir);
-      addCopy(skillDir, join(globalDestination, rel));
+      addSkill(skillDir, "global");
     }
   }
   for (const project of projects.filter((item) => item.kind === "local")) {
     const projectRoot = project.path;
-    const destinationRoot = join(projectRoot, ".snow", "skills", "codex");
     for (const sourceRoot of [join(projectRoot, ".codex", "skills"), join(projectRoot, ".agents", "skills")]) {
       for (const skillDir of collectSkillDirectories(sourceRoot)) {
-        addCopy(skillDir, join(destinationRoot, relative(sourceRoot, skillDir)));
+        addSkill(skillDir, "project", project.directoryId, project.path);
       }
     }
   }
   for (const plugin of plugins.filter((item) => item.enabled)) {
     for (const skillRoot of plugin.skillRoots) {
-      const destinationBase = plugin.scope === "project" && plugin.projectRoot
-        ? join(plugin.projectRoot, ".snow", "skills", "codex-plugins", safeSegment(plugin.id))
-        : join(SNOW_CLI_CONFIG_DIR, "skills", "codex-plugins", safeSegment(plugin.id));
       for (const skillDir of collectSkillDirectories(skillRoot)) {
-        addCopy(skillDir, join(destinationBase, relative(skillRoot, skillDir)));
+        addSkill(skillDir, plugin.scope, plugin.projectId, plugin.projectRoot);
       }
     }
   }
-  return copies;
+  return skills;
 };
 
 const buildContext = async (native: NativeBridge): Promise<CodexImportContext> => {
@@ -685,51 +690,23 @@ const buildContext = async (native: NativeBridge): Promise<CodexImportContext> =
   const skills = collectSkillCopies(codexHome, projects, plugins);
   const configPath = getCodexConfigPath();
   const globalInstructionsPath = readAgentsPrompt(codexHome)?.path ?? null;
-  const preview: CodexImportPreview = {
-    codexHome,
-    configPath,
-    configFound: existsSync(configPath),
-    globalInstructionsPath,
+  const source: ImportSource = {
+    provider: "codex",
+    sourceHome: codexHome,
+    sourceFound: existsSync(codexHome) || existsSync(configPath),
+    configPaths: [{ label: "config.toml", path: configPath, found: existsSync(configPath) }],
+    instructionPaths: globalInstructionsPath
+      ? [{ label: "AGENTS.md", path: globalInstructionsPath, found: true }]
+      : [],
     projectConfigCount: configs.filter((config) => config.scope === "project").length,
-    mcpServerCount: mcpServers.filter((server) => server.scope === "global").length,
-    projectMcpServerCount: mcpServers.filter((server) => server.scope === "project").length,
-    skillCount: skills.length,
-    pluginCount: plugins.length,
-    pluginSkillCount: skills.filter((skill) => skill.destinationDir.includes(`${sep}codex-plugins${sep}`)).length,
-    pluginMcpServerCount: mcpServers.filter((server) => server.input.source === CODEX_PLUGIN_MCP_SOURCE).length,
-    promptCount: prompts.length,
     warnings,
   };
   const codexHomeFound = existsSync(codexHome);
-  const globalConfig = configs.find((config) => config.scope === "global");
-  const globalCodexMcpSourceFound = isRecord(globalConfig?.values.mcp_servers);
-  const globalPluginMcpSourceFound = plugins.some((plugin) => plugin.scope === "global");
-  const projectCodexMcpSourceIds = new Set(
-    configs
-      .filter(
-        (config) =>
-          config.scope === "project" &&
-          config.projectId &&
-          isRecord(config.values.mcp_servers)
-      )
-      .map((config) => config.projectId as string)
-  );
-  const projectPluginMcpSourceIds = new Set(
-    plugins
-      .filter((plugin) => plugin.scope === "project" && plugin.projectId)
-      .map((plugin) => plugin.projectId as string)
-  );
   if (!codexHomeFound) {
     warnings.push(`Codex home not found: ${codexHome}`);
   }
   return {
-    preview,
-    globalCodexMcpSourceFound,
-    globalPluginMcpSourceFound,
-    projectCodexMcpSourceIds,
-    projectPluginMcpSourceIds,
-    codexPromptSourceFound: codexHomeFound,
-    pluginPromptSourceFound: plugins.length > 0,
+    source,
     mcpServers,
     prompts,
     skills,
@@ -737,174 +714,63 @@ const buildContext = async (native: NativeBridge): Promise<CodexImportContext> =
   };
 };
 
-const persistMcpServers = async (
-  native: NativeBridge,
-  servers: ImportedMcp[],
-  globalCodexMcpSourceFound: boolean,
-  globalPluginMcpSourceFound: boolean,
-  projectCodexMcpSourceIds: Set<string>,
-  projectPluginMcpSourceIds: Set<string>
-): Promise<{ global: number; project: number }> => {
-  const globalServers = servers.filter((server) => server.scope === "global");
-  const projectServers = servers.filter((server) => server.scope === "project" && server.projectId);
-  for (const server of globalServers) {
-    await native.upsertMcpServerConfig(server.input);
-  }
-  if (globalCodexMcpSourceFound || globalPluginMcpSourceFound) {
-    const existingGlobal = await native.listMcpServerConfigs();
-    const nextCodexIds = new Set(
-      globalServers
-        .filter((server) => server.input.source === CODEX_MCP_SOURCE)
-        .map((server) => server.input.serverId)
-    );
-    const nextPluginIds = new Set(
-      globalServers
-        .filter((server) => server.input.source === CODEX_PLUGIN_MCP_SOURCE)
-        .map((server) => server.input.serverId)
-    );
-    for (const existing of existingGlobal) {
-      if (
-        (existing.source === CODEX_MCP_SOURCE &&
-          globalCodexMcpSourceFound &&
-          !nextCodexIds.has(existing.serverId)) ||
-        (existing.source === CODEX_PLUGIN_MCP_SOURCE &&
-          globalPluginMcpSourceFound &&
-          !nextPluginIds.has(existing.serverId))
-      ) {
-        await native.deleteMcpServerConfig(existing.serverId);
-      }
-    }
-  }
-
-  const projectIds = new Set([...projectCodexMcpSourceIds, ...projectPluginMcpSourceIds]);
-  for (const projectId of projectIds) {
-    const scoped = projectServers.filter((server) => server.projectId === projectId);
-    for (const server of scoped) {
-      await native.upsertProjectMcpServerConfig(projectId, server.input);
-    }
-    if (projectCodexMcpSourceIds.has(projectId) || projectPluginMcpSourceIds.has(projectId)) {
-      const existing = await native.listProjectMcpServerConfigs(projectId);
-      const nextCodexIds = new Set(
-        scoped
-          .filter((server) => server.input.source === CODEX_MCP_SOURCE)
-          .map((server) => server.input.serverId)
-      );
-      const nextPluginIds = new Set(
-        scoped
-          .filter((server) => server.input.source === CODEX_PLUGIN_MCP_SOURCE)
-          .map((server) => server.input.serverId)
-      );
-      for (const item of existing) {
-        if (
-          (item.source === CODEX_MCP_SOURCE &&
-            projectCodexMcpSourceIds.has(projectId) &&
-            !nextCodexIds.has(item.serverId)) ||
-          (item.source === CODEX_PLUGIN_MCP_SOURCE &&
-            projectPluginMcpSourceIds.has(projectId) &&
-            !nextPluginIds.has(item.serverId))
-        ) {
-          await native.deleteProjectMcpServerConfig(projectId, item.serverId);
-        }
-      }
-    }
-  }
-  return { global: globalServers.length, project: projectServers.length };
-};
-
-const persistPrompts = async (
-  native: NativeBridge,
-  prompts: ImportedPrompt[],
-  codexPromptSourceFound: boolean,
-  pluginPromptSourceFound: boolean
-): Promise<void> => {
-  if (!codexPromptSourceFound && !pluginPromptSourceFound && prompts.length === 0) {
-    return;
-  }
-  const nextIds = new Set(prompts.map((prompt) => prompt.promptId));
-  const existing = await native.listSystemPrompts();
-  for (const prompt of existing) {
-    if (
-      ((prompt.promptId.startsWith("codex:") &&
-        codexPromptSourceFound) ||
-        (prompt.promptId.startsWith("codex-plugin:") &&
-          pluginPromptSourceFound)) &&
-      !nextIds.has(prompt.promptId)
-    ) {
-      await native.deleteSystemPrompt(prompt.promptId);
-    }
-  }
-  for (const prompt of prompts) {
-    await native.upsertSystemPrompt(prompt);
-  }
-};
-
-const copySkills = (skills: SkillCopy): void => {
-  mkdirSync(dirname(skills.destinationDir), { recursive: true });
-  cpSync(skills.sourceDir, skills.destinationDir, { recursive: true, force: true });
-};
-
-const persistPluginRegistry = (plugins: PluginDescriptor[]): void => {
-  mkdirSync(SNOW_CLI_CONFIG_DIR, { recursive: true });
-  const records = plugins.map((plugin) => ({
-    id: plugin.id,
-    name: plugin.name,
-    path: plugin.root,
-    manifestPath: plugin.manifestPath,
-    scope: plugin.scope,
-    projectId: plugin.projectId ?? null,
-    enabled: plugin.enabled,
-    importedAt: new Date().toISOString(),
-    skillRoots: plugin.skillRoots,
-    mcpServerNames: Object.keys(plugin.mcpServers),
-    promptCount: plugin.defaultPrompts.length,
-    manifestKind: plugin.manifestKind,
-  }));
-  writeFileSync(CODEX_PLUGIN_REGISTRY_FILE, `${JSON.stringify({ version: 1, plugins: records }, null, 2)}\n`, "utf8");
+export const discoverCodexImport = async (
+  native: NativeBridge
+): Promise<ImportSourceDiscovery> => {
+  const context = await buildContext(native);
+  const candidates: ImportCandidateInput[] = [
+    ...context.mcpServers.map((server) => ({
+      type: "mcp" as const,
+      provider: "codex" as const,
+      scope: server.scope,
+      originPath: context.source.sourceHome,
+      logicalId: server.input.name,
+      contentHash: hashImportValue({
+        transportType: server.input.transportType,
+        url: server.input.url,
+        command: server.input.command,
+        argsJson: server.input.argsJson,
+        envJson: server.input.envJson,
+        headersJson: server.input.headersJson,
+      }),
+      ...(server.projectId ? { projectId: server.projectId } : {}),
+    })),
+    ...context.prompts.map((prompt) => ({
+      type: "prompt" as const,
+      provider: "codex" as const,
+      scope: prompt.promptId.includes(":project:") ? "project" as const : "global" as const,
+      originPath: context.source.sourceHome,
+      logicalId: prompt.promptId,
+      contentHash: hashImportValue(prompt.content),
+    })),
+    ...context.skills.map((skill) => ({
+      type: "skill" as const,
+      provider: "codex" as const,
+      scope: skill.scope,
+      originPath: skill.sourceDir,
+      logicalId: skillLogicalId(skill.sourceDir),
+      contentHash: hashImportPath(skill.sourceDir),
+      ...(skill.projectId ? { projectId: skill.projectId } : {}),
+      ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
+    })),
+    ...context.plugins.map((plugin) => ({
+      type: "plugin" as const,
+      provider: "codex" as const,
+      scope: plugin.scope,
+      originPath: plugin.manifestPath,
+      logicalId: plugin.id,
+      contentHash: hashImportPath(plugin.manifestPath),
+      ...(plugin.projectId ? { projectId: plugin.projectId } : {}),
+      ...(plugin.projectRoot ? { projectRoot: plugin.projectRoot } : {}),
+    })),
+  ];
+  return { source: context.source, candidates };
 };
 
 export const previewCodexImport = async (native: NativeBridge): Promise<CodexImportPreview> =>
-  (await buildContext(native)).preview;
+  buildImportDiscovery([await discoverCodexImport(native)]);
 
-export const importCodex = async (native: NativeBridge): Promise<CodexImportResult> => {
-  const context = await buildContext(native);
-  const mcpCounts =
-    context.globalCodexMcpSourceFound ||
-    context.globalPluginMcpSourceFound ||
-    context.projectCodexMcpSourceIds.size > 0 ||
-    context.projectPluginMcpSourceIds.size > 0
-    ? await persistMcpServers(
-        native,
-        context.mcpServers,
-        context.globalCodexMcpSourceFound,
-        context.globalPluginMcpSourceFound,
-        context.projectCodexMcpSourceIds,
-        context.projectPluginMcpSourceIds
-      )
-    : { global: 0, project: 0 };
-  await persistPrompts(
-    native,
-    context.prompts,
-    context.codexPromptSourceFound,
-    context.pluginPromptSourceFound
-  );
-  let importedSkills = 0;
-  for (const skill of context.skills) {
-    try {
-      copySkills(skill);
-      importedSkills += 1;
-    } catch (error) {
-      context.preview.warnings.push(`Unable to import Skill ${skill.sourceDir}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  if (context.plugins.length > 0) {
-    persistPluginRegistry(context.plugins);
-  }
-  return {
-    ...context.preview,
-    importedMcpServers: mcpCounts.global,
-    importedProjectMcpServers: mcpCounts.project,
-    importedSkills,
-    importedPlugins: context.plugins.length,
-    importedPrompts: context.prompts.length,
-  };
-};
+export const importCodex = async (native: NativeBridge): Promise<CodexImportResult> => ({
+  ...await previewCodexImport(native),
+  applied: false,
+});

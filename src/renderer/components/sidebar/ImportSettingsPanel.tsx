@@ -1,7 +1,6 @@
 import {
   AlertTriangle,
   CheckCircle2,
-  Download,
   FileCode2,
   FolderOpen,
   Loader2,
@@ -14,10 +13,10 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type {
-  CodexImportPreview,
-  CodexImportResult,
-  ExternalImportPreview,
-  ExternalImportResult,
+  ImportCandidate,
+  ImportDiscovery,
+  ImportProvider,
+  ImportSource as DiscoveredImportSource,
 } from "../../../preload";
 import { useI18n } from "../../i18n";
 import { AutoDismissNotice } from "../AutoDismissNotice";
@@ -27,34 +26,21 @@ type ImportSettingsPanelProps = {
 };
 
 type ImportPreview = {
-  sourceHome: string;
-  sourceFound: boolean;
-  configPaths: Array<{ label: string; path: string; found: boolean }>;
-  instructionPaths: Array<{ label: string; path: string; found: boolean }>;
-  projectConfigCount: number;
+  source: DiscoveredImportSource;
+  candidates: ImportCandidate[];
   mcpServerCount: number;
   projectMcpServerCount: number;
   skillCount: number;
   promptCount: number;
-  pluginCount?: number;
-  pluginMcpServerCount?: number;
-  warnings: string[];
-};
-
-type ImportResult = ImportPreview & {
-  importedMcpServers: number;
-  importedProjectMcpServers: number;
-  importedSkills: number;
-  importedPrompts: number;
-  importedPlugins?: number;
+  pluginCount: number;
+  pluginMcpServerCount: number;
 };
 
 type ImportSource = {
-  id: "codex" | "claude-code" | "opencode";
+  id: ImportProvider;
   label: string;
   description: string;
   preview: () => Promise<ImportPreview>;
-  import: () => Promise<ImportResult>;
 };
 
 type SummaryItem = {
@@ -64,55 +50,34 @@ type SummaryItem = {
   detail: string;
 };
 
-const toImportPreview = (preview: ExternalImportPreview): ImportPreview => preview;
-
-const toImportResult = (result: ExternalImportResult): ImportResult => result;
-
-const toCodexPreview = (preview: CodexImportPreview): ImportPreview => ({
-  sourceHome: preview.codexHome,
-  sourceFound: preview.configFound,
-  configPaths: [
-    {
-      label: "config.toml",
-      path: preview.configPath,
-      found: preview.configFound,
-    },
-  ],
-  instructionPaths: preview.globalInstructionsPath
-    ? [
-        {
-          label: "AGENTS.md",
-          path: preview.globalInstructionsPath,
-          found: true,
-        },
-      ]
-    : [],
-  projectConfigCount: preview.projectConfigCount,
-  mcpServerCount: preview.mcpServerCount,
-  projectMcpServerCount: preview.projectMcpServerCount,
-  skillCount: preview.skillCount,
-  promptCount: preview.promptCount,
-  pluginCount: preview.pluginCount,
-  pluginMcpServerCount: preview.pluginMcpServerCount,
-  warnings: preview.warnings,
-});
-
-const toCodexResult = (result: CodexImportResult): ImportResult => ({
-  ...toCodexPreview(result),
-  importedMcpServers: result.importedMcpServers,
-  importedProjectMcpServers: result.importedProjectMcpServers,
-  importedSkills: result.importedSkills,
-  importedPrompts: result.importedPrompts,
-  importedPlugins: result.importedPlugins,
-});
+const toImportPreview = (discovery: ImportDiscovery, provider: ImportProvider): ImportPreview => {
+  const source = discovery.sources.find((item) => item.provider === provider);
+  if (!source) {
+    throw new Error(`Import source not found: ${provider}`);
+  }
+  const candidates = discovery.candidates.filter((candidate) =>
+    candidate.sources.some((origin) => origin.provider === provider)
+  );
+  return {
+    source,
+    candidates,
+    mcpServerCount: candidates.filter((candidate) => candidate.type === "mcp" && candidate.scope === "global").length,
+    projectMcpServerCount: candidates.filter((candidate) => candidate.type === "mcp" && candidate.scope === "project").length,
+    skillCount: candidates.filter((candidate) => candidate.type === "skill").length,
+    promptCount: candidates.filter((candidate) =>
+      candidate.type === "prompt" || candidate.type === "command" || candidate.type === "agent"
+    ).length,
+    pluginCount: candidates.filter((candidate) => candidate.type === "plugin").length,
+    pluginMcpServerCount: candidates.filter((candidate) =>
+      candidate.type === "mcp" && candidate.sources.some((origin) => origin.provider === "codex")
+    ).length,
+  };
+};
 
 function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Element {
   const { t } = useI18n();
   const [preview, setPreview] = useState<ImportPreview | null>(null);
-  const [lastResult, setLastResult] = useState<ImportResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [isImporting, setIsImporting] = useState(false);
-  const [status, setStatus] = useState("");
   const [error, setError] = useState("");
 
   const loadPreview = useCallback(async (): Promise<void> => {
@@ -137,38 +102,7 @@ function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Elem
     void loadPreview();
   }, [loadPreview]);
 
-  const handleImport = async (): Promise<void> => {
-    setIsImporting(true);
-    setError("");
-    setStatus("");
-    try {
-      const result = await source.import();
-      setPreview(result);
-      setLastResult(result);
-      setStatus(
-        t("settings.importSourceSuccess", {
-          defaultValue: "Imported {{mcp}} MCP servers, {{skills}} Skills, and {{prompts}} prompts.",
-          values: {
-            mcp: result.importedMcpServers + result.importedProjectMcpServers,
-            skills: result.importedSkills,
-            prompts: result.importedPrompts,
-          },
-        })
-      );
-    } catch (importError) {
-      setError(
-        importError instanceof Error
-          ? importError.message
-          : t("settings.importSourceError", {
-              defaultValue: "Failed to import configuration",
-            })
-      );
-    } finally {
-      setIsImporting(false);
-    }
-  };
-
-  const isBusy = isLoading || isImporting;
+  const isBusy = isLoading;
   const summaryItems: SummaryItem[] = preview
     ? [
         {
@@ -188,7 +122,7 @@ function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Elem
           label: t("settings.importSkills", { defaultValue: "Skills" }),
           value: String(preview.skillCount),
           detail: t("settings.importSkillDetail", {
-            defaultValue: "Copied to Snow Skills",
+            defaultValue: "Read-only candidates",
           }),
         },
         {
@@ -199,14 +133,14 @@ function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Elem
             defaultValue: "Instructions, commands, and agents",
           }),
         },
-        preview.pluginCount !== undefined
+        preview.pluginCount > 0
           ? {
               icon: Puzzle,
               label: t("settings.importPlugins", { defaultValue: "Plugins" }),
               value: String(preview.pluginCount),
               detail: t("settings.importPluginDetail", {
                 defaultValue: "{{count}} Plugin MCP servers",
-                values: { count: preview.pluginMcpServerCount ?? 0 },
+                values: { count: preview.pluginMcpServerCount },
               }),
             }
           : {
@@ -214,19 +148,19 @@ function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Elem
               label: t("settings.importProjectConfigs", {
                 defaultValue: "Project configuration",
               }),
-              value: String(preview.projectConfigCount),
+              value: String(preview.source.projectConfigCount),
               detail: t("settings.importProjectConfigDetail", {
                 defaultValue: "Registered local projects",
               }),
             },
       ]
     : [];
-  const instructionSummary = preview?.instructionPaths.length
-    ? preview.instructionPaths.length === 1
-      ? preview.instructionPaths[0].path
+  const instructionSummary = preview?.source.instructionPaths.length
+    ? preview.source.instructionPaths.length === 1
+      ? preview.source.instructionPaths[0].path
       : t("settings.importInstructionCount", {
           defaultValue: "{{count}} instruction files",
-          values: { count: preview.instructionPaths.length },
+          values: { count: preview.source.instructionPaths.length },
         })
     : "-";
 
@@ -235,37 +169,22 @@ function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Elem
       <div className="api-settings-actions import-settings-actions">
         <button
           className="api-settings-action-btn primary"
-          onClick={() => void handleImport()}
-          type="button"
-          disabled={isBusy}
-        >
-          {isImporting ? <Loader2 size={15} className="spin" /> : <Download size={15} />}
-          <span>
-            {t("settings.importSource", {
-              defaultValue: "Import {{source}} configuration",
-              values: { source: source.label },
-            })}
-          </span>
-        </button>
-        <button
-          className="api-settings-action-btn secondary"
           onClick={() => void loadPreview()}
           type="button"
           disabled={isBusy}
-          aria-label={t("settings.importRefresh", { defaultValue: "Refresh preview" })}
-          title={t("settings.importRefresh", { defaultValue: "Refresh preview" })}
         >
           {isLoading ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}
-          <span>{t("settings.importRefresh", { defaultValue: "Refresh preview" })}</span>
+          <span>
+            {t("settings.importRefresh", { defaultValue: "Refresh discovery" })}
+          </span>
         </button>
       </div>
 
       <AutoDismissNotice
-        message={error || status}
-        tone={error ? "error" : "success"}
+        message={error}
+        tone="error"
         onDismiss={() => {
           setError("");
-          setStatus("");
         }}
       />
 
@@ -287,11 +206,11 @@ function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Elem
               <strong className="api-settings-form-section-title">
                 {t("settings.importSourceFiles", { defaultValue: "Source files" })}
               </strong>
-              <span className={preview.sourceFound ? "import-settings-found" : "import-settings-missing"}>
-                {preview.sourceFound ? (
+              <span className={preview.source.sourceFound ? "import-settings-found" : "import-settings-missing"}>
+                {preview.source.sourceFound ? (
                   <CheckCircle2 size={13} aria-hidden="true" />
                 ) : null}
-                {preview.sourceFound
+                {preview.source.sourceFound
                   ? t("settings.importSourceFound", { defaultValue: "Source found" })
                   : t("settings.importSourceMissing", { defaultValue: "Source not found" })}
               </span>
@@ -300,9 +219,9 @@ function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Elem
               <div className="import-settings-path-row">
                 <FolderOpen size={14} aria-hidden="true" />
                 <span>{t("settings.importSourceDirectory", { defaultValue: "Source directory" })}</span>
-                <code title={preview.sourceHome}>{preview.sourceHome}</code>
+                <code title={preview.source.sourceHome}>{preview.source.sourceHome}</code>
               </div>
-              {preview.configPaths.map((path) => (
+              {preview.source.configPaths.map((path) => (
                 <div className="import-settings-path-row" key={path.path}>
                   <FileCode2 size={14} aria-hidden="true" />
                   <span>{path.label}</span>
@@ -317,35 +236,19 @@ function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Elem
             </div>
           </section>
 
-          {preview.warnings.length > 0 && (
+          {preview.source.warnings.length > 0 && (
             <section className="api-settings-form-section import-settings-warnings">
               <strong className="api-settings-form-section-title">
                 {t("settings.importWarnings", { defaultValue: "Warnings" })}
               </strong>
               <ul>
-                {preview.warnings.map((warning, index) => (
+                {preview.source.warnings.map((warning, index) => (
                   <li key={`${warning}-${index}`}>
                     <AlertTriangle size={14} aria-hidden="true" />
                     <span>{warning}</span>
                   </li>
                 ))}
               </ul>
-            </section>
-          )}
-
-          {lastResult && (
-            <section className="import-settings-result" role="status">
-              <CheckCircle2 size={15} aria-hidden="true" />
-              <span>
-                {t("settings.importLastResult", {
-                  defaultValue: "Last import: {{mcp}} MCP, {{skills}} Skills, {{prompts}} prompts",
-                  values: {
-                    mcp: lastResult.importedMcpServers + lastResult.importedProjectMcpServers,
-                    skills: lastResult.importedSkills,
-                    prompts: lastResult.importedPrompts,
-                  },
-                })}
-              </span>
             </section>
           )}
         </>
@@ -364,8 +267,7 @@ export function ImportSettingsPanel({ onClose }: ImportSettingsPanelProps): Reac
       description: t("settings.importCodexDescription", {
         defaultValue: "MCP, Skills, Plugins, and prompts from Codex.",
       }),
-      preview: async () => toCodexPreview(await window.snow.previewCodexImport()),
-      import: async () => toCodexResult(await window.snow.importCodex()),
+      preview: async () => toImportPreview(await window.snow.discoverImportCandidates(), "codex"),
     },
     {
       id: "claude-code",
@@ -373,8 +275,7 @@ export function ImportSettingsPanel({ onClose }: ImportSettingsPanelProps): Reac
       description: t("settings.importClaudeCodeDescription", {
         defaultValue: "MCP, Skills, CLAUDE.md, rules, and commands from Claude Code.",
       }),
-      preview: async () => toImportPreview(await window.snow.previewClaudeCodeImport()),
-      import: async () => toImportResult(await window.snow.importClaudeCode()),
+      preview: async () => toImportPreview(await window.snow.discoverImportCandidates(), "claude-code"),
     },
     {
       id: "opencode",
@@ -382,8 +283,7 @@ export function ImportSettingsPanel({ onClose }: ImportSettingsPanelProps): Reac
       description: t("settings.importOpenCodeDescription", {
         defaultValue: "MCP, Skills, instructions, commands, and agents from OpenCode.",
       }),
-      preview: async () => toImportPreview(await window.snow.previewOpenCodeImport()),
-      import: async () => toImportResult(await window.snow.importOpenCode()),
+      preview: async () => toImportPreview(await window.snow.discoverImportCandidates(), "opencode"),
     },
   ];
   const source = sources.find((item) => item.id === activeSource) ?? sources[0];

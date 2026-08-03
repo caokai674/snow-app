@@ -2,9 +2,12 @@ import { ipcRenderer } from "electron";
 import type {
   ExternalImportPreview,
   ExternalImportResult,
+  ImportDiscovery,
 } from "../types/importConfig";
 
 export const importConfigApi = {
+  discoverImportCandidates: (): Promise<ImportDiscovery> =>
+    ipcRenderer.invoke("import-config:discover"),
   previewClaudeCodeImport: (): Promise<ExternalImportPreview> =>
     ipcRenderer.invoke("import-config:preview-claude-code"),
   importClaudeCode: (): Promise<ExternalImportResult> =>

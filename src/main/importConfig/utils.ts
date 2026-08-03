@@ -1,14 +1,11 @@
 import {
-  cpSync,
   existsSync,
-  mkdirSync,
   readdirSync,
   readFileSync,
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import type {
   McpServerConfigInput,
-  NativeBridge,
   SystemPromptItemInput,
 } from "../native/types";
 import { isRecord, toBoolean } from "../utils/value";
@@ -19,11 +16,6 @@ export type ImportedMcp = {
   scope: ImportScope;
   projectId?: string;
   input: McpServerConfigInput;
-};
-
-export type SkillCopy = {
-  sourceDir: string;
-  destinationDir: string;
 };
 
 export const asStringArray = (value: unknown): string[] =>
@@ -234,16 +226,6 @@ export const walkFiles = (
 export const collectSkillDirectories = (root: string): string[] =>
   walkFiles(root, (filePath) => filePath.endsWith(`${sep}SKILL.md`)).map(dirname);
 
-export const copySkills = (skills: SkillCopy[]): number => {
-  let copied = 0;
-  for (const skill of skills) {
-    mkdirSync(dirname(skill.destinationDir), { recursive: true });
-    cpSync(skill.sourceDir, skill.destinationDir, { recursive: true, force: true });
-    copied += 1;
-  }
-  return copied;
-};
-
 export const createPrompt = (
   promptId: string,
   name: string,
@@ -293,80 +275,8 @@ export const createMcpInput = (input: {
   };
 };
 
-export const persistImportedMcpServers = async (
-  native: NativeBridge,
-  source: string,
-  servers: ImportedMcp[],
-  globalSourceFound: boolean,
-  projectSourceIds: Set<string>
-): Promise<{ global: number; project: number }> => {
-  const globalServers = servers.filter((server) => server.scope === "global");
-  const projectServers = servers.filter(
-    (server) => server.scope === "project" && server.projectId
-  );
-
-  for (const server of globalServers) {
-    await native.upsertMcpServerConfig(server.input);
-  }
-  if (globalSourceFound) {
-    const nextIds = new Set(globalServers.map((server) => server.input.serverId));
-    const existing = await native.listMcpServerConfigs();
-    for (const server of existing) {
-      if (server.source === source && !nextIds.has(server.serverId)) {
-        await native.deleteMcpServerConfig(server.serverId);
-      }
-    }
-  }
-
-  for (const projectId of projectSourceIds) {
-    const scoped = projectServers.filter((server) => server.projectId === projectId);
-    for (const server of scoped) {
-      await native.upsertProjectMcpServerConfig(projectId, server.input);
-    }
-    const nextIds = new Set(scoped.map((server) => server.input.serverId));
-    const existing = await native.listProjectMcpServerConfigs(projectId);
-    for (const server of existing) {
-      if (server.source === source && !nextIds.has(server.serverId)) {
-        await native.deleteProjectMcpServerConfig(projectId, server.serverId);
-      }
-    }
-  }
-
-  return { global: globalServers.length, project: projectServers.length };
-};
-
-export const persistImportedPrompts = async (
-  native: NativeBridge,
-  sourcePrefix: string,
-  prompts: SystemPromptItemInput[],
-  sourceFound: boolean
-): Promise<void> => {
-  if (!sourceFound) {
-    return;
-  }
-  const nextIds = new Set(prompts.map((prompt) => prompt.promptId));
-  const existing = await native.listSystemPrompts();
-  for (const prompt of existing) {
-    if (prompt.promptId.startsWith(sourcePrefix) && !nextIds.has(prompt.promptId)) {
-      await native.deleteSystemPrompt(prompt.promptId);
-    }
-  }
-  for (const prompt of prompts) {
-    await native.upsertSystemPrompt(prompt);
-  }
-};
-
 export const projectPathMatches = (path: string, candidate: string): boolean =>
   path === candidate || path.startsWith(`${candidate}${sep}`);
 
 export const uniquePaths = (paths: string[]): string[] =>
   [...new Set(paths.map((path) => path.trim()).filter(Boolean))];
-
-export const destinationForSkill = (
-  sourceRoot: string,
-  sourceDir: string,
-  destinationRoot: string
-): string => {
-  const path = relative(sourceRoot, sourceDir);
-  return path ? join(destinationRoot, path) : destinationRoot;
-};

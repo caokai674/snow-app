@@ -8,8 +8,10 @@ import {
   importOpenCode,
   previewOpenCodeImport,
 } from "../../importConfig/openCodeImporter";
+import { discoverAllImportCandidates } from "../../importConfig/unifiedDiscovery";
 
 export const registerImportConfigHandlers = (native: NativeBridge): void => {
+  ipcMain.handle("import-config:discover", () => discoverAllImportCandidates(native));
   ipcMain.handle("import-config:preview-claude-code", () =>
     previewClaudeCodeImport(native)
   );

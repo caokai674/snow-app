@@ -6,32 +6,33 @@ import type {
   SystemPromptItemInput,
   WorkspaceDirectoryRecord,
 } from "../native/types";
-import { SNOW_CLI_CONFIG_DIR } from "../snowCli/paths";
 import { isRecord } from "../utils/value";
-import type { ExternalImportPreview, ExternalImportResult } from "./types";
 import {
   asStringArray,
   asStringRecord,
   collectSkillDirectories,
-  copySkills,
   createMcpInput,
   createPrompt,
-  destinationForSkill,
   nonEmptyString,
-  persistImportedMcpServers,
-  persistImportedPrompts,
   projectPathMatches,
   readJson,
   readText,
   safeSegment,
   type ImportedMcp,
-  type SkillCopy,
   uniquePaths,
   walkFiles,
 } from "./utils";
+import {
+  buildImportDiscovery,
+  hashImportPath,
+  hashImportValue,
+  skillLogicalId,
+  type ImportCandidateInput,
+  type ImportSourceDiscovery,
+} from "./discovery";
+import type { ImportSource, ReadonlyImportResult } from "../../shared/importDiscovery";
 
 const SOURCE = "claude-code";
-const SOURCE_PREFIX = `${SOURCE}:`;
 
 type ConfigSource = {
   scope: "global" | "project";
@@ -42,12 +43,17 @@ type ConfigSource = {
 };
 
 type ImportContext = {
-  preview: ExternalImportPreview;
+  source: ImportSource;
   mcpServers: ImportedMcp[];
   prompts: SystemPromptItemInput[];
-  skills: SkillCopy[];
-  globalMcpSourceFound: boolean;
-  projectMcpSourceIds: Set<string>;
+  skills: DiscoveredSkill[];
+};
+
+type DiscoveredSkill = {
+  sourceDir: string;
+  scope: "global" | "project";
+  projectId?: string;
+  projectRoot?: string;
 };
 
 const getClaudeHome = (): string => {
@@ -279,27 +285,32 @@ const collectPrompts = (
 const collectSkills = (
   claudeHome: string,
   projects: WorkspaceDirectoryRecord[]
-): SkillCopy[] => {
-  const copies: SkillCopy[] = [];
-  const destinations = new Set<string>();
-  const addRoot = (sourceRoot: string, destinationRoot: string): void => {
+): DiscoveredSkill[] => {
+  const skills: DiscoveredSkill[] = [];
+  const sourcePaths = new Set<string>();
+  const addRoot = (
+    sourceRoot: string,
+    scope: "global" | "project",
+    project?: WorkspaceDirectoryRecord
+  ): void => {
     for (const sourceDir of collectSkillDirectories(sourceRoot)) {
-      const destinationDir = destinationForSkill(sourceRoot, sourceDir, destinationRoot);
-      if (destinations.has(destinationDir)) {
+      const key = resolve(sourceDir);
+      if (sourcePaths.has(key)) {
         continue;
       }
-      destinations.add(destinationDir);
-      copies.push({ sourceDir, destinationDir });
+      sourcePaths.add(key);
+      skills.push({
+        sourceDir,
+        scope,
+        ...(project ? { projectId: project.directoryId, projectRoot: project.path } : {}),
+      });
     }
   };
-  addRoot(join(claudeHome, "skills"), join(SNOW_CLI_CONFIG_DIR, "skills", SOURCE));
+  addRoot(join(claudeHome, "skills"), "global");
   for (const project of projects.filter((item) => item.kind === "local")) {
-    addRoot(
-      join(project.path, ".claude", "skills"),
-      join(project.path, ".snow", "skills", SOURCE)
-    );
+    addRoot(join(project.path, ".claude", "skills"), "project", project);
   }
-  return copies;
+  return skills;
 };
 
 const buildContext = async (native: NativeBridge): Promise<ImportContext> => {
@@ -319,7 +330,8 @@ const buildContext = async (native: NativeBridge): Promise<ImportContext> => {
     { label: "User configuration", path: claudeJsonPath, found: existsSync(claudeJsonPath) },
     { label: "User settings", path: join(claudeHome, "settings.json"), found: existsSync(join(claudeHome, "settings.json")) },
   ];
-  const preview: ExternalImportPreview = {
+  const source: ImportSource = {
+    provider: SOURCE,
     sourceHome: claudeHome,
     sourceFound: existsSync(claudeHome) || existsSync(claudeJsonPath),
     configPaths,
@@ -329,55 +341,70 @@ const buildContext = async (native: NativeBridge): Promise<ImportContext> => {
       found: true,
     })),
     projectConfigCount: sources.filter((source) => source.scope === "project").length,
-    mcpServerCount: mcp.servers.filter((server) => server.scope === "global").length,
-    projectMcpServerCount: mcp.servers.filter((server) => server.scope === "project").length,
-    skillCount: skills.length,
-    promptCount: promptData.prompts.length,
     warnings,
   };
-  if (!preview.sourceFound) {
+  if (!source.sourceFound) {
     warnings.push(`Claude Code configuration not found: ${claudeHome}`);
   }
   return {
-    preview,
+    source,
     mcpServers: mcp.servers,
     prompts: promptData.prompts,
     skills,
-    globalMcpSourceFound: mcp.globalFound,
-    projectMcpSourceIds: mcp.projectIds,
   };
+};
+
+export const discoverClaudeCodeImport = async (
+  native: NativeBridge
+): Promise<ImportSourceDiscovery> => {
+  const context = await buildContext(native);
+  const candidates: ImportCandidateInput[] = [
+    ...context.mcpServers.map((server) => ({
+      type: "mcp" as const,
+      provider: SOURCE,
+      scope: server.scope,
+      originPath: context.source.sourceHome,
+      logicalId: server.input.name,
+      contentHash: hashImportValue({
+        transportType: server.input.transportType,
+        url: server.input.url,
+        command: server.input.command,
+        argsJson: server.input.argsJson,
+        envJson: server.input.envJson,
+        headersJson: server.input.headersJson,
+      }),
+      ...(server.projectId ? { projectId: server.projectId } : {}),
+    })),
+    ...context.prompts.map((prompt) => ({
+      type: "prompt" as const,
+      provider: SOURCE,
+      scope: prompt.promptId.includes(":project:") ? "project" as const : "global" as const,
+      originPath: context.source.sourceHome,
+      logicalId: prompt.promptId,
+      contentHash: hashImportValue(prompt.content),
+    })),
+    ...context.skills.map((skill) => ({
+      type: "skill" as const,
+      provider: SOURCE,
+      scope: skill.scope,
+      originPath: skill.sourceDir,
+      logicalId: skillLogicalId(skill.sourceDir),
+      contentHash: hashImportPath(skill.sourceDir),
+      ...(skill.projectId ? { projectId: skill.projectId } : {}),
+      ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
+    })),
+  ];
+  return { source: context.source, candidates };
 };
 
 export const previewClaudeCodeImport = async (
   native: NativeBridge
-): Promise<ExternalImportPreview> => (await buildContext(native)).preview;
+): Promise<ReturnType<typeof buildImportDiscovery>> =>
+  buildImportDiscovery([await discoverClaudeCodeImport(native)]);
 
 export const importClaudeCode = async (
   native: NativeBridge
-): Promise<ExternalImportResult> => {
-  const context = await buildContext(native);
-  const mcpCounts = await persistImportedMcpServers(
-    native,
-    SOURCE,
-    context.mcpServers,
-    context.globalMcpSourceFound,
-    context.projectMcpSourceIds
-  );
-  await persistImportedPrompts(native, SOURCE_PREFIX, context.prompts, context.preview.sourceFound);
-  let importedSkills = 0;
-  try {
-    importedSkills = copySkills(context.skills);
-  } catch (error) {
-    context.preview.warnings.push(
-      "Unable to import Claude Code Skills: " +
-        (error instanceof Error ? error.message : String(error))
-    );
-  }
-  return {
-    ...context.preview,
-    importedMcpServers: mcpCounts.global,
-    importedProjectMcpServers: mcpCounts.project,
-    importedSkills,
-    importedPrompts: context.prompts.length,
-  };
-};
+): Promise<ReadonlyImportResult> => ({
+  ...await previewClaudeCodeImport(native),
+  applied: false,
+});

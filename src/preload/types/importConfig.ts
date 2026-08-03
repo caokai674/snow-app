@@ -1,25 +1,17 @@
-export type ImportConfigPath = {
-  label: string;
-  path: string;
-  found: boolean;
-};
+export type {
+  ImportCandidate,
+  ImportCandidateOrigin,
+  ImportCandidateResult,
+  ImportCandidateResultStatus,
+  ImportCandidateStatus,
+  ImportCandidateType,
+  ImportConfigPath,
+  ImportDiscovery,
+  ImportOwnership,
+  ImportProvider,
+  ImportScope,
+  ImportSource,
+  ReadonlyImportResult,
+} from "../../shared/importDiscovery";
 
-export type ExternalImportPreview = {
-  sourceHome: string;
-  sourceFound: boolean;
-  configPaths: ImportConfigPath[];
-  instructionPaths: ImportConfigPath[];
-  projectConfigCount: number;
-  mcpServerCount: number;
-  projectMcpServerCount: number;
-  skillCount: number;
-  promptCount: number;
-  warnings: string[];
-};
-
-export type ExternalImportResult = ExternalImportPreview & {
-  importedMcpServers: number;
-  importedProjectMcpServers: number;
-  importedSkills: number;
-  importedPrompts: number;
-};
+export type { ImportDiscovery as ExternalImportPreview, ReadonlyImportResult as ExternalImportResult } from "../../shared/importDiscovery";
