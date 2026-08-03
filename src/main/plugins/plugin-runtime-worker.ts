@@ -66,7 +66,8 @@ const stop = async (): Promise<void> => {
   process.exit(0);
 };
 
-process.parentPort?.on("message", (message: StartMessage | StopMessage) => {
+process.parentPort?.on("message", (messageEvent: Electron.MessageEvent) => {
+  const message = messageEvent.data as StartMessage | StopMessage;
   if (message?.type === "start") void activate(message);
   if (message?.type === "stop") void stop();
 });

@@ -518,7 +518,7 @@ const pluginResourceFor = (
   plugin: PluginInput,
   component: PluginComponentInput
 ): ImportResourceInput | null => {
-  if (component.status !== "supported") return null;
+  if (component.status !== "supported" || component.componentType === "hook") return null;
   return {
     resourceId: `plugin:${plugin.pluginId}:${component.componentId}`,
     resourceType: component.componentType,

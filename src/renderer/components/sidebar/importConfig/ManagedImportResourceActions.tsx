@@ -3,8 +3,8 @@ import type {
   ImportResourceRecord,
   ImportResourceReleaseDisposition,
   ImportResourceSource,
-} from "../../../preload";
-import { useI18n } from "../../i18n";
+} from "../../../../preload";
+import { useI18n } from "../../../i18n";
 
 type ManagedImportResourceActionsProps = {
   resource?: ImportResourceRecord;
