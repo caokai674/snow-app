@@ -11,6 +11,7 @@ use std::{
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use crate::api::conversation::images::resolve_inline_images_from_disk;
 
@@ -195,6 +196,140 @@ pub struct ProjectMcpServerConfigRecord {
     pub sort_order: i32,
     pub source: String,
     pub updated_at: String,
+}
+
+#[napi(object)]
+pub struct ImportResourceSourceInput {
+    pub provider: String,
+    pub scope: String,
+    pub origin_path: String,
+    pub project_id: Option<String>,
+    pub content_hash: String,
+}
+
+#[napi(object)]
+pub struct ImportResourceInput {
+    pub resource_id: String,
+    pub resource_type: String,
+    pub scope: String,
+    pub project_id: Option<String>,
+    pub target_id: String,
+    pub target_path: String,
+    pub management: String,
+    pub sources: Vec<ImportResourceSourceInput>,
+}
+
+#[napi(object)]
+pub struct ImportResourceSourceRecord {
+    pub source_id: String,
+    pub provider: String,
+    pub scope: String,
+    pub origin_path: String,
+    pub project_id: Option<String>,
+    pub imported_hash: String,
+    pub current_hash: String,
+    pub last_scanned_at: String,
+}
+
+#[napi(object)]
+pub struct ImportResourceRecord {
+    pub resource_id: String,
+    pub resource_type: String,
+    pub scope: String,
+    pub project_id: Option<String>,
+    pub target_id: String,
+    pub target_path: String,
+    pub management: String,
+    pub source_count: i32,
+    pub sources: Vec<ImportResourceSourceRecord>,
+    pub updated_at: String,
+}
+
+#[napi(object)]
+pub struct ImportResourceReleaseInput {
+    pub resource_id: String,
+    pub source_id: String,
+    pub disposition: String,
+}
+
+#[napi(object)]
+pub struct ImportResourceRelease {
+    pub resource: ImportResourceRecord,
+    pub cleanup_target: bool,
+    pub remaining_source_count: i32,
+}
+
+#[napi(object)]
+pub struct PluginComponentInput {
+    pub component_id: String,
+    pub component_type: String,
+    pub logical_id: String,
+    pub target_id: String,
+    pub target_path: String,
+    pub origin_path: String,
+    pub content_hash: String,
+    pub status: String,
+    pub unsupported_reason: Option<String>,
+    pub sort_order: i32,
+}
+
+#[napi(object)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PluginRuntimeDeclaration {
+    pub entry: String,
+    pub permissions: Vec<String>,
+    pub timeout_ms: i32,
+}
+
+#[napi(object)]
+pub struct PluginInput {
+    pub plugin_id: String,
+    pub name: String,
+    pub version: String,
+    pub provider: String,
+    pub source_path: String,
+    pub manifest_path: String,
+    pub scope: String,
+    pub project_id: Option<String>,
+    pub state: String,
+    pub capabilities: Vec<String>,
+    pub runtime: Option<PluginRuntimeDeclaration>,
+    pub content_hash: String,
+    pub components: Vec<PluginComponentInput>,
+}
+
+#[napi(object)]
+pub struct PluginComponentRecord {
+    pub component_id: String,
+    pub plugin_id: String,
+    pub component_type: String,
+    pub logical_id: String,
+    pub target_id: String,
+    pub target_path: String,
+    pub origin_path: String,
+    pub content_hash: String,
+    pub status: String,
+    pub unsupported_reason: Option<String>,
+    pub sort_order: i32,
+}
+
+#[napi(object)]
+pub struct PluginRecord {
+    pub plugin_id: String,
+    pub name: String,
+    pub version: String,
+    pub provider: String,
+    pub source_path: String,
+    pub manifest_path: String,
+    pub scope: String,
+    pub project_id: Option<String>,
+    pub state: String,
+    pub capabilities: Vec<String>,
+    pub runtime: Option<PluginRuntimeDeclaration>,
+    pub content_hash: String,
+    pub imported_at: String,
+    pub updated_at: String,
+    pub components: Vec<PluginComponentRecord>,
 }
 
 #[napi(object)]
@@ -954,6 +1089,41 @@ pub fn delete_project_mcp_server_config(
         &project_id,
         &server_id,
     )
+}
+
+pub fn list_import_resources() -> Result<Vec<ImportResourceRecord>> {
+    let database_path = ensure_database_file()?;
+    services::import_resources::list_import_resources(&database_path)
+}
+
+pub fn upsert_import_resources(items: Vec<ImportResourceInput>) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    services::import_resources::upsert_import_resources(&database_path, &items)
+}
+
+pub fn release_import_resource(input: ImportResourceReleaseInput) -> Result<ImportResourceRelease> {
+    let database_path = ensure_database_file()?;
+    services::import_resources::release_import_resource(&database_path, &input)
+}
+
+pub fn list_plugins() -> Result<Vec<PluginRecord>> {
+    let database_path = ensure_database_file()?;
+    services::plugins::list_plugins(&database_path)
+}
+
+pub fn upsert_plugins(items: Vec<PluginInput>) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    services::plugins::upsert_plugins(&database_path, &items)
+}
+
+pub fn set_plugin_state(plugin_id: String, state: String) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    services::plugins::set_plugin_state(&database_path, &plugin_id, &state)
+}
+
+pub fn delete_plugin(plugin_id: String) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    services::plugins::delete_plugin(&database_path, &plugin_id)
 }
 pub fn list_sub_agent_configs() -> Result<Vec<SubAgentConfigRecord>> {
     let database_path = ensure_database_file()?;

@@ -1,3 +1,4 @@
+import { app } from "electron";
 import type { NativeBridge } from "../native/types";
 import { registerPtyHandlers } from "../pty/registerPtyHandlers";
 import { registerNativeHandlers } from "./handlers/nativeHandlers";
@@ -14,8 +15,11 @@ import { registerMemoHandlers } from "./handlers/memoHandlers";
 import { registerPersonalizationHandlers } from "./handlers/personalizationHandlers";
 import { registerCodexHandlers } from "./handlers/codexHandlers";
 import { registerImportConfigHandlers } from "./handlers/importConfigHandlers";
+import { PluginRuntimeManager } from "../plugins/pluginRuntimeManager";
 
 export const registerIpcHandlers = (native: NativeBridge): void => {
+  const pluginRuntime = new PluginRuntimeManager();
+  app.once("before-quit", () => pluginRuntime.stopAll());
   registerPtyHandlers();
 
   registerNativeHandlers(native);
@@ -31,5 +35,5 @@ export const registerIpcHandlers = (native: NativeBridge): void => {
   registerMemoHandlers(native);
   registerPersonalizationHandlers();
   registerCodexHandlers(native);
-  registerImportConfigHandlers(native);
+  registerImportConfigHandlers(native, pluginRuntime);
 };

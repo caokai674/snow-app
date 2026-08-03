@@ -31,6 +31,12 @@ import {
   type ImportSourceDiscovery,
 } from "./discovery";
 import type { ImportSource, ReadonlyImportResult } from "../../shared/importDiscovery";
+import {
+  selectionForInput,
+  skillDestination,
+  type ResolvedImportAction,
+  type SelectedImportCandidate,
+} from "./selectedImport";
 
 const SOURCE: "claude-code" = "claude-code";
 
@@ -395,6 +401,80 @@ export const discoverClaudeCodeImport = async (
     })),
   ];
   return { source: context.source, candidates };
+};
+
+export const resolveClaudeCodeSelectedImports = async (
+  native: NativeBridge,
+  selected: SelectedImportCandidate[]
+): Promise<{ actions: ResolvedImportAction[]; warnings: string[] }> => {
+  const context = await buildContext(native);
+  const actions: ResolvedImportAction[] = [];
+  for (const server of context.mcpServers) {
+    const input: ImportCandidateInput = {
+      type: "mcp",
+      provider: SOURCE,
+      scope: server.scope,
+      originPath: context.source.sourceHome,
+      logicalId: server.input.name,
+      contentHash: hashImportValue({
+        transportType: server.input.transportType,
+        url: server.input.url,
+        command: server.input.command,
+        argsJson: server.input.argsJson,
+        envJson: server.input.envJson,
+        headersJson: server.input.headersJson,
+      }),
+      ...(server.projectId ? { projectId: server.projectId } : {}),
+    };
+    const candidate = selectionForInput(input, selected);
+    if (candidate) {
+      actions.push({
+        candidate,
+        scope: server.scope,
+        ...(server.projectId ? { projectId: server.projectId } : {}),
+        mcpInput: server.input,
+      });
+    }
+  }
+  for (const prompt of context.prompts) {
+    const input: ImportCandidateInput = {
+      type: "prompt",
+      provider: SOURCE,
+      scope: prompt.promptId.includes(":project:") ? "project" : "global",
+      originPath: context.source.sourceHome,
+      logicalId: prompt.promptId,
+      contentHash: hashImportValue(prompt.content),
+    };
+    const candidate = selectionForInput(input, selected);
+    if (candidate) {
+      actions.push({ candidate, scope: input.scope, promptInput: prompt });
+    }
+  }
+  for (const skill of context.skills) {
+    const input: ImportCandidateInput = {
+      type: "skill",
+      provider: SOURCE,
+      scope: skill.scope,
+      originPath: skill.sourceDir,
+      logicalId: skillLogicalId(skill.sourceDir),
+      contentHash: hashImportPath(skill.sourceDir),
+      ...(skill.projectId ? { projectId: skill.projectId } : {}),
+      ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
+    };
+    const candidate = selectionForInput(input, selected);
+    if (candidate) {
+      actions.push({
+        candidate,
+        scope: skill.scope,
+        ...(skill.projectId ? { projectId: skill.projectId } : {}),
+        skill: {
+          sourceDir: skill.sourceDir,
+          destinationDir: skillDestination(SOURCE, skill.sourceDir, skill.scope, skill.projectRoot),
+        },
+      });
+    }
+  }
+  return { actions, warnings: context.source.warnings };
 };
 
 export const previewClaudeCodeImport = async (

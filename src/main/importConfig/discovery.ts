@@ -14,6 +14,7 @@ import type {
   ImportScope,
   ImportSource,
 } from "../../shared/importDiscovery";
+import type { ImportResourceRecord } from "../../shared/importResources";
 
 export type ImportCandidateInput = {
   type: ImportCandidateType;
@@ -173,7 +174,10 @@ const resultFor = (candidate: ImportCandidate): ImportCandidateResult => {
   };
 };
 
-export const buildImportDiscovery = (discoveries: ImportSourceDiscovery[]): ImportDiscovery => {
+export const buildImportDiscovery = (
+  discoveries: ImportSourceDiscovery[],
+  managedResources: ImportResourceRecord[] = []
+): ImportDiscovery => {
   const inputs = discoveries
     .flatMap((discovery) => discovery.candidates)
     .map((candidate) => ({
@@ -244,6 +248,40 @@ export const buildImportDiscovery = (discoveries: ImportSourceDiscovery[]): Impo
   for (const candidate of candidates) {
     if (conflicts.has(candidate.candidateId)) {
       candidate.status = "conflict";
+      continue;
+    }
+    if (candidate.status === "unsupported" || candidate.status === "already-effective") {
+      continue;
+    }
+    const resource = managedResources.find((record) =>
+      record.resourceType === candidate.type &&
+      record.scope === candidate.scope &&
+      record.sources.some((trackedSource) => candidate.sources.some((source) =>
+        source.provider === trackedSource.provider &&
+        source.scope === trackedSource.scope &&
+        source.originPath === trackedSource.originPath &&
+        source.projectId === trackedSource.projectId
+      ))
+    );
+    if (resource) {
+      const sourceChanged = resource.sources.some((trackedSource) =>
+        candidate.sources.some((source) =>
+          source.provider === trackedSource.provider &&
+          source.scope === trackedSource.scope &&
+          source.originPath === trackedSource.originPath &&
+          source.projectId === trackedSource.projectId &&
+          trackedSource.importedHash !== candidate.contentHash
+        )
+      );
+      candidate.status = sourceChanged ? "update-available" : "managed";
+      candidate.ownership = {
+        owner: resource.sourceCount > 1
+          ? "shared"
+          : resource.management === "snapshot"
+            ? "snow"
+            : "external",
+        management: resource.management,
+      };
     }
   }
 

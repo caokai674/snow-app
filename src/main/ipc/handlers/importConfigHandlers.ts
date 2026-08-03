@@ -1,17 +1,270 @@
 import { ipcMain } from "electron";
+import { rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, relative, resolve, sep } from "node:path";
 import type { NativeBridge } from "../../native/types";
+import type {
+  ImportCommitItemResult,
+  ImportCommitSummary,
+  ImportSelection,
+} from "../../../shared/importDiscovery";
+import type {
+  ImportResourceInput,
+  ImportResourceRecord,
+  ImportResourceReleaseInput,
+} from "../../../shared/importResources";
+import { resolveCodexSelectedImports } from "../../codex/importer";
 import {
   importClaudeCode,
   previewClaudeCodeImport,
+  resolveClaudeCodeSelectedImports,
 } from "../../importConfig/claudeCodeImporter";
 import {
   importOpenCode,
   previewOpenCodeImport,
+  resolveOpenCodeSelectedImports,
 } from "../../importConfig/openCodeImporter";
+import { commitSelectedImport } from "../../importConfig/selectedImport";
 import { discoverAllImportCandidates } from "../../importConfig/unifiedDiscovery";
+import { ensureLegacyImportResourceMigration } from "../../importConfig/legacyImportMigration";
+import {
+  commitPluginImports,
+  ensureLegacyCodexPluginMigration,
+  refreshManagedPlugins,
+  removeManagedPlugin,
+  selectedPluginImports,
+  setManagedPluginEnabled,
+  updateManagedPlugin,
+} from "../../importConfig/pluginManager";
+import { PluginRuntimeManager } from "../../plugins/pluginRuntimeManager";
 
-export const registerImportConfigHandlers = (native: NativeBridge): void => {
+const resourceInputForRecord = (resource: ImportResourceRecord): ImportResourceInput => ({
+  resourceId: resource.resourceId,
+  resourceType: resource.resourceType,
+  scope: resource.scope,
+  ...(resource.projectId ? { projectId: resource.projectId } : {}),
+  targetId: resource.targetId,
+  targetPath: resource.targetPath,
+  management: resource.management,
+  sources: resource.sources.map((source) => ({
+    provider: source.provider,
+    scope: source.scope,
+    originPath: source.originPath,
+    ...(source.projectId ? { projectId: source.projectId } : {}),
+    contentHash: source.currentHash,
+  })),
+});
+
+const isWithin = (path: string, root: string): boolean => {
+  const target = resolve(path);
+  const boundary = resolve(root);
+  if (!target.startsWith(`${boundary}${sep}`)) {
+    return false;
+  }
+  return relative(boundary, target).split(sep).filter(Boolean).length >= 2;
+};
+
+const deleteManagedResourceTarget = async (
+  native: NativeBridge,
+  resource: ImportResourceRecord
+): Promise<void> => {
+  if (resource.resourceType === "skill") {
+    const roots = [join(homedir(), ".snow", "skills")];
+    if (resource.projectId) {
+      const project = (await native.listWorkspaceDirectories()).find(
+        (item) => item.directoryId === resource.projectId && item.kind === "local"
+      );
+      if (project) {
+        roots.push(join(project.path, ".snow", "skills"));
+      }
+    }
+    if (!resource.targetPath || !roots.some((root) => isWithin(resource.targetPath, root))) {
+      throw new Error("Refusing to delete a Skill outside Snow-managed skill directories");
+    }
+    rmSync(resource.targetPath, { recursive: true, force: true });
+    return;
+  }
+  if (resource.resourceType === "mcp") {
+    if (resource.scope === "project") {
+      if (!resource.projectId) {
+        throw new Error("Imported project MCP is missing its project ID");
+      }
+      await native.deleteProjectMcpServerConfig(resource.projectId, resource.targetId);
+    } else {
+      await native.deleteMcpServerConfig(resource.targetId);
+    }
+    return;
+  }
+  if (resource.resourceType === "prompt" || resource.resourceType === "command" || resource.resourceType === "agent") {
+    await native.deleteSystemPrompt(resource.targetId);
+    return;
+  }
+  throw new Error(`Imported ${resource.resourceType} resources cannot be deleted in Phase 3`);
+};
+
+const parseReleaseInput = (value: unknown): ImportResourceReleaseInput => {
+  if (!value || typeof value !== "object") {
+    throw new Error("Import resource release details are required");
+  }
+  const input = value as Partial<ImportResourceReleaseInput>;
+  if (typeof input.resourceId !== "string" || !input.resourceId.trim() ||
+      typeof input.sourceId !== "string" || !input.sourceId.trim() ||
+      (input.disposition !== "delete" && input.disposition !== "adopt")) {
+    throw new Error("Import resource release details are invalid");
+  }
+  return {
+    resourceId: input.resourceId,
+    sourceId: input.sourceId,
+    disposition: input.disposition,
+  };
+};
+
+const pluginIdFrom = (value: unknown): string => {
+  if (typeof value !== "string" || !value.trim()) throw new Error("Plugin ID is required");
+  return value;
+};
+
+const pluginStateSummary = (items: ImportCommitSummary, pluginItems: ImportCommitItemResult[]) => ({
+  selected: items.selected + pluginItems.length,
+  imported: items.imported + pluginItems.filter((item) => item.status === "imported").length,
+  unchanged: items.unchanged + pluginItems.filter((item) => item.status === "unchanged").length,
+  alreadyEffective: items.alreadyEffective + pluginItems.filter((item) => item.status === "already-effective").length,
+  unsupported: items.unsupported + pluginItems.filter((item) => item.status === "unsupported").length,
+  skipped: items.skipped + pluginItems.filter((item) => item.status === "skipped").length,
+});
+
+export const registerImportConfigHandlers = (native: NativeBridge, pluginRuntime: PluginRuntimeManager): void => {
+  const listPlugins = async () => (await native.listPlugins()).map((plugin) => ({
+    ...plugin,
+    runtimeStatus: pluginRuntime.getStatus(plugin),
+  }));
+  const getPlugin = async (pluginId: string) => {
+    const plugin = (await native.listPlugins()).find((item) => item.pluginId === pluginId);
+    if (!plugin) throw new Error("Plugin not found");
+    return plugin;
+  };
   ipcMain.handle("import-config:discover", () => discoverAllImportCandidates(native));
+  ipcMain.handle("import-config:list-managed-resources", async () => {
+    await ensureLegacyImportResourceMigration(native);
+    return native.listImportResources();
+  });
+  ipcMain.handle("plugins:list", async () => {
+    await ensureLegacyCodexPluginMigration(native);
+    return listPlugins();
+  });
+  ipcMain.handle("plugins:rescan", async () => {
+    await ensureLegacyCodexPluginMigration(native);
+    const plugins = await refreshManagedPlugins(native);
+    for (const plugin of plugins) {
+      if (plugin.state !== "enabled") pluginRuntime.stopForLifecycleChange(plugin.pluginId);
+    }
+    return plugins.map((plugin) => ({ ...plugin, runtimeStatus: pluginRuntime.getStatus(plugin) }));
+  });
+  ipcMain.handle("plugins:set-enabled", async (_event, pluginId: unknown, enabled: unknown) => {
+    await ensureLegacyCodexPluginMigration(native);
+    if (typeof enabled !== "boolean") throw new Error("Plugin enabled state is required");
+    const id = pluginIdFrom(pluginId);
+    const plugin = await getPlugin(id);
+    if (!enabled) await pluginRuntime.stop(plugin);
+    await setManagedPluginEnabled(native, id, enabled);
+  });
+  ipcMain.handle("plugins:start-runtime", async (_event, pluginId: unknown, permissions: unknown) => {
+    await ensureLegacyCodexPluginMigration(native);
+    return pluginRuntime.start(await getPlugin(pluginIdFrom(pluginId)), permissions);
+  });
+  ipcMain.handle("plugins:stop-runtime", async (_event, pluginId: unknown) => {
+    await ensureLegacyCodexPluginMigration(native);
+    return pluginRuntime.stop(await getPlugin(pluginIdFrom(pluginId)));
+  });
+  ipcMain.handle("plugins:update", async (_event, pluginId: unknown) => {
+    await ensureLegacyCodexPluginMigration(native);
+    const id = pluginIdFrom(pluginId);
+    await pluginRuntime.stop(await getPlugin(id));
+    await updateManagedPlugin(native, id);
+  });
+  ipcMain.handle("plugins:remove", async (_event, pluginId: unknown) => {
+    await ensureLegacyCodexPluginMigration(native);
+    const id = pluginIdFrom(pluginId);
+    await pluginRuntime.stop(await getPlugin(id));
+    await removeManagedPlugin(native, id);
+  });
+  ipcMain.handle("import-config:release-managed-resource", async (_event, value: unknown) => {
+    const input = parseReleaseInput(value);
+    const release = await native.releaseImportResource(input);
+    if (!release.cleanupTarget) {
+      return release;
+    }
+    try {
+      await deleteManagedResourceTarget(native, release.resource);
+      return release;
+    } catch (error) {
+      await native.upsertImportResources([resourceInputForRecord(release.resource)]);
+      throw error;
+    }
+  });
+  ipcMain.handle("import-config:commit", async (_event, value: unknown) => {
+    if (!value || typeof value !== "object" || !Array.isArray((value as Partial<ImportSelection>).candidateIds)) {
+      throw new Error("Import candidate selection is required");
+    }
+    const candidateIds = [...new Set(
+      (value as Partial<ImportSelection>).candidateIds?.filter(
+        (candidateId): candidateId is string => typeof candidateId === "string" && candidateId.trim().length > 0
+      ) ?? []
+    )];
+    if (candidateIds.length === 0) {
+      throw new Error("Select at least one import candidate");
+    }
+
+    await Promise.all([
+      ensureLegacyImportResourceMigration(native),
+      ensureLegacyCodexPluginMigration(native),
+    ]);
+    const discovery = await discoverAllImportCandidates(native);
+    const candidates = candidateIds.map((candidateId) =>
+      discovery.candidates.find((candidate) => candidate.candidateId === candidateId)
+    );
+    if (candidates.some((candidate) => !candidate)) {
+      throw new Error("Import discovery changed; refresh before committing the selection");
+    }
+    const selected = candidates.filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
+    const logicalResources = new Map<string, string>();
+    for (const candidate of selected) {
+      const resourceKey = `${candidate.type}:${candidate.scope}:${candidate.logicalId}`;
+      const previousHash = logicalResources.get(resourceKey);
+      if (previousHash && previousHash !== candidate.contentHash) {
+        throw new Error(`Select only one content variant for ${candidate.logicalId}`);
+      }
+      logicalResources.set(resourceKey, candidate.contentHash);
+    }
+
+    const regularCandidates = selected.filter((candidate) => candidate.type !== "plugin");
+    const [codex, claudeCode, openCode, plugins] = await Promise.all([
+      resolveCodexSelectedImports(native, regularCandidates),
+      resolveClaudeCodeSelectedImports(native, regularCandidates),
+      resolveOpenCodeSelectedImports(native, regularCandidates),
+      selectedPluginImports(native, selected),
+    ]);
+    const regularResult = await commitSelectedImport(
+      native,
+      regularCandidates,
+      [...codex.actions, ...claudeCode.actions, ...openCode.actions],
+      [...discovery.warnings, ...codex.warnings, ...claudeCode.warnings, ...openCode.warnings]
+    );
+    const pluginResult = await commitPluginImports(native, plugins);
+    const itemResults = [
+      ...regularResult.itemResults,
+      ...pluginResult.itemResults.map((item) => ({
+        ...item,
+        candidateId: selected.find((candidate) => candidate.type === "plugin" && candidate.logicalId === item.logicalId)?.candidateId ?? item.candidateId,
+      })),
+    ];
+    return {
+      ...regularResult,
+      itemResults,
+      summary: pluginStateSummary(regularResult.summary, pluginResult.itemResults),
+      warnings: [...regularResult.warnings, ...pluginResult.warnings],
+    };
+  });
   ipcMain.handle("import-config:preview-claude-code", () =>
     previewClaudeCodeImport(native)
   );

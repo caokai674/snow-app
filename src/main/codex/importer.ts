@@ -24,6 +24,12 @@ import {
   type ImportSourceDiscovery,
 } from "../importConfig/discovery";
 import type { ImportSource } from "../../shared/importDiscovery";
+import {
+  selectionForInput,
+  skillDestination,
+  type ResolvedImportAction,
+  type SelectedImportCandidate,
+} from "../importConfig/selectedImport";
 
 const CODEX_MCP_SOURCE = "codex";
 const CODEX_PLUGIN_MCP_SOURCE = "codex-plugin";
@@ -69,6 +75,7 @@ type DiscoveredSkill = {
   scope: ImportScope;
   projectId?: string;
   projectRoot?: string;
+  plugin?: boolean;
 };
 
 type CodexImportContext = {
@@ -596,7 +603,6 @@ const toMcpInput = (
 
 const collectMcpServers = (
   configs: ConfigSource[],
-  plugins: PluginDescriptor[],
   warnings: string[]
 ): ImportedMcp[] => {
   const servers: ImportedMcp[] = [];
@@ -610,28 +616,12 @@ const collectMcpServers = (
       }
     }
   }
-  for (const plugin of plugins.filter((item) => item.enabled)) {
-    for (const [index, [name, raw]] of Object.entries(plugin.mcpServers).entries()) {
-      const input = toMcpInput(
-        `${plugin.name}/${name}`,
-        raw,
-        `codex-plugin:${plugin.id}:${name}`,
-        CODEX_PLUGIN_MCP_SOURCE,
-        index,
-        warnings
-      );
-      if (input) {
-        servers.push({ scope: plugin.scope, projectId: plugin.projectId, input });
-      }
-    }
-  }
   return servers;
 };
 
 const collectSkillCopies = (
   codexHome: string,
-  projects: WorkspaceDirectoryRecord[],
-  plugins: PluginDescriptor[]
+  projects: WorkspaceDirectoryRecord[]
 ): DiscoveredSkill[] => {
   const skills: DiscoveredSkill[] = [];
   const sourcePaths = new Set<string>();
@@ -639,7 +629,8 @@ const collectSkillCopies = (
     sourceDir: string,
     scope: ImportScope,
     projectId?: string,
-    projectRoot?: string
+    projectRoot?: string,
+    plugin = false
   ): void => {
     const key = resolve(sourceDir);
     if (sourcePaths.has(key)) {
@@ -651,6 +642,7 @@ const collectSkillCopies = (
       scope,
       ...(projectId ? { projectId } : {}),
       ...(projectRoot ? { projectRoot } : {}),
+      ...(plugin ? { plugin: true } : {}),
     });
   };
   const globalSkillRoots = [
@@ -670,13 +662,6 @@ const collectSkillCopies = (
       }
     }
   }
-  for (const plugin of plugins.filter((item) => item.enabled)) {
-    for (const skillRoot of plugin.skillRoots) {
-      for (const skillDir of collectSkillDirectories(skillRoot)) {
-        addSkill(skillDir, plugin.scope, plugin.projectId, plugin.projectRoot);
-      }
-    }
-  }
   return skills;
 };
 
@@ -685,9 +670,9 @@ const buildContext = async (native: NativeBridge): Promise<CodexImportContext> =
   const warnings: string[] = [];
   const { configs, projects } = await collectConfigs(native, codexHome, warnings);
   const plugins = collectPlugins(codexHome, projects, configs, warnings);
-  const mcpServers = collectMcpServers(configs, plugins, warnings);
-  const prompts = collectPrompts(codexHome, configs, projects, plugins, warnings);
-  const skills = collectSkillCopies(codexHome, projects, plugins);
+  const mcpServers = collectMcpServers(configs, warnings);
+  const prompts = collectPrompts(codexHome, configs, projects, [], warnings);
+  const skills = collectSkillCopies(codexHome, projects);
   const configPath = getCodexConfigPath();
   const globalInstructionsPath = readAgentsPrompt(codexHome)?.path ?? null;
   const source: ImportSource = {
@@ -753,18 +738,82 @@ export const discoverCodexImport = async (
       ...(skill.projectId ? { projectId: skill.projectId } : {}),
       ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
     })),
-    ...context.plugins.map((plugin) => ({
-      type: "plugin" as const,
-      provider: "codex" as const,
-      scope: plugin.scope,
-      originPath: plugin.manifestPath,
-      logicalId: plugin.id,
-      contentHash: hashImportPath(plugin.manifestPath),
-      ...(plugin.projectId ? { projectId: plugin.projectId } : {}),
-      ...(plugin.projectRoot ? { projectRoot: plugin.projectRoot } : {}),
-    })),
   ];
   return { source: context.source, candidates };
+};
+
+export const resolveCodexSelectedImports = async (
+  native: NativeBridge,
+  selected: SelectedImportCandidate[]
+): Promise<{ actions: ResolvedImportAction[]; warnings: string[] }> => {
+  const context = await buildContext(native);
+  const actions: ResolvedImportAction[] = [];
+  for (const server of context.mcpServers.filter((item) => item.input.source === CODEX_MCP_SOURCE)) {
+    const input: ImportCandidateInput = {
+      type: "mcp",
+      provider: "codex",
+      scope: server.scope,
+      originPath: context.source.sourceHome,
+      logicalId: server.input.name,
+      contentHash: hashImportValue({
+        transportType: server.input.transportType,
+        url: server.input.url,
+        command: server.input.command,
+        argsJson: server.input.argsJson,
+        envJson: server.input.envJson,
+        headersJson: server.input.headersJson,
+      }),
+      ...(server.projectId ? { projectId: server.projectId } : {}),
+    };
+    const candidate = selectionForInput(input, selected);
+    if (candidate) {
+      actions.push({
+        candidate,
+        scope: server.scope,
+        ...(server.projectId ? { projectId: server.projectId } : {}),
+        mcpInput: server.input,
+      });
+    }
+  }
+  for (const prompt of context.prompts.filter((item) => item.promptId.startsWith("codex:"))) {
+    const input: ImportCandidateInput = {
+      type: "prompt",
+      provider: "codex",
+      scope: prompt.promptId.includes(":project:") ? "project" : "global",
+      originPath: context.source.sourceHome,
+      logicalId: prompt.promptId,
+      contentHash: hashImportValue(prompt.content),
+    };
+    const candidate = selectionForInput(input, selected);
+    if (candidate) {
+      actions.push({ candidate, scope: input.scope, promptInput: prompt });
+    }
+  }
+  for (const skill of context.skills.filter((item) => !item.plugin)) {
+    const input: ImportCandidateInput = {
+      type: "skill",
+      provider: "codex",
+      scope: skill.scope,
+      originPath: skill.sourceDir,
+      logicalId: skillLogicalId(skill.sourceDir),
+      contentHash: hashImportPath(skill.sourceDir),
+      ...(skill.projectId ? { projectId: skill.projectId } : {}),
+      ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
+    };
+    const candidate = selectionForInput(input, selected);
+    if (candidate) {
+      actions.push({
+        candidate,
+        scope: skill.scope,
+        ...(skill.projectId ? { projectId: skill.projectId } : {}),
+        skill: {
+          sourceDir: skill.sourceDir,
+          destinationDir: skillDestination("codex", skill.sourceDir, skill.scope, skill.projectRoot),
+        },
+      });
+    }
+  }
+  return { actions, warnings: context.source.warnings };
 };
 
 export const previewCodexImport = async (native: NativeBridge): Promise<CodexImportPreview> =>

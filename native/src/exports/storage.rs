@@ -6,7 +6,9 @@ use crate::storage::{
     ChatConversationRecord, ChatMessagePage, ChatMessageRecord, CodebaseProjectScopeSettings,
     ConversationSearchResult,
     CustomHeaderSchemeInput, CustomHeaderSchemeRecord, HookConfigInput, HookConfigRecord,
+    ImportResourceInput, ImportResourceRecord, ImportResourceRelease, ImportResourceReleaseInput,
     McpServerConfigInput, McpServerConfigRecord, ProjectMcpServerConfigRecord,
+    PluginInput, PluginRecord,
     ProjectSensitiveCommandConfigInput, ProjectSensitiveCommandConfigRecord,
     SensitiveCommandConfigInput, SensitiveCommandConfigRecord, SensitiveCommandMatchResult,
     SubAgentConfigInput, SubAgentConfigRecord, SystemPromptItemInput, SystemPromptItemRecord,
@@ -769,6 +771,57 @@ pub async fn delete_project_mcp_server_config(
     })
     .await
     .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn list_import_resources() -> napi::Result<Vec<ImportResourceRecord>> {
+    tokio::task::spawn_blocking(crate::storage::list_import_resources)
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn upsert_import_resources(items: Vec<ImportResourceInput>) -> napi::Result<()> {
+    tokio::task::spawn_blocking(move || crate::storage::upsert_import_resources(items))
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn release_import_resource(
+    input: ImportResourceReleaseInput,
+) -> napi::Result<ImportResourceRelease> {
+    tokio::task::spawn_blocking(move || crate::storage::release_import_resource(input))
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn list_plugins() -> napi::Result<Vec<PluginRecord>> {
+    tokio::task::spawn_blocking(crate::storage::list_plugins)
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn upsert_plugins(items: Vec<PluginInput>) -> napi::Result<()> {
+    tokio::task::spawn_blocking(move || crate::storage::upsert_plugins(items))
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn set_plugin_state(plugin_id: String, state: String) -> napi::Result<()> {
+    tokio::task::spawn_blocking(move || crate::storage::set_plugin_state(plugin_id, state))
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn delete_plugin(plugin_id: String) -> napi::Result<()> {
+    tokio::task::spawn_blocking(move || crate::storage::delete_plugin(plugin_id))
+        .await
+        .map_err(map_spawn_error)?
 }
 
 #[napi]

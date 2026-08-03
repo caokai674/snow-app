@@ -313,6 +313,34 @@ export const loadNativeBridge = (): NativeBridge => {
             "Rust native bridge is required to delete project MCP server configs"
           )
         ),
+      listImportResources: () =>
+        Promise.reject(
+          new Error("Rust native bridge is required to list import resources")
+        ),
+      upsertImportResources: () =>
+        Promise.reject(
+          new Error("Rust native bridge is required to write import resources")
+        ),
+      releaseImportResource: () =>
+        Promise.reject(
+          new Error("Rust native bridge is required to release import resources")
+        ),
+      listPlugins: () =>
+        Promise.reject(
+          new Error("Rust native bridge is required to list plugins")
+        ),
+      upsertPlugins: () =>
+        Promise.reject(
+          new Error("Rust native bridge is required to write plugins")
+        ),
+      setPluginState: () =>
+        Promise.reject(
+          new Error("Rust native bridge is required to update plugins")
+        ),
+      deletePlugin: () =>
+        Promise.reject(
+          new Error("Rust native bridge is required to delete plugins")
+        ),
       listHookConfigs: () =>
         Promise.reject(
           new Error("Rust native bridge is required to list hook configs")

@@ -85,3 +85,38 @@ export type ImportDiscovery = {
 export type ReadonlyImportResult = ImportDiscovery & {
   applied: false;
 };
+
+export type ImportSelection = {
+  candidateIds: string[];
+};
+
+export type ImportCommitItemStatus =
+  | "imported"
+  | "unchanged"
+  | "already-effective"
+  | "unsupported"
+  | "skipped";
+
+export type ImportCommitItemResult = {
+  candidateId: string;
+  type: ImportCandidateType;
+  logicalId: string;
+  status: ImportCommitItemStatus;
+  message?: string;
+};
+
+export type ImportCommitSummary = {
+  selected: number;
+  imported: number;
+  unchanged: number;
+  alreadyEffective: number;
+  unsupported: number;
+  skipped: number;
+};
+
+export type ImportCommitResult = {
+  applied: true;
+  itemResults: ImportCommitItemResult[];
+  summary: ImportCommitSummary;
+  warnings: string[];
+};

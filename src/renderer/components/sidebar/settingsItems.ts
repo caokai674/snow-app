@@ -90,6 +90,13 @@ export const SETTINGS_ITEMS: SettingsItem[] = [
     view: "import-settings",
   },
   {
+    id: "plugins",
+    icon: Puzzle,
+    labelKey: "settings.pluginsSettings",
+    defaultLabel: "Plugins",
+    view: "plugins-settings",
+  },
+  {
     id: "skills",
     icon: Sparkles,
     labelKey: "settings.skillsSettings",

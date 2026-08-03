@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
   FileCode2,
   FolderOpen,
@@ -11,9 +12,11 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   ImportCandidate,
+  ImportCandidateStatus,
+  ImportCommitResult,
   ImportDiscovery,
   ImportProvider,
   ImportSource as DiscoveredImportSource,
@@ -25,24 +28,6 @@ type ImportSettingsPanelProps = {
   onClose?: () => void;
 };
 
-type ImportPreview = {
-  source: DiscoveredImportSource;
-  candidates: ImportCandidate[];
-  mcpServerCount: number;
-  projectMcpServerCount: number;
-  skillCount: number;
-  promptCount: number;
-  pluginCount: number;
-  pluginMcpServerCount: number;
-};
-
-type ImportSource = {
-  id: ImportProvider;
-  label: string;
-  description: string;
-  preview: () => Promise<ImportPreview>;
-};
-
 type SummaryItem = {
   icon: typeof Plug;
   label: string;
@@ -50,145 +35,304 @@ type SummaryItem = {
   detail: string;
 };
 
-const toImportPreview = (discovery: ImportDiscovery, provider: ImportProvider): ImportPreview => {
-  const source = discovery.sources.find((item) => item.provider === provider);
-  if (!source) {
-    throw new Error(`Import source not found: ${provider}`);
+const sourceLabels: Record<ImportProvider, string> = {
+  codex: "Codex",
+  "claude-code": "Claude Code",
+  opencode: "OpenCode",
+  snow: "Snow",
+};
+
+const statusLabel = (
+  status: ImportCandidateStatus,
+  t: ReturnType<typeof useI18n>["t"]
+): string => {
+  const labels: Record<ImportCandidateStatus, string> = {
+    new: t("settings.importStatusNew", { defaultValue: "New" }),
+    "already-effective": t("settings.importStatusAlreadyEffective", { defaultValue: "Already effective" }),
+    "update-available": t("settings.importStatusUpdate", { defaultValue: "Update available" }),
+    conflict: t("settings.importStatusConflict", { defaultValue: "Conflict" }),
+    unsupported: t("settings.importStatusUnsupported", { defaultValue: "Unsupported" }),
+    managed: t("settings.importStatusManaged", { defaultValue: "Managed" }),
+  };
+  return labels[status];
+};
+
+const candidateTypeLabel = (
+  candidate: ImportCandidate,
+  t: ReturnType<typeof useI18n>["t"]
+): string => {
+  const labels = {
+    mcp: t("settings.importTypeMcp", { defaultValue: "MCP" }),
+    skill: t("settings.importTypeSkill", { defaultValue: "Skill" }),
+    prompt: t("settings.importTypePrompt", { defaultValue: "Prompt" }),
+    command: t("settings.importTypeCommand", { defaultValue: "Command" }),
+    agent: t("settings.importTypeAgent", { defaultValue: "Agent" }),
+    plugin: t("settings.importTypePlugin", { defaultValue: "Plugin" }),
+  } as const;
+  return labels[candidate.type];
+};
+
+const candidateIcon = (candidate: ImportCandidate): typeof Plug => {
+  if (candidate.type === "skill") return Sparkles;
+  if (candidate.type === "prompt" || candidate.type === "command" || candidate.type === "agent") {
+    return MessageSquareText;
   }
+  if (candidate.type === "plugin") return Puzzle;
+  return Plug;
+};
+
+const isSelectable = (candidate: ImportCandidate): boolean =>
+  candidate.status === "new" ||
+  candidate.status === "update-available" ||
+  candidate.status === "conflict";
+
+const conflictKey = (candidate: ImportCandidate): string =>
+  `${candidate.type}:${candidate.scope}:${candidate.logicalId}`;
+
+const summaryFor = (
+  discovery: ImportDiscovery,
+  provider: ImportProvider,
+  t: ReturnType<typeof useI18n>["t"]
+): SummaryItem[] => {
   const candidates = discovery.candidates.filter((candidate) =>
     candidate.sources.some((origin) => origin.provider === provider)
   );
-  return {
-    source,
-    candidates,
-    mcpServerCount: candidates.filter((candidate) => candidate.type === "mcp" && candidate.scope === "global").length,
-    projectMcpServerCount: candidates.filter((candidate) => candidate.type === "mcp" && candidate.scope === "project").length,
-    skillCount: candidates.filter((candidate) => candidate.type === "skill").length,
-    promptCount: candidates.filter((candidate) =>
-      candidate.type === "prompt" || candidate.type === "command" || candidate.type === "agent"
-    ).length,
-    pluginCount: candidates.filter((candidate) => candidate.type === "plugin").length,
-    pluginMcpServerCount: candidates.filter((candidate) =>
-      candidate.type === "mcp" && candidate.sources.some((origin) => origin.provider === "codex")
-    ).length,
-  };
+  const globalMcp = candidates.filter((candidate) => candidate.type === "mcp" && candidate.scope === "global").length;
+  const projectMcp = candidates.filter((candidate) => candidate.type === "mcp" && candidate.scope === "project").length;
+  const skills = candidates.filter((candidate) => candidate.type === "skill").length;
+  const prompts = candidates.filter((candidate) =>
+    candidate.type === "prompt" || candidate.type === "command" || candidate.type === "agent"
+  ).length;
+  const plugins = candidates.filter((candidate) => candidate.type === "plugin").length;
+  return [
+    {
+      icon: Plug,
+      label: t("settings.importMcp", { defaultValue: "MCP servers" }),
+      value: String(globalMcp + projectMcp),
+      detail: t("settings.importMcpScopes", {
+        defaultValue: "{{global}} global / {{project}} project",
+        values: { global: globalMcp, project: projectMcp },
+      }),
+    },
+    {
+      icon: Sparkles,
+      label: t("settings.importSkills", { defaultValue: "Skills" }),
+      value: String(skills),
+      detail: t("settings.importSkillSelectableDetail", { defaultValue: "Selectable external Skills" }),
+    },
+    {
+      icon: MessageSquareText,
+      label: t("settings.importPrompts", { defaultValue: "Prompts" }),
+      value: String(prompts),
+      detail: t("settings.importPromptDetail", { defaultValue: "Instructions, commands, and agents" }),
+    },
+    {
+      icon: plugins > 0 ? Puzzle : FileCode2,
+      label: plugins > 0
+        ? t("settings.importPlugins", { defaultValue: "Plugins" })
+        : t("settings.importProjectConfigs", { defaultValue: "Project configuration" }),
+      value: String(plugins > 0 ? plugins : discovery.sources.find((source) => source.provider === provider)?.projectConfigCount ?? 0),
+      detail: plugins > 0
+        ? t("settings.importPluginSelectableDetail", { defaultValue: "Import managed declarative Plugins" })
+        : t("settings.importProjectConfigDetail", { defaultValue: "Registered local projects" }),
+    },
+  ];
 };
 
-function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Element {
+function CandidateRow({
+  candidate,
+  checked,
+  onToggle,
+}: {
+  candidate: ImportCandidate;
+  checked: boolean;
+  onToggle: (candidate: ImportCandidate) => void;
+}): React.JSX.Element {
   const { t } = useI18n();
-  const [preview, setPreview] = useState<ImportPreview | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const Icon = candidateIcon(candidate);
+  const selectable = isSelectable(candidate);
+  const sourceText = candidate.sources.map((source) => sourceLabels[source.provider]).join(", ");
+  const reason = candidate.unsupportedReason;
+  return (
+    <div className={`import-candidate-row ${checked ? "selected" : ""} ${!selectable ? "disabled" : ""}`}>
+      <label className="import-candidate-checkbox">
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={!selectable}
+          onChange={() => onToggle(candidate)}
+          aria-label={`${candidateTypeLabel(candidate, t)} ${candidate.logicalId}`}
+        />
+        <span aria-hidden="true" className="import-candidate-checkmark">
+          {checked ? <Check size={12} strokeWidth={2.2} /> : null}
+        </span>
+      </label>
+      <Icon size={15} aria-hidden="true" />
+      <div className="import-candidate-main">
+        <strong title={candidate.logicalId}>{candidate.logicalId}</strong>
+        <span title={candidate.originPath}>{candidate.originPath}</span>
+        <small>{sourceText}</small>
+      </div>
+      <span className={`import-candidate-status import-candidate-status-${candidate.status}`}>
+        {statusLabel(candidate.status, t)}
+      </span>
+      {reason ? <span className="import-candidate-reason">{reason}</span> : null}
+    </div>
+  );
+}
+
+export function ImportSettingsPanel({ onClose }: ImportSettingsPanelProps): React.JSX.Element {
+  const { t } = useI18n();
+  const [activeSource, setActiveSource] = useState<ImportProvider>("codex");
+  const [discovery, setDiscovery] = useState<ImportDiscovery | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [lastResult, setLastResult] = useState<ImportCommitResult | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isCommitting, setIsCommitting] = useState(false);
   const [error, setError] = useState("");
 
-  const loadPreview = useCallback(async (): Promise<void> => {
+  const loadDiscovery = useCallback(async (): Promise<void> => {
     setIsLoading(true);
     setError("");
+    setLastResult(null);
     try {
-      setPreview(await source.preview());
+      const next = await window.snow.discoverImportCandidates();
+      setDiscovery(next);
+      setSelectedIds(new Set());
     } catch (loadError) {
-      setError(
-        loadError instanceof Error
-          ? loadError.message
-          : t("settings.importPreviewError", {
-              defaultValue: "Failed to inspect import configuration",
-            })
-      );
+      setError(loadError instanceof Error ? loadError.message : t("settings.importPreviewError", {
+        defaultValue: "Failed to inspect import configuration",
+      }));
     } finally {
       setIsLoading(false);
     }
-  }, [source, t]);
+  }, [t]);
 
   useEffect(() => {
-    void loadPreview();
-  }, [loadPreview]);
+    void loadDiscovery();
+  }, [loadDiscovery]);
 
-  const isBusy = isLoading;
-  const summaryItems: SummaryItem[] = preview
-    ? [
-        {
-          icon: Plug,
-          label: t("settings.importMcp", { defaultValue: "MCP servers" }),
-          value: String(preview.mcpServerCount + preview.projectMcpServerCount),
-          detail: t("settings.importMcpScopes", {
-            defaultValue: "{{global}} global / {{project}} project",
-            values: {
-              global: preview.mcpServerCount,
-              project: preview.projectMcpServerCount,
-            },
-          }),
-        },
-        {
-          icon: Sparkles,
-          label: t("settings.importSkills", { defaultValue: "Skills" }),
-          value: String(preview.skillCount),
-          detail: t("settings.importSkillDetail", {
-            defaultValue: "Read-only candidates",
-          }),
-        },
-        {
-          icon: MessageSquareText,
-          label: t("settings.importPrompts", { defaultValue: "Prompts" }),
-          value: String(preview.promptCount),
-          detail: t("settings.importPromptDetail", {
-            defaultValue: "Instructions, commands, and agents",
-          }),
-        },
-        preview.pluginCount > 0
-          ? {
-              icon: Puzzle,
-              label: t("settings.importPlugins", { defaultValue: "Plugins" }),
-              value: String(preview.pluginCount),
-              detail: t("settings.importPluginDetail", {
-                defaultValue: "{{count}} Plugin MCP servers",
-                values: { count: preview.pluginMcpServerCount },
-              }),
-            }
-          : {
-              icon: FileCode2,
-              label: t("settings.importProjectConfigs", {
-                defaultValue: "Project configuration",
-              }),
-              value: String(preview.source.projectConfigCount),
-              detail: t("settings.importProjectConfigDetail", {
-                defaultValue: "Registered local projects",
-              }),
-            },
-      ]
-    : [];
-  const instructionSummary = preview?.source.instructionPaths.length
-    ? preview.source.instructionPaths.length === 1
-      ? preview.source.instructionPaths[0].path
-      : t("settings.importInstructionCount", {
-          defaultValue: "{{count}} instruction files",
-          values: { count: preview.source.instructionPaths.length },
-        })
-    : "-";
+  const visibleCandidates = useMemo(() => {
+    if (!discovery) return [];
+    return discovery.candidates
+      .filter((candidate) => candidate.sources.some((origin) => origin.provider === activeSource))
+      .sort((left, right) => {
+        const typeOrder = ["plugin", "skill", "mcp", "prompt", "command", "agent"];
+        return typeOrder.indexOf(left.type) - typeOrder.indexOf(right.type) || left.logicalId.localeCompare(right.logicalId);
+      });
+  }, [activeSource, discovery]);
+
+  const selectedCandidates = useMemo(() =>
+    discovery?.candidates.filter((candidate) => selectedIds.has(candidate.candidateId)) ?? [],
+  [discovery, selectedIds]);
+
+  const toggleCandidate = (candidate: ImportCandidate): void => {
+    if (!isSelectable(candidate)) return;
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(candidate.candidateId)) {
+        next.delete(candidate.candidateId);
+      } else {
+        for (const other of discovery?.candidates ?? []) {
+          if (other.candidateId !== candidate.candidateId && other.status === "conflict" && conflictKey(other) === conflictKey(candidate)) {
+            next.delete(other.candidateId);
+          }
+        }
+        next.add(candidate.candidateId);
+      }
+      return next;
+    });
+  };
+
+  const commit = async (): Promise<void> => {
+    if (selectedIds.size === 0 || isCommitting) return;
+    setIsCommitting(true);
+    setError("");
+    try {
+      const result = await window.snow.commitImportSelection({ candidateIds: [...selectedIds] });
+      setLastResult(result);
+      setSelectedIds(new Set());
+      const refreshed = await window.snow.discoverImportCandidates();
+      setDiscovery(refreshed);
+    } catch (commitError) {
+      setError(commitError instanceof Error ? commitError.message : t("settings.importSourceError", {
+        defaultValue: "Failed to import configuration",
+      }));
+    } finally {
+      setIsCommitting(false);
+    }
+  };
+
+  const source = discovery?.sources.find((item) => item.provider === activeSource);
+  const summaryItems = discovery ? summaryFor(discovery, activeSource, t) : [];
+  const selectedCount = selectedCandidates.length;
+  const sourceDescription = activeSource === "codex"
+    ? t("settings.importCodexDescription", { defaultValue: "MCP, Skills, Plugins, and prompts from Codex." })
+    : activeSource === "claude-code"
+      ? t("settings.importClaudeCodeDescription", { defaultValue: "MCP, Skills, CLAUDE.md, rules, and commands from Claude Code." })
+      : t("settings.importOpenCodeDescription", { defaultValue: "MCP, Skills, instructions, commands, and agents from OpenCode." });
 
   return (
-    <div className="import-settings-source-panel" role="tabpanel" id={`import-source-${source.id}`}>
+    <div className="api-settings-page import-settings-page" role="region">
+      <div className="api-settings-page-header">
+        <div className="api-settings-title-group">
+          <strong>{t("settings.importSettings", { defaultValue: "Import configuration" })}</strong>
+          <span className="settings-item-description">{sourceDescription}</span>
+        </div>
+        {onClose ? (
+          <button
+            className="icon-btn ghost"
+            onClick={onClose}
+            type="button"
+            aria-label={t("settings.closeImportSettings", { defaultValue: "Close import settings" })}
+            title={t("settings.closeImportSettings", { defaultValue: "Close import settings" })}
+          >
+            <X size={15} strokeWidth={1.8} />
+          </button>
+        ) : null}
+      </div>
+
+      <div className="import-settings-tabs" role="tablist" aria-label={t("settings.importSettings", { defaultValue: "Import configuration" })}>
+        {(["codex", "claude-code", "opencode"] as const).map((provider) => (
+          <button
+            key={provider}
+            className={`import-settings-tab ${provider === activeSource ? "active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={provider === activeSource}
+            onClick={() => setActiveSource(provider)}
+          >
+            {sourceLabels[provider]}
+          </button>
+        ))}
+      </div>
+
       <div className="api-settings-actions import-settings-actions">
-        <button
-          className="api-settings-action-btn primary"
-          onClick={() => void loadPreview()}
-          type="button"
-          disabled={isBusy}
-        >
+        <button className="api-settings-action-btn" onClick={() => void loadDiscovery()} type="button" disabled={isLoading || isCommitting}>
           {isLoading ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}
-          <span>
-            {t("settings.importRefresh", { defaultValue: "Refresh discovery" })}
-          </span>
+          <span>{t("settings.importRefresh", { defaultValue: "Refresh discovery" })}</span>
+        </button>
+        <button className="api-settings-action-btn primary" onClick={() => void commit()} type="button" disabled={selectedCount === 0 || isCommitting || isLoading}>
+          {isCommitting ? <Loader2 size={15} className="spin" /> : <CheckCircle2 size={15} />}
+          <span>{t("settings.importCommit", { defaultValue: "Import selected" })} ({selectedCount})</span>
         </button>
       </div>
 
-      <AutoDismissNotice
-        message={error}
-        tone="error"
-        onDismiss={() => {
-          setError("");
-        }}
-      />
+      <AutoDismissNotice message={error} tone="error" onDismiss={() => setError("")} />
 
-      {preview && (
+      {lastResult ? (
+        <section className="import-settings-result" aria-live="polite">
+          <CheckCircle2 size={15} aria-hidden="true" />
+          <span>
+            {t("settings.importCommitSummary", {
+              defaultValue: "Imported {{imported}}, unchanged {{unchanged}}, skipped {{skipped}}, unsupported {{unsupported}}.",
+              values: lastResult.summary,
+            })}
+          </span>
+        </section>
+      ) : null}
+
+      {discovery ? (
         <>
           <div className="api-settings-summary-grid import-settings-summary-grid">
             {summaryItems.map(({ icon: Icon, label, value, detail }) => (
@@ -201,16 +345,35 @@ function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Elem
             ))}
           </div>
 
+          <section className="api-settings-form-section import-settings-candidates">
+            <div className="api-settings-form-section-header">
+              <strong className="api-settings-form-section-title">{t("settings.importCandidates", { defaultValue: "Candidates" })}</strong>
+              <span className="settings-item-description">
+                {t("settings.importSelectedCount", { defaultValue: "{{count}} selected", values: { count: selectedCount } })}
+              </span>
+            </div>
+            {visibleCandidates.length > 0 ? (
+              <div className="import-candidate-list">
+                {visibleCandidates.map((candidate) => (
+                  <CandidateRow
+                    key={candidate.candidateId}
+                    candidate={candidate}
+                    checked={selectedIds.has(candidate.candidateId)}
+                    onToggle={toggleCandidate}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="settings-empty-state">{t("settings.importNoCandidates", { defaultValue: "No import candidates found." })}</div>
+            )}
+          </section>
+
           <section className="api-settings-form-section import-settings-source">
             <div className="api-settings-form-section-header">
-              <strong className="api-settings-form-section-title">
-                {t("settings.importSourceFiles", { defaultValue: "Source files" })}
-              </strong>
-              <span className={preview.source.sourceFound ? "import-settings-found" : "import-settings-missing"}>
-                {preview.source.sourceFound ? (
-                  <CheckCircle2 size={13} aria-hidden="true" />
-                ) : null}
-                {preview.source.sourceFound
+              <strong className="api-settings-form-section-title">{t("settings.importSourceFiles", { defaultValue: "Source files" })}</strong>
+              <span className={source?.sourceFound ? "import-settings-found" : "import-settings-missing"}>
+                {source?.sourceFound ? <CheckCircle2 size={13} aria-hidden="true" /> : null}
+                {source?.sourceFound
                   ? t("settings.importSourceFound", { defaultValue: "Source found" })
                   : t("settings.importSourceMissing", { defaultValue: "Source not found" })}
               </span>
@@ -219,30 +382,23 @@ function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Elem
               <div className="import-settings-path-row">
                 <FolderOpen size={14} aria-hidden="true" />
                 <span>{t("settings.importSourceDirectory", { defaultValue: "Source directory" })}</span>
-                <code title={preview.source.sourceHome}>{preview.source.sourceHome}</code>
+                <code title={source?.sourceHome}>{source?.sourceHome ?? "-"}</code>
               </div>
-              {preview.source.configPaths.map((path) => (
+              {source?.configPaths.map((path) => (
                 <div className="import-settings-path-row" key={path.path}>
                   <FileCode2 size={14} aria-hidden="true" />
                   <span>{path.label}</span>
                   <code title={path.path}>{path.path}</code>
                 </div>
               ))}
-              <div className="import-settings-path-row">
-                <MessageSquareText size={14} aria-hidden="true" />
-                <span>{t("settings.importInstructions", { defaultValue: "Instructions" })}</span>
-                <code title={instructionSummary}>{instructionSummary}</code>
-              </div>
             </div>
           </section>
 
-          {preview.source.warnings.length > 0 && (
+          {source && source.warnings.length > 0 ? (
             <section className="api-settings-form-section import-settings-warnings">
-              <strong className="api-settings-form-section-title">
-                {t("settings.importWarnings", { defaultValue: "Warnings" })}
-              </strong>
+              <strong className="api-settings-form-section-title">{t("settings.importWarnings", { defaultValue: "Warnings" })}</strong>
               <ul>
-                {preview.source.warnings.map((warning, index) => (
+                {source.warnings.map((warning, index) => (
                   <li key={`${warning}-${index}`}>
                     <AlertTriangle size={14} aria-hidden="true" />
                     <span>{warning}</span>
@@ -250,83 +406,9 @@ function ImportSourcePanel({ source }: { source: ImportSource }): React.JSX.Elem
                 ))}
               </ul>
             </section>
-          )}
+          ) : null}
         </>
-      )}
-    </div>
-  );
-}
-
-export function ImportSettingsPanel({ onClose }: ImportSettingsPanelProps): React.JSX.Element {
-  const { t } = useI18n();
-  const [activeSource, setActiveSource] = useState<ImportSource["id"]>("codex");
-  const sources: ImportSource[] = [
-    {
-      id: "codex",
-      label: "Codex",
-      description: t("settings.importCodexDescription", {
-        defaultValue: "MCP, Skills, Plugins, and prompts from Codex.",
-      }),
-      preview: async () => toImportPreview(await window.snow.discoverImportCandidates(), "codex"),
-    },
-    {
-      id: "claude-code",
-      label: "Claude Code",
-      description: t("settings.importClaudeCodeDescription", {
-        defaultValue: "MCP, Skills, CLAUDE.md, rules, and commands from Claude Code.",
-      }),
-      preview: async () => toImportPreview(await window.snow.discoverImportCandidates(), "claude-code"),
-    },
-    {
-      id: "opencode",
-      label: "OpenCode",
-      description: t("settings.importOpenCodeDescription", {
-        defaultValue: "MCP, Skills, instructions, commands, and agents from OpenCode.",
-      }),
-      preview: async () => toImportPreview(await window.snow.discoverImportCandidates(), "opencode"),
-    },
-  ];
-  const source = sources.find((item) => item.id === activeSource) ?? sources[0];
-
-  return (
-    <div className="api-settings-page import-settings-page" role="region">
-      <div className="api-settings-page-header">
-        <div className="api-settings-title-group">
-          <strong>{t("settings.importSettings", { defaultValue: "Import configuration" })}</strong>
-          <span className="settings-item-description">
-            {source.description}
-          </span>
-        </div>
-        {onClose && (
-          <button
-            className="icon-btn ghost"
-            onClick={onClose}
-            type="button"
-            aria-label={t("settings.closeImportSettings", { defaultValue: "Close import settings" })}
-            title={t("settings.closeImportSettings", { defaultValue: "Close import settings" })}
-          >
-            <X size={15} strokeWidth={1.8} />
-          </button>
-        )}
-      </div>
-
-      <div className="import-settings-tabs" role="tablist" aria-label={t("settings.importSettings", { defaultValue: "Import configuration" })}>
-        {sources.map((item) => (
-          <button
-            key={item.id}
-            className={`import-settings-tab ${item.id === source.id ? "active" : ""}`}
-            type="button"
-            role="tab"
-            aria-selected={item.id === source.id}
-            aria-controls={`import-source-${item.id}`}
-            onClick={() => setActiveSource(item.id)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-
-      <ImportSourcePanel key={source.id} source={source} />
+      ) : null}
     </div>
   );
 }

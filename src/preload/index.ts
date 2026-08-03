@@ -10,6 +10,7 @@ import { memoApi } from "./modules/memoApi";
 import { personalizationApi } from "./modules/personalizationApi";
 import { codexApi } from "./modules/codexApi";
 import { importConfigApi } from "./modules/importConfigApi";
+import { pluginsApi } from "./modules/pluginsApi";
 
 export type * from "./types";
 
@@ -27,6 +28,7 @@ const api = {
   ...personalizationApi,
   ...codexApi,
   ...importConfigApi,
+  ...pluginsApi,
 };
 
 contextBridge.exposeInMainWorld("snow", api);

@@ -14,6 +14,8 @@ pub mod git;
 pub mod git_watcher;
 pub mod gitignore;
 pub mod hooks_configs;
+pub mod import_resources;
+pub mod plugins;
 pub mod mcp_server_configs;
 pub mod project_mcp_server_configs;
 pub mod project_sensitive_command_configs;

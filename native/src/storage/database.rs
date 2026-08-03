@@ -231,6 +231,71 @@ CREATE INDEX IF NOT EXISTS idx_api_configs_active
          CREATE INDEX IF NOT EXISTS idx_mcp_server_configs_source
            ON mcp_server_configs(source);
 
+         CREATE TABLE IF NOT EXISTS import_resources (
+           resource_id TEXT PRIMARY KEY NOT NULL,
+           resource_type TEXT NOT NULL,
+           scope TEXT NOT NULL,
+           project_id TEXT,
+           target_id TEXT NOT NULL,
+           target_path TEXT NOT NULL DEFAULT '',
+           management TEXT NOT NULL DEFAULT 'snapshot',
+           created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+           updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+         );
+         CREATE INDEX IF NOT EXISTS idx_import_resources_target
+           ON import_resources(resource_type, scope, target_id);
+
+         CREATE TABLE IF NOT EXISTS import_resource_sources (
+           source_id TEXT PRIMARY KEY NOT NULL,
+           resource_id TEXT NOT NULL,
+           provider TEXT NOT NULL,
+           scope TEXT NOT NULL,
+           origin_path TEXT NOT NULL,
+           project_id TEXT,
+           imported_hash TEXT NOT NULL,
+           current_hash TEXT NOT NULL,
+           last_scanned_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+           FOREIGN KEY(resource_id) REFERENCES import_resources(resource_id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_import_resource_sources_resource
+           ON import_resource_sources(resource_id);
+
+         CREATE TABLE IF NOT EXISTS plugins (
+           plugin_id TEXT PRIMARY KEY NOT NULL,
+           name TEXT NOT NULL,
+           version TEXT NOT NULL DEFAULT '',
+           provider TEXT NOT NULL,
+           source_path TEXT NOT NULL,
+           manifest_path TEXT NOT NULL,
+           scope TEXT NOT NULL,
+           project_id TEXT,
+           state TEXT NOT NULL DEFAULT 'enabled',
+           capabilities_json TEXT NOT NULL DEFAULT '[]',
+           runtime_json TEXT NOT NULL DEFAULT 'null',
+           content_hash TEXT NOT NULL,
+           imported_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+           updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+         );
+         CREATE INDEX IF NOT EXISTS idx_plugins_provider_source
+           ON plugins(provider, source_path);
+
+         CREATE TABLE IF NOT EXISTS plugin_components (
+           component_id TEXT PRIMARY KEY NOT NULL,
+           plugin_id TEXT NOT NULL,
+           component_type TEXT NOT NULL,
+           logical_id TEXT NOT NULL,
+           target_id TEXT NOT NULL DEFAULT '',
+           target_path TEXT NOT NULL DEFAULT '',
+           origin_path TEXT NOT NULL,
+           content_hash TEXT NOT NULL,
+           status TEXT NOT NULL,
+           unsupported_reason TEXT,
+           sort_order INTEGER NOT NULL DEFAULT 0,
+           FOREIGN KEY(plugin_id) REFERENCES plugins(plugin_id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_plugin_components_plugin
+           ON plugin_components(plugin_id, sort_order);
+
          CREATE TABLE IF NOT EXISTS sub_agent_configs (
            id TEXT PRIMARY KEY NOT NULL,
            agent_id TEXT NOT NULL UNIQUE,
@@ -420,8 +485,9 @@ CREATE INDEX IF NOT EXISTS idx_api_configs_active
     // API profile binding existed. Idempotent: no-op when the column is
     // already present (fresh databases get it from CREATE TABLE above).
     migrate_chat_conversations_api_profile(connection)?;
+    migrate_plugins_runtime(connection)?;
 
-    connection.pragma_update(None, "user_version", 22)?;
+    connection.pragma_update(None, "user_version", 23)?;
 
     Ok(())
 }
@@ -442,6 +508,23 @@ fn migrate_chat_conversations_api_profile(connection: &Connection) -> rusqlite::
         connection.execute(
             "ALTER TABLE chat_conversations
                 ADD COLUMN api_profile_name TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn migrate_plugins_runtime(connection: &Connection) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(plugins)")?;
+    let mut columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    let has_runtime_column = columns.try_fold(false, |found, column| {
+        Ok::<bool, rusqlite::Error>(found || column? == "runtime_json")
+    })?;
+
+    if !has_runtime_column {
+        connection.execute(
+            "ALTER TABLE plugins ADD COLUMN runtime_json TEXT NOT NULL DEFAULT 'null'",
             [],
         )?;
     }
