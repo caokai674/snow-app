@@ -12,9 +12,9 @@ import { useI18n } from "../../i18n";
 import { ChatInput } from "./ChatInput";
 import { EmptyChatGreeting } from "./EmptyChatGreeting";
 import { ChatMessageList, useChatConversationContext } from "./chatMessages";
-import { FileChangeStatsPanel } from "./chatMessages/components/FileChangeStatsPanel";
 import { RollbackConfirmDialog } from "./chatMessages/dialogs/RollbackConfirmDialog";
 import { CompactionStream } from "./chatMessages/components/CompactionStream";
+import { UserMessageRail } from "./chatMessages/components/UserMessageRail";
 import type { ChatInputSendOptions } from "./chatInput/types";
 import type { MainContentView } from "./types";
 import type { RollbackMode } from "./chatMessages/utils/conversationTypes";
@@ -80,6 +80,7 @@ const ChatContentBody = ({
     goalModeTokenBudget,
     setGoalModeTokenBudget,
     pendingToolAuthorizations,
+    conversationVersion,
   } = useChatConversationContext();
   const { t } = useI18n();
   const { autoScrollEnabled, setAutoScrollEnabled } = useAutoScrollPreference();
@@ -112,6 +113,12 @@ const ChatContentBody = ({
   // distance during the animation, or a streaming conversation stops tracking
   // new content right after the animation lands on its stale target.
   const isSmoothScrollingToBottomRef = useRef(false);
+  // Animation-frame id of the custom scroll-to-bottom tween. Unlike the native
+  // smooth scroll, this re-derives the target every frame so streaming content
+  // that grows mid-animation is always reached, and the ResizeObserver's
+  // synchronous pin is suppressed while the tween is active to avoid the
+  // instant jump that used to interrupt the animation.
+  const scrollToBottomAnimRef = useRef(0);
   const previousIsCompactingRef = useRef(isCompactingActive);
   const scrollRafIdRef = useRef(0);
   const hasMessagesRef = useRef(hasMessages);
@@ -165,6 +172,11 @@ const ChatContentBody = ({
     shouldStickToBottomRef.current = true;
     isInitialBottomPositioningRef.current = false;
     isUserScrollIntentRef.current = false;
+    if (scrollToBottomAnimRef.current !== 0) {
+      cancelAnimationFrame(scrollToBottomAnimRef.current);
+      scrollToBottomAnimRef.current = 0;
+    }
+    isSmoothScrollingToBottomRef.current = false;
     setShowScrollToBottom(false);
     if (activeConversationId) {
       positionedConversationIdsRef.current.delete(activeConversationId);
@@ -261,14 +273,15 @@ const ChatContentBody = ({
         return;
       }
 
-      // Re-evaluate against the fresh geometry before deciding whether to
-      // pin: a shrink may have already landed the viewport at the bottom.
       // Skip while older messages are being prepended — the pending scroll
       // restore will re-position the viewport and the follow-up scroll event
-      // re-evaluates the state.
+      // re-evaluates the state. Also skip while the scroll-to-bottom tween is
+      // running: it re-derives its own target each frame, so a synchronous jump
+      // here would fight the animation and cause the half-scroll / jitter.
       if (
         !isLoadingOlderWithScrollRef.current &&
-        pendingScrollRestoreRef.current === null
+        pendingScrollRestoreRef.current === null &&
+        !isSmoothScrollingToBottomRef.current
       ) {
         updateScrollFollowState(container);
       }
@@ -276,7 +289,8 @@ const ChatContentBody = ({
       if (
         !shouldStickToBottomRef.current ||
         isLoadingOlderWithScrollRef.current ||
-        pendingScrollRestoreRef.current !== null
+        pendingScrollRestoreRef.current !== null ||
+        isSmoothScrollingToBottomRef.current
       ) {
         return;
       }
@@ -543,20 +557,77 @@ const ChatContentBody = ({
       return;
     }
 
+    // Cancel any tween already in flight before starting a new one.
+    if (scrollToBottomAnimRef.current !== 0) {
+      cancelAnimationFrame(scrollToBottomAnimRef.current);
+      scrollToBottomAnimRef.current = 0;
+    }
+
     shouldStickToBottomRef.current = true;
     isInitialBottomPositioningRef.current = false;
     isUserScrollIntentRef.current = false;
-    // Protect the follow state while the smooth animation runs: during the
-    // animation the distance is still large, so without this the scroll
-    // handler would flip the stick flag back to false and a streaming
-    // conversation would stop tracking new content right after the animation
-    // lands on its stale target.
+    // Protect the follow state while the tween runs: during the animation the
+    // distance is still large, so without this the scroll handler would flip
+    // the stick flag back to false and a streaming conversation would stop
+    // tracking new content right after the animation lands on a stale target.
     isSmoothScrollingToBottomRef.current = true;
-    container.scrollTo({
-      top: container.scrollHeight,
-      behavior: "smooth",
-    });
-  }, []);
+    setShowScrollToBottom(false);
+
+    // Capture the starting scrollTop once so the easing curve is stable. The
+    // *target* (maxScrollTop) is re-read every frame so content that streams
+    // in mid-animation is always reached — the native smooth scroll computed
+    // its target once at call time and would stop short when the target moved.
+    const startTop = container.scrollTop;
+    const startTimeMs = performance.now();
+    const durationMs = 350;
+    let lastTop = startTop;
+
+    const tick = (nowMs: number): void => {
+      if (scrollRef.current !== container) {
+        scrollToBottomAnimRef.current = 0;
+        isSmoothScrollingToBottomRef.current = false;
+        return;
+      }
+
+      const maxScrollTop =
+        container.scrollHeight - container.clientHeight;
+
+      // The user took over the wheel / keyboard and moved away from the
+      // tween's last position: stop the animation and let the live geometry
+      // drive the follow state, respecting the user's intent.
+      if (
+        isUserScrollIntentRef.current &&
+        Math.abs(container.scrollTop - lastTop) > 2
+      ) {
+        scrollToBottomAnimRef.current = 0;
+        isSmoothScrollingToBottomRef.current = false;
+        updateScrollFollowState(container);
+        return;
+      }
+
+      const elapsed = nowMs - startTimeMs;
+      const progress = Math.min(1, elapsed / durationMs);
+      // easeOutCubic — decelerates to the target, feels native.
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const currentTarget =
+        startTop + (maxScrollTop - startTop) * eased;
+      const nextTop = Math.min(currentTarget, maxScrollTop);
+      container.scrollTop = nextTop;
+      lastTop = nextTop;
+
+      if (progress >= 1 || nextTop >= maxScrollTop - 1) {
+        container.scrollTop = maxScrollTop;
+        scrollToBottomAnimRef.current = 0;
+        isSmoothScrollingToBottomRef.current = false;
+        updateScrollFollowState(container);
+        return;
+      }
+
+      scrollToBottomAnimRef.current = requestAnimationFrame(tick);
+    };
+
+    scrollToBottomAnimRef.current = requestAnimationFrame(tick);
+  }, [updateScrollFollowState]);
 
   const handleSendWithScroll = useCallback(
     (message: string, options: ChatInputSendOptions) => {
@@ -581,12 +652,17 @@ const ChatContentBody = ({
     [confirmRollback]
   );
 
-  // Cancel any pending scroll-throttle animation frame on unmount.
+  // Cancel any pending scroll-throttle and scroll-to-bottom animation frames
+  // on unmount.
   useEffect(() => {
     return () => {
       if (scrollRafIdRef.current !== 0) {
         cancelAnimationFrame(scrollRafIdRef.current);
         scrollRafIdRef.current = 0;
+      }
+      if (scrollToBottomAnimRef.current !== 0) {
+        cancelAnimationFrame(scrollToBottomAnimRef.current);
+        scrollToBottomAnimRef.current = 0;
       }
     };
   }, []);
@@ -637,7 +713,6 @@ const ChatContentBody = ({
                 <div className="chat-history-skeleton-line" />
               </div>
             ) : null}
-            <FileChangeStatsPanel conversationId={activeConversationId} />
             <ChatMessageList
               messages={messages}
               isStreaming={isStreaming}
@@ -657,6 +732,20 @@ const ChatContentBody = ({
           />
         )}
       </div>
+
+      {hasMessages ? (
+        <UserMessageRail
+          conversationId={activeConversationId}
+          scrollContainerRef={scrollRef}
+          loadOlderMessages={loadOlderMessages}
+          isLoadingOlderMessages={isLoadingOlderMessages}
+          hasMoreMessages={hasMoreMessages}
+          conversationVersion={conversationVersion}
+          shouldStickToBottomRef={shouldStickToBottomRef}
+          isInitialBottomPositioningRef={isInitialBottomPositioningRef}
+          isUserScrollIntentRef={isUserScrollIntentRef}
+        />
+      ) : null}
 
       <div className="chat-input-region">
         {showScrollToBottom && hasMessages ? (

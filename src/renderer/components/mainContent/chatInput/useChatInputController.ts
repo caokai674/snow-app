@@ -32,6 +32,7 @@ import {
   createChipHtml,
   createCommitChipHtml,
   createImageChipHtml,
+  createTextSnippetChipHtml,
   parseContentSegments,
   renumberImageChips,
 } from "./fileTagUtils";
@@ -375,6 +376,9 @@ export const useChatInputController = ({
           if (segment.type === "change") {
             return createChangeChipHtml(segment.tag);
           }
+          if (segment.type === "text-snippet") {
+            return createTextSnippetChipHtml(segment.tag);
+          }
           return createChipHtml(segment.tag);
         })
         .join("");
@@ -445,6 +449,9 @@ export const useChatInputController = ({
             }
             if (segment.type === "change") {
               return createChangeChipHtml(segment.tag);
+            }
+            if (segment.type === "text-snippet") {
+              return createTextSnippetChipHtml(segment.tag);
             }
             return createChipHtml(segment.tag);
           })

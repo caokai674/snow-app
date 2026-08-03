@@ -288,6 +288,62 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
           ref.streamPromise = null;
         }
 
+        // Replace the frontend-generated temporary user message id with the
+        // real database id returned by store_chat_exchange. The backend
+        // persists user messages in order and returns their snowflake ids in
+        // persistedUserMessageIds. This keeps the in-memory message id in sync
+        // with the DB so features like the user-message rail (which queries
+        // the DB for message ids) can locate the DOM element by id without
+        // restarting the app.
+        if (
+          response.persistedUserMessageIds &&
+          response.persistedUserMessageIds.length > 0
+        ) {
+          // Collect all pending (non-persisted) user message ids in order so
+          // we can map them 1:1 to the returned DB ids.
+          const pendingUserIds: string[] = [];
+          const currentMessages =
+            ctx.sessionsRef.current[effectiveKey]?.messages ?? [];
+          for (const m of currentMessages) {
+            if (m.role === "user" && !m.isContextCompaction) {
+              // A user message is "pending" (needs id replacement) if its id
+              // does not look like a DB snowflake id. Frontend ids use the
+              // pattern "user-{timestamp}-{random}"; DB ids are numeric
+              // snowflake strings.
+              const isFrontendId = isNaN(Number(m.id));
+              if (isFrontendId) {
+                pendingUserIds.push(m.id);
+              }
+            }
+          }
+
+          // Build a mapping from old frontend id -> new DB id. The backend
+          // returns ids in the same order as the user messages in the request.
+          const idRemap = new Map<string, string>();
+          const remapCount = Math.min(
+            pendingUserIds.length,
+            response.persistedUserMessageIds.length
+          );
+          for (let i = 0; i < remapCount; i++) {
+            idRemap.set(pendingUserIds[i], response.persistedUserMessageIds[i]);
+          }
+
+          if (idRemap.size > 0) {
+            ctx.updateSessionMessages(effectiveKey, (msgs) =>
+              msgs.map((m) => {
+                const newId = idRemap.get(m.id);
+                return newId ? { ...m, id: newId } : m;
+              })
+            );
+            // Update the outer-scope userMessage reference so downstream code
+            // (checkpoint association, error retry) uses the real DB id.
+            const remappedUser = idRemap.get(userMessage.id);
+            if (remappedUser) {
+              userMessage.id = remappedUser;
+            }
+          }
+        }
+
         if (response.conversationId) {
           if (effectiveKey === PENDING_SESSION_KEY) {
             // Plan Mode approval obtained while the session was still pending
@@ -324,27 +380,28 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
             ) {
               ctx.setActiveId(response.conversationId);
             }
-          }
-          // First message: immediately upsert the new conversation into
-          // the list so it appears while AI is still responding.
-          // Follow-up message: refresh the record so the sidebar can
-          // re-sort by the latest updated_at and move the conversation
-          // to the top of its time group.
-          if (response.status !== "error") {
-            const refreshId = response.conversationId;
-            void window.snow
-              .getChatConversation(refreshId)
-              .then((conv) => {
-                if (conv) {
-                  ctx.setUpsertedConversation({
-                    record: conv,
-                    timestamp: Date.now(),
-                  });
-                }
-              })
-              .catch(() => {
-                // Upsert failure should not block the conversation
-              });
+
+            // First message: replace the pending placeholder with the real
+            // conversation record. This runs only once on session migration;
+            // subsequent AI iterations must NOT refresh the list to avoid
+            // excessive re-sorting. Follow-up messages already refreshed the
+            // list at send time (handleSendMessage).
+            if (response.status !== "error") {
+              const refreshId = response.conversationId;
+              void window.snow
+                .getChatConversation(refreshId)
+                .then((conv) => {
+                  if (conv) {
+                    ctx.setUpsertedConversation({
+                      record: conv,
+                      timestamp: Date.now(),
+                    });
+                  }
+                })
+                .catch(() => {
+                  // Upsert failure should not block the conversation
+                });
+            }
           }
 
           // Trigger summary generation as soon as the conversation is
@@ -403,6 +460,11 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
             }
           }
         }
+
+        // Bump the conversation version so dependent components (e.g. the
+        // user-message rail) know the DB message list changed (the user
+        // message is now persisted via store_chat_exchange) and re-fetch.
+        ctx.setConversationVersion((version) => version + 1);
 
         if (response.tokenUsage && response.status !== "error") {
           ctx.updateSessionField(

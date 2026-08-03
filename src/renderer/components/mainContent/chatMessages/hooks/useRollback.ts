@@ -272,7 +272,11 @@ export const useRollback = (ctx: ConversationContextValue) => {
         ctx.setActiveId(undefined);
       } else if (convId && responseId) {
         ctx.updateSessionField(key, "tokenUsage", null);
-        void window.snow.truncateConversation(convId, responseId).catch(() => {
+        void window.snow.truncateConversation(convId, responseId).then(() => {
+          // Bump version so dependent components (user-message rail) re-fetch
+          // the updated message list after truncation.
+          ctx.setConversationVersion((version) => version + 1);
+        }).catch(() => {
           // Best effort — database persistence must not block the UI refresh.
         });
       }

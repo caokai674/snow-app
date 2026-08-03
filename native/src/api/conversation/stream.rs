@@ -348,6 +348,7 @@ pub async fn create_response_stream(
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                 },
+                persisted_user_message_ids: Vec::new(),
             })
         }
     }

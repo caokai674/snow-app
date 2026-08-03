@@ -70,7 +70,7 @@ impl McpService for FilesystemService {
             McpTool {
                 server_id: SERVER_ID.to_string(),
                 name: "replace_edit".to_string(),
-                description: "Fuzzy search-and-replace editing. Finds searchContent in the file and replaces it with replaceContent. IMPORTANT: searchContent must be COPIED EXACTLY from the file - do NOT include line number prefixes (like \"42:\") that appear in read output, do NOT retype or paraphrase. Copy the raw source text verbatim. If the exact text is not found, a fuzzy match is attempted; on failure the error includes the closest matching region to help you correct your searchContent. On success the response includes a \"review\" field with the edited region plus surrounding context lines (edited lines marked with \">>>\") - always verify the edit landed correctly.".to_string(),
+                description: "Fuzzy search-and-replace editing. Finds searchContent in the file and replaces it with replaceContent. IMPORTANT: searchContent must be COPIED EXACTLY from the file - do NOT include line number prefixes (like \"42:\") that appear in read output, do NOT retype or paraphrase. Copy the raw source text verbatim. If the exact text is not found, a fuzzy match is attempted; on failure the error includes the closest matching region to help you correct your searchContent. On success the response includes a \"review\" field with the edited region plus surrounding context lines (edited lines marked with \">>>\") - always verify the edit landed correctly. ESCAPE SEQUENCES: text inside string literals (e.g. Rust/Python/JSON source) stores escapes like \\n, \\t, \\\", \\\\ as literal backslash + character pairs in the file. When searchContent or replaceContent touches such text, keep the escapes in their literal form exactly as shown by filesystem-read output - never convert a literal backslash-n into a real newline, and never convert a real newline into a literal \\n. Use a real newline only when the file actually contains one; use a literal escape sequence only when the file text shows that escape.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -80,11 +80,11 @@ impl McpService for FilesystemService {
                         },
                         "searchContent": {
                             "type": "string",
-                            "description": "The EXACT raw source text to find in the file. Do NOT include line number prefixes from read output. Copy verbatim from the file content."
+                            "description": "The EXACT raw source text to find in the file. Do NOT include line number prefixes from read output. Copy verbatim from the file content. If the file text contains escape sequences (like \\n, \\t, \\\" inside string literals), copy them as literal backslash + character text - do NOT convert them to real newlines/tabs/quotes."
                         },
                         "replaceContent": {
                             "type": "string",
-                            "description": "New content to replace with."
+                            "description": "New content to replace with. Match the file's escape style: write a literal backslash-n (two characters) when the file should keep an escape sequence like \\n; write a real newline only when the file actually uses real newlines."
                         },
                         "occurrence": {
                             "type": "number",

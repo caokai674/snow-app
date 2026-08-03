@@ -13,6 +13,7 @@ import {
   directoryIdToPath,
   killRunningBashExecutions,
 } from "../utils/conversationHelpers";
+import { extractFileChangesFromRecords } from "./fileChangeTracking";
 import {
   appendHookExecutionToMessage,
   runHook,
@@ -143,6 +144,72 @@ export const useConversationManagement = (
                   .map((record) => record.checkpointId)
               )
             );
+
+            // Re-hydrate the file-change stats from persisted history so the
+            // stats panel still shows what this conversation did after an app
+            // restart or on first open. Live sessions are skipped: once the
+            // tool pipeline has recorded a change for a conversation,
+            // recordFileChange marks it hydrated and no history scan runs
+            // (avoiding duplicate entries with different timestamps).
+            //
+            // The scan uses the FULL message list (listChatMessages), not the
+            // paginated first page: pagination only covers the latest N
+            // messages, so a page-based scan would miss edits made earlier in
+            // the conversation and report a partial picture.
+            if (!ctx.fileChangeStatsHydratedRef.current.has(trimmedId)) {
+              const isSubAgentConversation = Boolean(
+                conversationRecord?.parentConversationId
+              );
+              const fullHistory = await window.snow.listChatMessages(trimmedId);
+              const ownChanges = extractFileChangesFromRecords(fullHistory);
+              if (ownChanges.length > 0) {
+                ctx.mergeFileChangeStats(
+                  trimmedId,
+                  ownChanges.map((change) => ({
+                    ...change,
+                    agent: isSubAgentConversation
+                      ? ("sub" as const)
+                      : ("main" as const),
+                    subAgentName: isSubAgentConversation
+                      ? (conversationRecord?.subAgentName || undefined)
+                      : undefined,
+                  }))
+                );
+              }
+              // A main conversation's stats panel also merges its sub-agents'
+              // changes; scan each sub-agent conversation's full history.
+              if (!isSubAgentConversation) {
+                try {
+                  const subConversations =
+                    await window.snow.listSubAgentConversations(trimmedId);
+                  await Promise.all(
+                    subConversations.map(async (subConversation) => {
+                      const subRecords = await window.snow.listChatMessages(
+                        subConversation.conversationId
+                      );
+                      const subChanges =
+                        extractFileChangesFromRecords(subRecords);
+                      if (subChanges.length > 0) {
+                        ctx.mergeFileChangeStats(
+                          trimmedId,
+                          subChanges.map((change) => ({
+                            ...change,
+                            agent: "sub" as const,
+                            subAgentName:
+                              subConversation.subAgentName ||
+                              subConversation.title ||
+                              undefined,
+                          }))
+                        );
+                      }
+                    })
+                  );
+                } catch {
+                  // Sub-agent scans must not block the session switch
+                }
+              }
+              ctx.fileChangeStatsHydratedRef.current.add(trimmedId);
+            }
 
             // Cache the fetched page even when this request was superseded
             // while in flight (the user switched to another conversation).

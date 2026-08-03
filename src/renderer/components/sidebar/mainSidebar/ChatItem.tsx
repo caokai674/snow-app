@@ -104,6 +104,10 @@ export function ChatItem({
   const handleRenameKeyDown = (
     event: React.KeyboardEvent<HTMLInputElement>
   ): void => {
+    // 输入法组合输入中（如中文候选区上屏的 Enter）不触发保存/取消
+    if (event.nativeEvent.isComposing || event.keyCode === 229) {
+      return;
+    }
     if (event.key === "Enter") {
       event.preventDefault();
       void handleRenameSubmit();
