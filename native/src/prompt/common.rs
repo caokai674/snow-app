@@ -27,21 +27,36 @@ fn try_read_role_file(path: &Path) -> Option<String> {
         .filter(|content| !content.is_empty())
 }
 
+struct RoleSettings {
+    active_role_id: Option<String>,
+    override_role_ids: Vec<String>,
+    include_global_rules: bool,
+}
+
+impl Default for RoleSettings {
+    fn default() -> Self {
+        Self {
+            active_role_id: None,
+            override_role_ids: Vec::new(),
+            include_global_rules: true,
+        }
+    }
+}
+
 /// Read the `role` object from a settings.json file.
-/// Returns `(active_role_id, override_role_ids)`.
-fn read_role_settings(settings_path: &Path) -> (Option<String>, Vec<String>) {
+fn read_role_settings(settings_path: &Path) -> RoleSettings {
     let content = match std::fs::read_to_string(settings_path) {
         Ok(c) => c,
-        Err(_) => return (None, Vec::new()),
+        Err(_) => return RoleSettings::default(),
     };
     let json: Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return (None, Vec::new()),
+        Err(_) => return RoleSettings::default(),
     };
 
     let role = match json.get("role") {
         Some(r) => r,
-        None => return (None, Vec::new()),
+        None => return RoleSettings::default(),
     };
 
     let active_role_id = role
@@ -59,7 +74,16 @@ fn read_role_settings(settings_path: &Path) -> (Option<String>, Vec<String>) {
         })
         .unwrap_or_default();
 
-    (active_role_id, override_role_ids)
+    let include_global_rules = role
+        .get("includeGlobalRules")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    RoleSettings {
+        active_role_id,
+        override_role_ids,
+        include_global_rules,
+    }
 }
 
 /// Resolve the ROLE file name based on `active_role_id`.
@@ -94,47 +118,94 @@ fn is_override_role(active_role_id: &Option<String>, override_role_ids: &[String
 pub(crate) fn read_active_role(
     working_directory: &str,
     remote_role_content: Option<&str>,
+    remote_include_global_rules: Option<bool>,
 ) -> Option<(String, bool)> {
-    // --- Project scope ---
-    // ROLE.md lives at the workspace root; settings at <workspace>/.snow/settings.json
+    let mut project_role: Option<(String, bool)> = None;
+    let mut include_global_rules = true;
+
     if !working_directory.trim().is_empty() {
         if working_directory.starts_with("ssh://") {
-            // Remote project: use the SSH-resolved content injected by Electron.
+            include_global_rules = remote_include_global_rules.unwrap_or(true);
             let content = remote_role_content
                 .map(str::trim)
                 .filter(|content| !content.is_empty())
                 .map(str::to_string);
             if let Some(content) = content {
-                return Some((content, false));
+                project_role = Some((content, false));
             }
         } else {
             let project_dir = Path::new(working_directory);
             let settings_path = project_dir.join(SETTINGS_DIRECTORY).join(SETTINGS_FILE);
-            let (active_role_id, override_role_ids) = read_role_settings(&settings_path);
-            let role_file = project_dir.join(resolve_role_file_name(&active_role_id));
+            let settings = read_role_settings(&settings_path);
+            include_global_rules = settings.include_global_rules;
+            let role_file = project_dir.join(resolve_role_file_name(&settings.active_role_id));
 
             if let Some(content) = try_read_role_file(&role_file) {
-                let is_override = is_override_role(&active_role_id, &override_role_ids);
-                return Some((content, is_override));
+                let is_override =
+                    is_override_role(&settings.active_role_id, &settings.override_role_ids);
+                project_role = Some((content, is_override));
             }
         }
     }
 
-    // --- Global scope ---
-    // ROLE.md and settings both live in ~/.snow/
-    if let Some(home_dir) = dirs_next::home_dir() {
-        let global_dir: PathBuf = home_dir.join(SETTINGS_DIRECTORY);
-        let settings_path = global_dir.join(SETTINGS_FILE);
-        let (active_role_id, override_role_ids) = read_role_settings(&settings_path);
-        let role_file = global_dir.join(resolve_role_file_name(&active_role_id));
+    let global_role = if include_global_rules {
+        dirs_next::home_dir().and_then(|home_dir| {
+            let global_dir: PathBuf = home_dir.join(SETTINGS_DIRECTORY);
+            let settings_path = global_dir.join(SETTINGS_FILE);
+            let settings = read_role_settings(&settings_path);
+            let role_file = global_dir.join(resolve_role_file_name(&settings.active_role_id));
 
-        if let Some(content) = try_read_role_file(&role_file) {
-            let is_override = is_override_role(&active_role_id, &override_role_ids);
-            return Some((content, is_override));
-        }
+            try_read_role_file(&role_file).map(|content| {
+                let is_override =
+                    is_override_role(&settings.active_role_id, &settings.override_role_ids);
+                (content, is_override)
+            })
+        })
+    } else {
+        None
+    };
+
+    combine_role_contents(global_role, project_role)
+}
+
+fn combine_role_contents(
+    global_role: Option<(String, bool)>,
+    project_role: Option<(String, bool)>,
+) -> Option<(String, bool)> {
+    match (global_role, project_role) {
+        (Some((global, global_override)), Some((project, project_override))) => Some((
+            format!("## Global rules\n\n{global}\n\n## Project rules\n\n{project}"),
+            global_override || project_override,
+        )),
+        (Some(role), None) | (None, Some(role)) => Some(role),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::combine_role_contents;
+
+    #[test]
+    fn combines_global_before_project_rules() {
+        let (content, is_override) = combine_role_contents(
+            Some(("global rule".to_string(), false)),
+            Some(("project rule".to_string(), false)),
+        )
+        .expect("combined rules");
+
+        assert_eq!(
+            content,
+            "## Global rules\n\nglobal rule\n\n## Project rules\n\nproject rule"
+        );
+        assert!(!is_override);
     }
 
-    None
+    #[test]
+    fn keeps_a_single_enabled_scope_unchanged() {
+        let role = ("project only".to_string(), false);
+        assert_eq!(combine_role_contents(None, Some(role.clone())), Some(role));
+    }
 }
 
 /// Replace the default role text in the prompt with the role override block.

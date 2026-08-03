@@ -4,6 +4,7 @@ export type MainContentView =
   | "proxy-browser-settings"
   | "codebase-settings"
   | "system-prompt-settings"
+  | "personalization-settings"
   | "custom-headers-settings"
   | "mcp-settings"
   | "skills-settings"

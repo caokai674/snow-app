@@ -21,6 +21,7 @@ import {
   type McpSettingsListItem,
 } from "./mcpSettings/McpSettingsList";
 import { McpSettingsSummary } from "./mcpSettings/McpSettingsSummary";
+import { formatMcpError } from "./mcpSettings/mcpErrorMessages";
 import {
   EMPTY_MCP_SERVER_DRAFT,
   createMcpPair,
@@ -460,13 +461,7 @@ export function McpSettingsPanel({
         })
       );
     } catch (e) {
-      setError(
-        e instanceof Error
-          ? e.message
-          : t("settings.mcpFetchToolsError", {
-              defaultValue: "Failed to fetch MCP tools",
-            })
-      );
+      setError(formatMcpError(e, t));
     } finally {
       setFetchingToolServerIds((previous) => {
         const next = new Set(previous);
@@ -669,13 +664,7 @@ export function McpSettingsPanel({
       );
     } catch (fetchError) {
       if (loadGenerationRef.current === generation) {
-        setError(
-          fetchError instanceof Error
-            ? fetchError.message
-            : t("settings.mcpFetchToolsError", {
-                defaultValue: "Failed to fetch MCP tools",
-              })
-        );
+        setError(formatMcpError(fetchError, t));
       }
     } finally {
       if (loadGenerationRef.current === generation) {

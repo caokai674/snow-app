@@ -110,9 +110,9 @@ export function SshConnectWizard({
   }, []);
 
   const loadEntries = useCallback(
-    async (path: string): Promise<void> => {
+    async (path: string): Promise<boolean> => {
       if (!sessionId) {
-        return;
+        return false;
       }
       const normalizedPath = normalizeRemotePath(path);
       const requestId = ++directoryRequestIdRef.current;
@@ -124,7 +124,7 @@ export function SshConnectWizard({
           normalizedPath
         );
         if (requestId !== directoryRequestIdRef.current) {
-          return;
+          return false;
         }
         setEntries(
           result.map((entry) => ({
@@ -133,9 +133,10 @@ export function SshConnectWizard({
           }))
         );
         setRemotePath(normalizedPath);
+        return true;
       } catch (err) {
         if (requestId !== directoryRequestIdRef.current) {
-          return;
+          return false;
         }
         setEntriesError(
           err instanceof Error
@@ -145,6 +146,7 @@ export function SshConnectWizard({
               })
         );
         setEntries([]);
+        return false;
       } finally {
         if (requestId === directoryRequestIdRef.current) {
           setIsLoadingEntries(false);
@@ -293,14 +295,19 @@ export function SshConnectWizard({
 
       pendingNavigationPathRef.current = entryPath;
       setSelectedPath(entryPath);
-      setPathHistory((prev) =>
-        prev[prev.length - 1] === entryPath ? prev : [...prev, entryPath]
-      );
-      void loadEntries(entryPath).finally(() => {
-        if (pendingNavigationPathRef.current === entryPath) {
-          pendingNavigationPathRef.current = null;
-        }
-      });
+      void loadEntries(entryPath)
+        .then((loaded) => {
+          if (loaded) {
+            setPathHistory((prev) =>
+              prev[prev.length - 1] === entryPath ? prev : [...prev, entryPath]
+            );
+          }
+        })
+        .finally(() => {
+          if (pendingNavigationPathRef.current === entryPath) {
+            pendingNavigationPathRef.current = null;
+          }
+        });
     } else {
       setSelectedPath(entryPath);
     }
@@ -308,16 +315,21 @@ export function SshConnectWizard({
 
   const handleBreadcrumbClick = (path: string): void => {
     const normalizedPath = normalizeRemotePath(path);
-    const index = pathHistory.indexOf(normalizedPath);
-    if (index >= 0) {
-      setPathHistory((prev) => prev.slice(0, index + 1));
-    }
     pendingNavigationPathRef.current = normalizedPath;
-    void loadEntries(normalizedPath).finally(() => {
-      if (pendingNavigationPathRef.current === normalizedPath) {
-        pendingNavigationPathRef.current = null;
-      }
-    });
+    void loadEntries(normalizedPath)
+      .then((loaded) => {
+        if (loaded) {
+          setPathHistory((prev) => {
+            const index = prev.indexOf(normalizedPath);
+            return index >= 0 ? prev.slice(0, index + 1) : prev;
+          });
+        }
+      })
+      .finally(() => {
+        if (pendingNavigationPathRef.current === normalizedPath) {
+          pendingNavigationPathRef.current = null;
+        }
+      });
   };
 
   const handleRefresh = (): void => {

@@ -57,6 +57,7 @@ fn build_request(staged_diff: &str) -> ResponsesApiRequest {
         ],
         // Force the basic model for this lightweight task.
         model: None, // will be set after resolving context
+        api_profile: None,
         conversation_id: None,
         previous_response_id: None,
         directory_id: None,
@@ -68,6 +69,7 @@ fn build_request(staged_diff: &str) -> ResponsesApiRequest {
         plan_mode: None,
         goal_mode: None,
         remote_role_content: None,
+        remote_include_global_rules: None,
     }
 }
 

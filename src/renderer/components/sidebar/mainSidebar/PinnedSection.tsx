@@ -167,9 +167,30 @@ export function PinnedSection({
     conversation: ChatConversationRecord
   ): Promise<void> => {
     try {
-      abortConversation(conversation.conversationId);
+      // 置顶列表不维护子代理映射：删除前查询一次，以便级联删除时
+      // 中止对应流，并在当前正打开被删会话或其子代理时清空聊天区
+      let deleteTargetIds = [conversation.conversationId];
+      try {
+        const subAgents = await window.snow.listSubAgentConversations(
+          conversation.conversationId
+        );
+        deleteTargetIds = [
+          ...deleteTargetIds,
+          ...subAgents.map((sub) => sub.conversationId),
+        ];
+      } catch {
+        // 查询失败按无子代理处理，不阻塞删除
+      }
+      for (const targetId of deleteTargetIds) {
+        abortConversation(targetId);
+      }
+
       await window.snow.deleteConversation(conversation.conversationId);
-      if (conversation.conversationId === activeConversationId) {
+
+      if (
+        activeConversationId &&
+        deleteTargetIds.includes(activeConversationId)
+      ) {
         handleNewChat();
       }
       refreshConversations();

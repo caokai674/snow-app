@@ -23,6 +23,7 @@ import {
   registerImageProxySchemePrivilege,
 } from "./imageProxyProtocol";
 import { applySessionProxy } from "./sessionProxy";
+import { ensureBuiltinDocs, ensureBuiltinSkills } from "./ensureBuiltinSkills";
 
 export const bootstrapApplication = (): void => {
   // ─── Chromium 启动加速开关（必须在 whenReady 之前）─────────────────────
@@ -104,6 +105,11 @@ export const bootstrapApplication = (): void => {
 
     // 初始化系统托盘（黑白脱色图标 + 悬停快速信息 + 右键菜单）。
     initTray(native);
+
+    // 首次启动安装内置 skills 并同步内置文档（供 snow-app-docs 技能阅读），
+    // 均为幂等操作。
+    ensureBuiltinSkills();
+    ensureBuiltinDocs();
 
     snowLog.info({
       module: "app/bootstrap",

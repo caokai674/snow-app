@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback } from "react";
 import type { ChatInputSendOptions } from "../../chatInput/types";
 import type {
   ChatConversationMessage,
@@ -50,14 +50,13 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
   const { ctx, requestToolAuthorizations } = params;
 
   // Plan approval is isolated per main-conversation session so parallel chats
-  // cannot borrow each other's approval. Disabling Plan Mode re-locks all runs.
-  const planApprovedSessionKeysRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    if (!ctx.planMode) {
-      planApprovedSessionKeysRef.current.clear();
-    }
-  }, [ctx.planMode]);
+  // cannot borrow each other's approval. The key set lives on ctx
+  // (planApprovedSessionKeysRef) so it is cleared only when Plan Mode is
+  // genuinely turned off (user toggle / Goal Mode mutual exclusion / new
+  // chat). Switching conversations restores the target session's mode via
+  // setPlanModeState directly and must NOT clear it — otherwise an approved
+  // plan is lost when the user navigates away and back.
+  const planApprovedSessionKeysRef = ctx.planApprovedSessionKeysRef;
 
   const handleSendMessage = useCallback(
     (message: string, options: ChatInputSendOptions) => {
@@ -157,6 +156,7 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
             lastMessagePreview: preview,
             messageCount: 1,
             model: options.model ?? "",
+            apiProfileName: options.apiProfile ?? "",
             status: "active",
             directoryId: sessionDirId ?? "",
             forkedFromConversationId: "",
@@ -258,6 +258,7 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
           {
             messages: requestMessages,
             model: options.model,
+            apiProfile: options.apiProfile,
             conversationId: currentConversationId,
             directoryId: sessionDirId,
             checkpointId,
@@ -289,6 +290,16 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
 
         if (response.conversationId) {
           if (effectiveKey === PENDING_SESSION_KEY) {
+            // Plan Mode approval obtained while the session was still pending
+            // must follow the session to its real conversation id. Otherwise
+            // the approval stays keyed under PENDING_SESSION_KEY and the next
+            // agent-loop iteration (effectiveKey = conversationId) hits the
+            // Rust hard gate again — the model sees "Plan Mode write blocked"
+            // even though the user already approved the plan.
+            if (planApprovedSessionKeysRef.current.has(PENDING_SESSION_KEY)) {
+              planApprovedSessionKeysRef.current.delete(PENDING_SESSION_KEY);
+              planApprovedSessionKeysRef.current.add(response.conversationId);
+            }
             ctx.migrateSession(PENDING_SESSION_KEY, response.conversationId);
             effectiveKey = response.conversationId;
             finalSessionKey = response.conversationId;
@@ -415,7 +426,10 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
           response.status !== "error" &&
           effectiveKey !== PENDING_SESSION_KEY
         ) {
-          const apiConfig = await ctx.getActiveApiConfig();
+          // Use the conversation-scoped profile (options.apiProfile) so the
+          // auto-compaction decision matches the API config the conversation
+          // actually runs on — never the global active profile.
+          const apiConfig = await ctx.getActiveApiConfig(options.apiProfile);
           if (apiConfig?.enableAutoCompress) {
             // autoCompressThreshold is stored in TOKENS (resolved from the
             // configured percent against maxContextTokens when the config is
@@ -460,7 +474,9 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
                   await ctx.performCompactionRef.current(
                     effectiveKey,
                     options.model,
-                    true
+                    true,
+                    undefined,
+                    options.apiProfile
                   );
 
                 if (compactionSummary) {
@@ -787,7 +803,10 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
         // direct user sends and to pending-message flushes (which re-enter
         // handleSendMessage via handleSendMessageRef).
         if (sessionKey !== PENDING_SESSION_KEY) {
-          const apiConfig = await ctx.getActiveApiConfig();
+          // Use the conversation-scoped profile (options.apiProfile) so the
+          // auto-compaction decision matches the API config the conversation
+          // actually runs on — never the global active profile.
+          const apiConfig = await ctx.getActiveApiConfig(options.apiProfile);
           if (apiConfig?.enableAutoCompress) {
             // autoCompressThreshold is stored in TOKENS — compare directly (see
             // the in-loop check for why calculateAutoCompressThresholdTokens is
@@ -804,7 +823,9 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
                   await ctx.performCompactionRef.current(
                     sessionKey,
                     options.model,
-                    true
+                    true,
+                    undefined,
+                    options.apiProfile
                   );
 
                   // performCompaction resets sessionRef.isSending to false in

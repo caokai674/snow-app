@@ -12,6 +12,7 @@ import { useI18n } from "../../i18n";
 import { ChatInput } from "./ChatInput";
 import { EmptyChatGreeting } from "./EmptyChatGreeting";
 import { ChatMessageList, useChatConversationContext } from "./chatMessages";
+import { FileChangeStatsPanel } from "./chatMessages/components/FileChangeStatsPanel";
 import { RollbackConfirmDialog } from "./chatMessages/dialogs/RollbackConfirmDialog";
 import { CompactionStream } from "./chatMessages/components/CompactionStream";
 import type { ChatInputSendOptions } from "./chatInput/types";
@@ -636,6 +637,7 @@ const ChatContentBody = ({
                 <div className="chat-history-skeleton-line" />
               </div>
             ) : null}
+            <FileChangeStatsPanel conversationId={activeConversationId} />
             <ChatMessageList
               messages={messages}
               isStreaming={isStreaming}
@@ -670,40 +672,42 @@ const ChatContentBody = ({
             <ArrowDown size={20} strokeWidth={2} aria-hidden="true" />
           </button>
         ) : null}
-        <ChatInput
-          projectId={activeDirectory?.directoryId}
-          projectName={activeDirectory?.name}
-          conversationId={activeConversationId}
-          onSend={handleSendWithScroll}
-          isStreaming={isStreaming}
-          isAborting={isAborting}
-          onAbort={handleAbort}
-          tokenUsage={tokenUsage}
-          draftToRestore={draftToRestore}
-          autoSendToken={autoSendToken}
-          onDraftRestored={clearDraftToRestore}
-          pendingMessages={pendingMessages}
-          onWithdrawPendingMessage={withdrawPendingMessage}
-          onSendPendingMessageNow={sendPendingMessageNow}
-          onCompactConversation={compactConversation}
-          yoloMode={yoloMode}
-          isUpdatingYoloMode={isUpdatingYoloMode}
-          onYoloModeChange={setYoloMode}
-          onRefreshYoloMode={refreshYoloMode}
-          planMode={planMode}
-          isUpdatingPlanMode={isUpdatingPlanMode}
-          onPlanModeChange={setPlanMode}
-          onRefreshPlanMode={refreshPlanMode}
-          goalMode={goalMode}
-          isUpdatingGoalMode={isUpdatingGoalMode}
-          onGoalModeChange={setGoalMode}
-          onRefreshGoalMode={refreshGoalMode}
-          goalModeTokenBudget={goalModeTokenBudget}
-          onGoalModeTokenBudgetChange={setGoalModeTokenBudget}
-          autoScrollEnabled={autoScrollEnabled}
-          onAutoScrollChange={setAutoScrollEnabled}
-          isCompacting={isCompactingActive}
-        />
+        {isLoadingInitialHistory ? null : (
+          <ChatInput
+            projectId={activeDirectory?.directoryId}
+            projectName={activeDirectory?.name}
+            conversationId={activeConversationId}
+            onSend={handleSendWithScroll}
+            isStreaming={isStreaming}
+            isAborting={isAborting}
+            onAbort={handleAbort}
+            tokenUsage={tokenUsage}
+            draftToRestore={draftToRestore}
+            autoSendToken={autoSendToken}
+            onDraftRestored={clearDraftToRestore}
+            pendingMessages={pendingMessages}
+            onWithdrawPendingMessage={withdrawPendingMessage}
+            onSendPendingMessageNow={sendPendingMessageNow}
+            onCompactConversation={compactConversation}
+            yoloMode={yoloMode}
+            isUpdatingYoloMode={isUpdatingYoloMode}
+            onYoloModeChange={setYoloMode}
+            onRefreshYoloMode={refreshYoloMode}
+            planMode={planMode}
+            isUpdatingPlanMode={isUpdatingPlanMode}
+            onPlanModeChange={setPlanMode}
+            onRefreshPlanMode={refreshPlanMode}
+            goalMode={goalMode}
+            isUpdatingGoalMode={isUpdatingGoalMode}
+            onGoalModeChange={setGoalMode}
+            onRefreshGoalMode={refreshGoalMode}
+            goalModeTokenBudget={goalModeTokenBudget}
+            onGoalModeTokenBudgetChange={setGoalModeTokenBudget}
+            autoScrollEnabled={autoScrollEnabled}
+            onAutoScrollChange={setAutoScrollEnabled}
+            isCompacting={isCompactingActive}
+          />
+        )}
       </div>
 
       {rollbackPreview ? (

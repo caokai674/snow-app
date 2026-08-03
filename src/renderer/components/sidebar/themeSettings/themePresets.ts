@@ -511,7 +511,7 @@ const gruvboxDark: ThemePalette = {
   focusRing: "rgba(235, 219, 178, 0.12)",
 };
 
-const anthropicLight: ThemePalette = {
+const creamLight: ThemePalette = {
   bgPrimary: "#faf9f5",
   bgSecondary: "#f2f0e8",
   bgTertiary: "#e8e6dc",
@@ -540,7 +540,7 @@ const anthropicLight: ThemePalette = {
   focusRing: "rgba(217, 119, 87, 0.24)",
 };
 
-const anthropicDark: ThemePalette = {
+const creamDark: ThemePalette = {
   bgPrimary: "#141413",
   bgSecondary: "#1f1f1c",
   bgTertiary: "#292824",
@@ -641,11 +641,11 @@ export const THEME_PRESETS: ThemePreset[] = [
     dark: gruvboxDark,
   },
   {
-    id: "anthropic",
-    nameKey: "settings.themePresetAnthropic",
-    defaultName: "Anthropic",
-    light: anthropicLight,
-    dark: anthropicDark,
+    id: "cream",
+    nameKey: "settings.themePresetCream",
+    defaultName: "Cream",
+    light: creamLight,
+    dark: creamDark,
   },
 ];
 
@@ -658,6 +658,8 @@ const LEGACY_PRESET_ID_ALIASES: Record<string, string> = {
   "snow-dark": "snow",
   "solarized-light": "solarized",
   "solarized-dark": "solarized",
+  // anthropic 预设已更名为 cream，映射旧 id 以兼容已持久化的选择。
+  "anthropic": "cream",
 };
 
 export const resolvePresetId = (id: string): string =>

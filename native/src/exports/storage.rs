@@ -1064,6 +1064,18 @@ pub async fn update_conversation_emoji(
 }
 
 #[napi]
+pub async fn update_conversation_api_profile(
+    conversation_id: String,
+    profile_name: String,
+) -> napi::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        crate::storage::update_conversation_api_profile(conversation_id, profile_name)
+    })
+    .await
+    .map_err(map_spawn_error)?
+}
+
+#[napi]
 pub async fn delete_conversation(conversation_id: String) -> napi::Result<()> {
     tokio::task::spawn_blocking(move || crate::storage::delete_conversation(conversation_id))
         .await
@@ -1359,6 +1371,7 @@ pub struct KeyboardShortcutsSettingsNapi {
     pub open_todo: KeyboardShortcutConfigNapi,
     pub cycle_project: KeyboardShortcutConfigNapi,
     pub open_project_explorer: KeyboardShortcutConfigNapi,
+    pub cycle_api_profile: KeyboardShortcutConfigNapi,
 }
 
 impl From<crate::storage::services::keyboard_shortcuts::KeyboardShortcutsSettings>
@@ -1372,6 +1385,7 @@ impl From<crate::storage::services::keyboard_shortcuts::KeyboardShortcutsSetting
             open_todo: s.open_todo.into(),
             cycle_project: s.cycle_project.into(),
             open_project_explorer: s.open_project_explorer.into(),
+            cycle_api_profile: s.cycle_api_profile.into(),
         }
     }
 }
@@ -1387,6 +1401,7 @@ impl From<KeyboardShortcutsSettingsNapi>
             open_todo: s.open_todo.into(),
             cycle_project: s.cycle_project.into(),
             open_project_explorer: s.open_project_explorer.into(),
+            cycle_api_profile: s.cycle_api_profile.into(),
         }
     }
 }

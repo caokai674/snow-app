@@ -212,27 +212,57 @@ const writeRemoteText = async (
  * workspaces. Returns `null` when the file does not exist, is binary, or SSH
  * is unavailable — callers then fall back to the global ROLE.md.
  */
-export const readRemoteRoleContent = async (
+export type RemoteRoleContext = {
+  content: string | null;
+  includeGlobalRules: boolean;
+};
+
+export const readRemoteRoleContext = async (
   workspacePath: string
-): Promise<string | null> => {
+): Promise<RemoteRoleContext> => {
   try {
     return await withSshSession(
       workspacePath,
       async (sessionId, remotePath) => {
-        const rolePath = `${remotePath.replace(/\/+$/, "")}/ROLE.md`;
-        const file = processFileContent(
-          rolePath,
-          await readSshFile(sessionId, rolePath)
-        );
-        if (file.isBinary || file.isImage) {
-          return null;
+        const projectRoot = remotePath.replace(/\/+$/, "");
+        const rolePath = `${projectRoot}/ROLE.md`;
+        let content: string | null = null;
+        try {
+          const file = processFileContent(
+            rolePath,
+            await readSshFile(sessionId, rolePath)
+          );
+          if (!file.isBinary && !file.isImage) {
+            content = file.content.trim() || null;
+          }
+        } catch {
+          content = null;
         }
-        const content = file.content.trim();
-        return content || null;
+
+        let includeGlobalRules = true;
+        try {
+          const settingsPath = `${projectRoot}/.snow/settings.json`;
+          const settingsFile = processFileContent(
+            settingsPath,
+            await readSshFile(sessionId, settingsPath)
+          );
+          if (!settingsFile.isBinary && !settingsFile.isImage) {
+            const settings = JSON.parse(settingsFile.content) as {
+              role?: { includeGlobalRules?: unknown };
+            };
+            if (typeof settings.role?.includeGlobalRules === "boolean") {
+              includeGlobalRules = settings.role.includeGlobalRules;
+            }
+          }
+        } catch {
+          includeGlobalRules = true;
+        }
+
+        return { content, includeGlobalRules };
       }
     );
   } catch {
-    return null;
+    return { content: null, includeGlobalRules: true };
   }
 };
 

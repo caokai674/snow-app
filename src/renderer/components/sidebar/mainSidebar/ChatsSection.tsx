@@ -1,5 +1,5 @@
 import { Loader2 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
 import { useI18n } from "../../../i18n";
 import { useChatConversationContext } from "../../mainContent/chatMessages";
@@ -10,6 +10,7 @@ import type {
 } from "../../../../preload";
 import { ChatItem } from "./ChatItem";
 import type { ExportFormat } from "./ChatItemMenu";
+import { SubAgentListPanel } from "./SubAgentListPanel";
 import {
   groupConversationsByTime,
   parseDbTimestamp,
@@ -67,6 +68,8 @@ export function ChatsSection({
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [subAgentMap, setSubAgentMap] = useState<SubAgentMap>({});
+  const [expandedSubAgentConversationIds, setExpandedSubAgentConversationIds] =
+    useState<Set<string>>(() => new Set());
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const sectionListRef = useRef<HTMLDivElement | null>(null);
 
@@ -279,9 +282,24 @@ export function ChatsSection({
     conversation: ChatConversationRecord
   ): Promise<void> => {
     try {
-      abortConversation(conversation.conversationId);
+      // Rust 侧级联删除子代理会话：收集全部待删 ID，以便中止对应流，
+      // 并在当前正打开被删会话或其子代理时清空聊天区
+      const deleteTargetIds = [
+        conversation.conversationId,
+        ...(subAgentMap[conversation.conversationId] ?? []).map(
+          (sub) => sub.conversationId
+        ),
+      ];
+      for (const targetId of deleteTargetIds) {
+        abortConversation(targetId);
+      }
+
       await window.snow.deleteConversation(conversation.conversationId);
-      if (conversation.conversationId === activeConversationId) {
+
+      if (
+        activeConversationId &&
+        deleteTargetIds.includes(activeConversationId)
+      ) {
         handleNewChat();
       }
       refreshConversations();
@@ -374,6 +392,7 @@ export function ChatsSection({
           lastMessagePreview: "",
           messageCount: 0,
           model: "",
+          apiProfileName: "",
           status: "active",
           directoryId: "",
           forkedFromConversationId: "",
@@ -412,6 +431,40 @@ export function ChatsSection({
       return next;
     });
   }, [subAgentSessionEvents]);
+
+  // 当激活的会话是某个父会话的子代理时，自动展开该父会话的面板
+  useEffect(() => {
+    if (!activeConversationId) {
+      return;
+    }
+    setExpandedSubAgentConversationIds((prev) => {
+      const parentIds = Object.keys(subAgentMap).filter((parentId) =>
+        subAgentMap[parentId].some(
+          (sub) => sub.conversationId === activeConversationId
+        )
+      );
+      if (parentIds.length === 0) {
+        return prev;
+      }
+      const next = new Set(prev);
+      for (const parentId of parentIds) {
+        next.add(parentId);
+      }
+      return next;
+    });
+  }, [subAgentMap, activeConversationId]);
+
+  const handleToggleSubAgentPanel = (conversationId: string): void => {
+    setExpandedSubAgentConversationIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(conversationId)) {
+        next.delete(conversationId);
+      } else {
+        next.add(conversationId);
+      }
+      return next;
+    });
+  };
 
   const getGroupLabel = (key: TimeGroupKey): string => {
     switch (key) {
@@ -466,55 +519,80 @@ export function ChatsSection({
                 <div className="chat-time-group-header">
                   {getGroupLabel(group.key)}
                 </div>
-                {group.conversations.map((conversation) => (
-                  <ChatItem
-                    key={conversation.conversationId}
-                    conversation={conversation}
-                    isActive={
-                      conversation.conversationId === activeConversationId
-                    }
-                    isStreaming={streamingConversationIds.has(
+                {group.conversations.map((conversation) => {
+                  const subAgentConversations =
+                    subAgentMap[conversation.conversationId] ?? [];
+                  const isSubAgentPanelExpanded =
+                    expandedSubAgentConversationIds.has(
                       conversation.conversationId
-                    )}
-                    isCompleted={completedConversationIds.has(
-                      conversation.conversationId
-                    )}
-                    subAgentConversations={
-                      subAgentMap[conversation.conversationId] ?? []
-                    }
-                    activeSubAgentConversationId={activeConversationId}
-                    onPin={() => void handlePin(conversation)}
-                    onRename={(newTitle) =>
-                      handleRename(conversation, newTitle)
-                    }
-                    onSetEmoji={(emoji) => handleSetEmoji(conversation, emoji)}
-                    onDelete={() => void handleDelete(conversation)}
-                    onExport={(format) => handleExport(conversation, format)}
-                    onSelect={() =>
-                      void handleSelectConversation(
-                        conversation.conversationId,
-                        conversation.summary || conversation.title,
-                        {
-                          inputTokens: conversation.inputTokens,
-                          outputTokens: conversation.outputTokens,
-                          cacheCreationInputTokens:
-                            conversation.cacheCreationInputTokens,
-                          cacheReadInputTokens:
-                            conversation.cacheReadInputTokens,
-                        },
-                        conversation.directoryId
-                      )
-                    }
-                    onSelectSubAgent={(subConvId) =>
-                      void handleSelectConversation(
-                        subConvId,
-                        undefined,
-                        undefined,
-                        conversation.directoryId
-                      )
-                    }
-                  />
-                ))}
+                    );
+                  return (
+                    <Fragment key={conversation.conversationId}>
+                      <ChatItem
+                        conversation={conversation}
+                        isActive={
+                          conversation.conversationId === activeConversationId
+                        }
+                        isStreaming={streamingConversationIds.has(
+                          conversation.conversationId
+                        )}
+                        isCompleted={completedConversationIds.has(
+                          conversation.conversationId
+                        )}
+                        subAgentConversations={subAgentConversations}
+                        isSubAgentExpanded={isSubAgentPanelExpanded}
+                        onToggleSubAgentPanel={() =>
+                          handleToggleSubAgentPanel(
+                            conversation.conversationId
+                          )
+                        }
+                        onPin={() => void handlePin(conversation)}
+                        onRename={(newTitle) =>
+                          handleRename(conversation, newTitle)
+                        }
+                        onSetEmoji={(emoji) =>
+                          handleSetEmoji(conversation, emoji)
+                        }
+                        onDelete={() => void handleDelete(conversation)}
+                        onExport={(format) =>
+                          handleExport(conversation, format)
+                        }
+                        onSelect={() =>
+                          void handleSelectConversation(
+                            conversation.conversationId,
+                            conversation.summary || conversation.title,
+                            {
+                              inputTokens: conversation.inputTokens,
+                              outputTokens: conversation.outputTokens,
+                              cacheCreationInputTokens:
+                                conversation.cacheCreationInputTokens,
+                              cacheReadInputTokens:
+                                conversation.cacheReadInputTokens,
+                            },
+                            conversation.directoryId
+                          )
+                        }
+                      />
+                      {/* 面板渲染在 ChatItem 外部，作为兄弟节点，
+                          完全不继承父级会话项的背景色 */}
+                      {subAgentConversations.length > 0 &&
+                        isSubAgentPanelExpanded && (
+                          <SubAgentListPanel
+                            conversations={subAgentConversations}
+                            activeConversationId={activeConversationId}
+                            onSelect={(subConvId) =>
+                              void handleSelectConversation(
+                                subConvId,
+                                undefined,
+                                undefined,
+                                conversation.directoryId
+                              )
+                            }
+                          />
+                        )}
+                    </Fragment>
+                  );
+                })}
               </div>
             ))}
             {hasMore ? (

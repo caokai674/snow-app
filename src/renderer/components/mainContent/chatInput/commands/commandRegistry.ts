@@ -35,13 +35,17 @@ type ChatCommandLabels = {
 
 type CreateChatCommandsOptions = {
   onNewChat: () => void;
-  onCompactConversation?: (model?: string) => void | Promise<void>;
+  onCompactConversation?: (
+    model?: string,
+    apiProfile?: string
+  ) => void | Promise<void>;
   onOpenMcpPanel: () => void;
   onOpenRolePanel: () => void;
   onOpenSensitiveCommandsPanel: () => void;
   onOpenSkillsPanel: () => void;
   onOpenCodebasePanel: () => void;
   model?: string;
+  apiProfile?: string;
   compactDisabled: boolean;
   mcpDisabled: boolean;
   roleDisabled: boolean;
@@ -61,6 +65,7 @@ export const createChatCommands = ({
   onOpenSkillsPanel,
   onOpenCodebasePanel,
   model,
+  apiProfile,
   compactDisabled,
   mcpDisabled,
   roleDisabled,
@@ -118,6 +123,7 @@ export const createChatCommands = ({
       ...createCompactCommand(
         onCompactConversation,
         model,
+        apiProfile,
         labels.compactDescription,
         compactDisabled
       ),

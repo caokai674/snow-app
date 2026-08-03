@@ -1,9 +1,11 @@
 import { Loader2, Save, Search, Wrench, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useI18n } from "../../../i18n";
+import { AutoDismissNotice } from "../../AutoDismissNotice";
 import { CustomSelect } from "../../common/CustomSelect";
 import { McpKeyValueEditor } from "./McpKeyValueEditor";
 import { McpStringListEditor } from "./McpStringListEditor";
+import { draftToJson, parseDraftJson } from "./mcpSettingsUtils";
 import type { McpServerDraft, McpServerTool } from "./types";
 
 const TRANSPORT_OPTIONS = [
@@ -11,35 +13,35 @@ const TRANSPORT_OPTIONS = [
   { value: "http", label: "http" },
 ];
 
-type McpSettingsEditorProps = {
-  draft: McpServerDraft;
-  isBusy: boolean;
-  isSaving: boolean;
-  tools?: readonly McpServerTool[];
-  isFetchingTools: boolean;
-  onFetchTools: () => void;
-  onDraftChange: (patch: Partial<McpServerDraft>) => void;
-  onUpdatePair: (
-    group: "env" | "headers",
-    pairId: string,
-    field: "key" | "value",
-    value: string
-  ) => void;
-  onAddPair: (group: "env" | "headers") => void;
-  onRemovePair: (group: "env" | "headers", pairId: string) => void;
-  onUpdateArg: (argId: string, value: string) => void;
-  onAddArg: () => void;
-  onRemoveArg: (argId: string) => void;
-  onCancel: () => void;
-  onSave: () => void;
-};
-
 const formatInputSchema = (inputSchemaJson: string): string => {
   try {
     return JSON.stringify(JSON.parse(inputSchemaJson), null, 2);
   } catch {
     return inputSchemaJson || "{}";
   }
+};
+
+type McpSettingsEditorProps = {
+  draft: McpServerDraft;
+  isBusy: boolean;
+  isSaving: boolean;
+  tools?: McpServerTool[];
+  isFetchingTools?: boolean;
+  onFetchTools?: () => void;
+  onDraftChange: (patch: Partial<McpServerDraft>) => void;
+  onUpdatePair: (
+    field: "env" | "headers",
+    pairId: string,
+    fieldName: "key" | "value",
+    value: string
+  ) => void;
+  onAddPair: (field: "env" | "headers") => void;
+  onRemovePair: (field: "env" | "headers", pairId: string) => void;
+  onUpdateArg: (argId: string, value: string) => void;
+  onAddArg: () => void;
+  onRemoveArg: (argId: string) => void;
+  onCancel: () => void;
+  onSave: () => void;
 };
 
 export function McpSettingsEditor({
@@ -62,6 +64,9 @@ export function McpSettingsEditor({
   const { t } = useI18n();
   const isHttp = draft.transportType === "http";
   const [toolFilter, setToolFilter] = useState("");
+  const [editMode, setEditMode] = useState<"form" | "json">("form");
+  const [jsonText, setJsonText] = useState(() => draftToJson(draft));
+  const [jsonError, setJsonError] = useState("");
 
   const filteredTools = useMemo(() => {
     if (!tools) return undefined;
@@ -74,15 +79,110 @@ export function McpSettingsEditor({
     );
   }, [tools, toolFilter]);
 
+  const switchToJson = (): void => {
+    setJsonText(draftToJson(draft));
+    setJsonError("");
+    setEditMode("json");
+  };
+
+  const switchToForm = (): void => {
+    // JSON 内容不完整或缺少必填字段时不应阻断切换：能解析则应用，
+    // 否则保留当前表单数据，必填校验统一在保存时进行。
+    try {
+      const parsed = parseDraftJson(jsonText, draft);
+      onDraftChange(parsed);
+    } catch {
+      // 忽略无法解析的 JSON 编辑内容，保留当前表单数据
+    }
+    setJsonError("");
+    setEditMode("form");
+  };
+
+  const handleJsonTextChange = (value: string): void => {
+    setJsonText(value);
+    setJsonError("");
+  };
+
+  const handleSubmit = (event: React.FormEvent): void => {
+    event.preventDefault();
+    if (editMode === "json") {
+      try {
+        const parsed = parseDraftJson(jsonText, draft);
+        onDraftChange(parsed);
+        setJsonError("");
+      } catch (error) {
+        setJsonError(
+          error instanceof Error
+            ? error.message
+            : t("settings.mcpJsonInvalid", {
+                defaultValue: "Invalid JSON",
+              })
+        );
+        return;
+      }
+    }
+    onSave();
+  };
+
   return (
     <form
       id="mcp-settings-editor-form"
       className="api-settings-form-section mcp-settings-editor-form"
-      onSubmit={(event) => {
-        event.preventDefault();
-        onSave();
-      }}
+      onSubmit={handleSubmit}
     >
+      <div className="mcp-editor-mode-switch">
+        <button
+          type="button"
+          className={`mcp-editor-mode-btn ${editMode === "form" ? "active" : ""}`}
+          onClick={() => {
+            if (editMode === "json") {
+              switchToForm();
+            }
+          }}
+          disabled={isBusy}
+        >
+          {t("settings.mcpEditForm", { defaultValue: "Form" })}
+        </button>
+        <button
+          type="button"
+          className={`mcp-editor-mode-btn ${editMode === "json" ? "active" : ""}`}
+          onClick={switchToJson}
+          disabled={isBusy}
+        >
+          JSON
+        </button>
+      </div>
+
+      {editMode === "json" ? (
+        <div className="mcp-editor-json-section">
+          <textarea
+            className="mcp-editor-json-textarea"
+            value={jsonText}
+            onChange={(event) => handleJsonTextChange(event.target.value)}
+            disabled={isBusy}
+            spellCheck={false}
+            aria-label={t("settings.mcpJsonEditorLabel", {
+              defaultValue: "MCP server JSON configuration",
+            })}
+          />
+          <AutoDismissNotice
+            message={jsonError}
+            tone="error"
+            onDismiss={() => setJsonError("")}
+          />
+          <div className="mcp-editor-json-hint">
+            {t("settings.mcpJsonHint", {
+              defaultValue:
+                "Edit the server configuration as JSON. name, command (stdio) or url (http) are required.",
+            })}
+          </div>
+        </div>
+      ) : (
+        <></>
+      )}
+
+      {editMode === "form" && (
+        <>
       <div className="api-settings-form-grid">
         <label className="api-settings-field">
           <span>
@@ -301,6 +401,8 @@ export function McpSettingsEditor({
             </div>
           ))}
       </div>
+      </>
+      )}
     </form>
   );
 }

@@ -11,8 +11,8 @@ use super::common::{
 /// `shell_type` is the user's configured default shell (e.g. "powershell", "cmd", "gitbash", "wsl").
 /// It drives the platform-specific command guidance so the AI uses correct commands.
 ///
-/// ROLE.md injection (mirrors snow-cli behaviour):
-/// - Project scope ROLE.md > Global scope ROLE.md > default prompt.
+/// ROLE.md injection:
+/// - Global and project ROLE.md are combined by default, with project rules last.
 /// - If the active role is marked as "override", its content **replaces** the entire
 ///   system prompt template; only platform/working-dir/time sections are appended.
 /// - Otherwise the ROLE.md content replaces the default role text inside the template.
@@ -25,23 +25,26 @@ pub fn build_system_prompt(
     working_directory: &str,
     shell_type: &str,
     remote_role_content: Option<&str>,
+    remote_include_global_rules: Option<bool>,
 ) -> String {
     let time_info = get_current_time_info();
     let working_dir_section = get_working_directory_section(working_directory);
     let platform_section = get_platform_section(shell_type);
 
-    match read_active_role(working_directory, remote_role_content) {
+    match read_active_role(
+        working_directory,
+        remote_role_content,
+        remote_include_global_rules,
+    ) {
         // Override mode: role content replaces the entire template.
-        Some((role_content, true)) => format!(
-            "{role_content}\n\n{platform_section}\n\n{working_dir_section}\n\n{time_info}"
-        ),
+        Some((role_content, true)) => {
+            format!("{role_content}\n\n{platform_section}\n\n{working_dir_section}\n\n{time_info}")
+        }
 
         // Normal mode: role content replaces the default role text.
         Some((role_content, false)) => {
             let prompt = apply_role_override(SYSTEM_PROMPT_TEMPLATE, &role_content);
-            format!(
-                "{prompt}\n\n{platform_section}\n\n{working_dir_section}\n\n{time_info}"
-            )
+            format!("{prompt}\n\n{platform_section}\n\n{working_dir_section}\n\n{time_info}")
         }
 
         // No ROLE.md found — use the default template as-is.

@@ -39,4 +39,5 @@ pub struct ConversationContextRequest<'a> {
     /// the Electron main process (Rust cannot perform SSH I/O). `None` for
     /// local workspaces, where the prompt builder reads the file directly.
     pub remote_role_content: Option<&'a str>,
+    pub remote_include_global_rules: Option<bool>,
 }

@@ -514,6 +514,10 @@ export function SkillsSettingsPanel({
               },
             })}
           </span>
+          <span className="skills-settings-install-example">
+            {t("settings.skillsInstallExample", { defaultValue: "Example:" })}{" "}
+            <code>https://github.com/upstash/context7/tree/master/skills</code>
+          </span>
         </div>
       </section>
 

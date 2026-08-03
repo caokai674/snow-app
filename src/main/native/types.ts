@@ -544,6 +544,7 @@ export type ChatConversationRecord = {
   lastMessagePreview: string;
   messageCount: number;
   model: string;
+  apiProfileName: string;
   status: string;
   directoryId: string;
   forkedFromConversationId: string;
@@ -639,6 +640,7 @@ export type ResponsesApiMessage = {
 export type ResponsesApiRequest = {
   messages: ResponsesApiMessage[];
   model?: string;
+  apiProfile?: string;
   conversationId?: string;
   previousResponseId?: string;
   directoryId?: string;
@@ -655,6 +657,7 @@ export type ResponsesApiRequest = {
    * local workspaces — Rust reads the file itself.
    */
   remoteRoleContent?: string;
+  remoteIncludeGlobalRules?: boolean;
 };
 
 export type TokenUsage = {
@@ -1132,6 +1135,10 @@ export type NativeBridge = {
   updateConversationEmoji: (
     conversationId: string,
     emoji: string
+  ) => Promise<void>;
+  updateConversationApiProfile: (
+    conversationId: string,
+    profileName: string
   ) => Promise<void>;
   deleteConversation: (conversationId: string) => Promise<void>;
   appendToolMessage: (conversationId: string, content: string) => Promise<void>;

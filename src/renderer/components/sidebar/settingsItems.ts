@@ -61,6 +61,13 @@ export const SETTINGS_ITEMS: SettingsItem[] = [
     view: "system-prompt-settings",
   },
   {
+    id: "personalization",
+    icon: ScrollText,
+    labelKey: "settings.personalizationSettings",
+    defaultLabel: "Personalization",
+    view: "personalization-settings",
+  },
+  {
     id: "customheaders",
     icon: List,
     labelKey: "settings.customHeadersSettings",

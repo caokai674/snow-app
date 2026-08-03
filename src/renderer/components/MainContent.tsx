@@ -62,6 +62,13 @@ const SystemPromptSettingsPanel = lazy(() =>
     default: m.SystemPromptSettingsPanel,
   }))
 );
+const PersonalizationSettingsPanel = lazy(() =>
+  import("./sidebar/personalization/PersonalizationSettingsPanel").then(
+    (m) => ({
+      default: m.PersonalizationSettingsPanel,
+    })
+  )
+);
 const TerminalSettingsPanel = lazy(() =>
   import("./sidebar/TerminalSettingsPanel").then((m) => ({
     default: m.TerminalSettingsPanel,
@@ -128,6 +135,11 @@ export const MainContent = ({
             <CodebaseSettingsPanel onClose={() => onSelectView("chat")} />
           ) : activeView === "system-prompt-settings" ? (
             <SystemPromptSettingsPanel onClose={() => onSelectView("chat")} />
+          ) : activeView === "personalization-settings" ? (
+            <PersonalizationSettingsPanel
+              activeDirectory={activeDirectory}
+              onClose={() => onSelectView("chat")}
+            />
           ) : activeView === "custom-headers-settings" ? (
             <CustomHeadersSettingsPanel onClose={() => onSelectView("chat")} />
           ) : activeView === "mcp-settings" ? (
