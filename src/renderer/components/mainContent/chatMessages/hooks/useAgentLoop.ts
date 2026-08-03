@@ -38,7 +38,7 @@ export type UseAgentLoopParams = {
     conversationId: string,
     projectId?: string
   ) => Promise<ToolAuthorizationDecision[]>;
-  rejectAllToolAuthorizations: () => void;
+  rejectToolAuthorizations: (sessionKey?: string) => void;
   rejectPendingUserQuestions: (sessionKey?: string) => void;
 };
 

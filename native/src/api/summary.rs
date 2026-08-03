@@ -157,15 +157,9 @@ async fn generate_summary_via_chat(
     )
     .await?;
 
-    let content = body
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let content = extract_chat_content(&body);
 
-    Ok(content.to_string())
+    Ok(content)
 }
 
 async fn generate_summary_via_responses(
@@ -732,6 +726,94 @@ fn extract_responses_content(body: &Value) -> String {
     }
 
     String::new()
+}
+
+/// Extract only the main text (正文) from a Chat Completions response.
+///
+/// Some models cannot disable their chain of thought, so even though the
+/// request asks for no reasoning (`reasoning_effort: "none"`), the response
+/// may still contain thinking content. It is never adopted as the summary:
+/// - `message.reasoning_content` / `reasoning` / `reasoning_details` fields
+///   are deliberately ignored;
+/// - array `content` parts typed `thinking` / `reasoning` are skipped;
+/// - inline `[think]...[/think]` / `<thinking>...</thinking>` /
+///   `[reasoning]...[/reasoning]` sections inside the text are stripped.
+fn extract_chat_content(body: &Value) -> String {
+    let Some(choice) = body
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+    else {
+        return String::new();
+    };
+    let Some(message) = choice.get("message") else {
+        return String::new();
+    };
+
+    // Plain string content: this is the 正文 for standard OpenAI-compatible
+    // APIs, where thinking travels in the separate `reasoning_content` field.
+    if let Some(text) = message
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return strip_inline_thinking(text);
+    }
+
+    // Array content (Kimi K2 Thinking, Qwen3 via some gateways, ...): pick
+    // the text parts only, skipping thinking/reasoning parts.
+    if let Some(parts) = message.get("content").and_then(Value::as_array) {
+        for part in parts {
+            let part_type = part
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if matches!(
+                part_type,
+                "thinking" | "reasoning" | "reasoning_text" | "redacted_thinking" | "summary_text"
+            ) {
+                continue;
+            }
+            if part.get("thought").and_then(Value::as_bool).unwrap_or(false) {
+                continue;
+            }
+            if let Some(text) = part
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                return strip_inline_thinking(text);
+            }
+        }
+    }
+
+    String::new()
+}
+
+/// Remove inline thinking sections that some models (unable to disable their
+/// chain of thought) embed directly inside the main text.
+fn strip_inline_thinking(text: &str) -> String {
+    let mut cleaned = text.to_string();
+    for (open, close) in [
+        ("[think]", "[/think]"),
+        ("[reasoning]", "[/reasoning]"),
+        ("<thinking>", "</thinking>"),
+    ] {
+        loop {
+            let Some(start) = cleaned.find(open) else {
+                break;
+            };
+            let search_from = start + open.len();
+            let Some(relative_end) = cleaned[search_from..].find(close) else {
+                break;
+            };
+            let end = search_from + relative_end + close.len();
+            cleaned.replace_range(start..end, "");
+        }
+    }
+    cleaned.trim().to_string()
 }
 
 fn normalize_role(role: &str) -> &str {

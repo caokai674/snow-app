@@ -448,7 +448,7 @@ input {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  cursor: default;
+  cursor: pointer;
 }
 
 .top-bar-codebase-sync.is-watching {
@@ -465,6 +465,14 @@ input {
 
 .top-bar-codebase-sync.is-syncing {
   color: var(--accent-blue);
+}
+
+.top-bar-codebase-sync.is-error {
+  color: var(--accent-red-text);
+}
+
+.top-bar-codebase-sync.is-error:hover {
+  background: var(--accent-red-bg);
 }
 
 .top-bar-codebase-sync.is-syncing .spin {
@@ -484,6 +492,11 @@ input {
 
 .top-bar-codebase-sync.is-watching .top-bar-codebase-sync-dot {
   background: var(--accent-green);
+}
+
+.top-bar-codebase-sync.is-error .top-bar-codebase-sync-dot {
+  background: var(--accent-red);
+  animation: codebase-sync-pulse 1.5s ease-in-out infinite;
 }
 
 .top-bar-codebase-sync.is-pending .top-bar-codebase-sync-dot {
@@ -16649,6 +16662,47 @@ input {
   transition: width 0.3s ease;
 }
 
+.project-codebase-embed-error {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent-red);
+  border-radius: var(--radius-md);
+  background: color-mix(
+    in srgb,
+    var(--accent-red) 8%,
+    var(--bg-tertiary)
+  );
+}
+
+.project-codebase-embed-error-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent-red-text);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.project-codebase-embed-error-header > svg {
+  flex-shrink: 0;
+}
+
+.project-codebase-embed-error-message {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.project-codebase-embed-error-hint {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
 .project-codebase-resumable-session {
   display: flex;
   flex-direction: column;
@@ -18344,6 +18398,63 @@ input {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
+}
+
+/* Floating tooltip with the full commit details. Rendered in a portal with
+   fixed positioning so the scroll container cannot clip it; it opens to the
+   LEFT of the cursor because the git panel sits on the right edge of the
+   window (flips right only when the left edge of the viewport is hit). */
+.git-graph-tooltip {
+  position: fixed;
+  z-index: 1000;
+  min-width: 240px;
+  max-width: 440px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  box-shadow: var(--island-shadow);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+.git-graph-tooltip-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.git-graph-tooltip-label {
+  flex-shrink: 0;
+  min-width: 44px;
+  color: var(--text-tertiary);
+}
+
+.git-graph-tooltip-value {
+  min-width: 0;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.git-graph-tooltip-mono {
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.git-graph-tooltip-divider {
+  height: 1px;
+  background: var(--border-light);
+  margin: 6px 0;
+}
+
+.git-graph-tooltip-message {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .git-commit-actions {
@@ -23029,7 +23140,6 @@ input {
 }
 
 :root[data-theme-preset="cream"] .app-layout {
-  gap: 8px;
   padding: 0 12px 12px;
 }
 

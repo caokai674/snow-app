@@ -76,6 +76,48 @@ pub async fn textify_images_in_messages(
         })?;
 
     for message in messages.iter_mut() {
+        // 工具结果消息：视觉文本化必须同时作用到 `tool_results_json` 的每个
+        // 结构化 result 块。各 provider 构造请求时（chat/payload.rs、
+        // responses/payload.rs、anthropic/payload.rs、gemini/payload.rs 的
+        // tool 分支）读取的是这里的 result 字符串，而不是 message.content；
+        // 若只替换 content，截图 Base64 标签仍会原样进入主模型请求。
+        if message.role.trim() == "tool" {
+            if let Some(raw) = message.tool_results_json.clone() {
+                let results =
+                    crate::api::conversation::tool_messages::parse_tool_results_json(&raw);
+                let mut updated = Vec::with_capacity(results.len());
+                let mut changed = false;
+                for (name, call_id, result) in results {
+                    if result.contains("@@image:") {
+                        let parsed = parse_chat_message_content(&result, database_path)?;
+                        if !parsed.images.is_empty() {
+                            let textified =
+                                textify_parsed_content(&parsed, &client, &vision_config).await?;
+                            updated.push((name, call_id, textified));
+                            changed = true;
+                            continue;
+                        }
+                    }
+                    updated.push((name, call_id, result));
+                }
+                if changed {
+                    // 与 tool_messages::ensure_tool_pairing 的写回格式保持一致：
+                    // [{"name": ..., "callId": ..., "result": ...}]
+                    let serialized: Vec<Value> = updated
+                        .iter()
+                        .map(|(name, call_id, result)| {
+                            json!({
+                                "name": name,
+                                "callId": call_id,
+                                "result": result,
+                            })
+                        })
+                        .collect();
+                    message.tool_results_json = serde_json::to_string(&serialized).ok();
+                }
+            }
+        }
+
         let content = message.content.clone();
         if !content.contains("@@image:") {
             continue;
