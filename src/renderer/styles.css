@@ -2782,29 +2782,70 @@ input {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.codex-settings-summary-grid {
+.import-settings-tabs {
+  display: flex;
+  gap: 18px;
+  margin: 0 0 14px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.import-settings-tab {
+  position: relative;
+  min-height: 32px;
+  padding: 0 1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.import-settings-tab:hover {
+  color: var(--text-primary);
+}
+
+.import-settings-tab.active {
+  border-bottom-color: var(--accent-color);
+  color: var(--text-primary);
+}
+
+.import-settings-tab:focus-visible {
+  outline: 2px solid var(--focus-ring-color, var(--accent-color));
+  outline-offset: -2px;
+}
+
+.import-settings-source-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.import-settings-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.import-settings-summary-grid {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
-.codex-settings-summary-value {
+.import-settings-summary-value {
   color: var(--text-primary);
   font-size: 18px;
   line-height: 1.15;
 }
 
-.codex-settings-actions {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.codex-settings-source {
+.import-settings-source {
   padding: 10px;
   border: 1px solid var(--border-light);
   border-radius: var(--radius-lg);
   background: var(--bg-secondary);
 }
 
-.codex-settings-found,
-.codex-settings-missing {
+.import-settings-found,
+.import-settings-missing {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -2813,17 +2854,17 @@ input {
   font-weight: 650;
 }
 
-.codex-settings-missing {
+.import-settings-missing {
   color: var(--accent-amber-text);
 }
 
-.codex-settings-path-list {
+.import-settings-path-list {
   display: flex;
   flex-direction: column;
   gap: 7px;
 }
 
-.codex-settings-path-row {
+.import-settings-path-row {
   display: grid;
   grid-template-columns: 16px minmax(112px, 0.3fr) minmax(0, 1fr);
   align-items: center;
@@ -2833,7 +2874,7 @@ input {
   font-size: 11.5px;
 }
 
-.codex-settings-path-row code {
+.import-settings-path-row code {
   min-width: 0;
   overflow: hidden;
   color: var(--text-secondary);
@@ -2843,7 +2884,7 @@ input {
   white-space: nowrap;
 }
 
-.codex-settings-warnings {
+.import-settings-warnings {
   gap: 7px;
   padding: 10px;
   border: 1px solid var(--accent-amber-bg);
@@ -2851,7 +2892,7 @@ input {
   background: color-mix(in srgb, var(--accent-amber-bg) 45%, transparent);
 }
 
-.codex-settings-warnings ul {
+.import-settings-warnings ul {
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -2860,7 +2901,7 @@ input {
   list-style: none;
 }
 
-.codex-settings-warnings li {
+.import-settings-warnings li {
   display: flex;
   align-items: flex-start;
   gap: 6px;
@@ -2870,7 +2911,7 @@ input {
   overflow-wrap: anywhere;
 }
 
-.codex-settings-result {
+.import-settings-result {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -2883,15 +2924,24 @@ input {
 }
 
 @media (max-width: 640px) {
-  .codex-settings-actions {
+  .import-settings-tabs {
+    gap: 14px;
+    overflow-x: auto;
+  }
+
+  .import-settings-tab {
+    flex: 0 0 auto;
+  }
+
+  .import-settings-actions {
     grid-template-columns: 1fr;
   }
 
-  .codex-settings-path-row {
+  .import-settings-path-row {
     grid-template-columns: 16px minmax(0, 1fr);
   }
 
-  .codex-settings-path-row code {
+  .import-settings-path-row code {
     grid-column: 2;
   }
 }

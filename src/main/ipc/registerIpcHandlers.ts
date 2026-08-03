@@ -13,6 +13,7 @@ import { registerNotificationHandlers } from "./handlers/notificationHandlers";
 import { registerMemoHandlers } from "./handlers/memoHandlers";
 import { registerPersonalizationHandlers } from "./handlers/personalizationHandlers";
 import { registerCodexHandlers } from "./handlers/codexHandlers";
+import { registerImportConfigHandlers } from "./handlers/importConfigHandlers";
 
 export const registerIpcHandlers = (native: NativeBridge): void => {
   registerPtyHandlers();
@@ -30,4 +31,5 @@ export const registerIpcHandlers = (native: NativeBridge): void => {
   registerMemoHandlers(native);
   registerPersonalizationHandlers();
   registerCodexHandlers(native);
+  registerImportConfigHandlers(native);
 };

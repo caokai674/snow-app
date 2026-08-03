@@ -32,9 +32,9 @@ const McpSettingsPanel = lazy(() =>
     default: m.McpSettingsPanel,
   }))
 );
-const CodexSettingsPanel = lazy(() =>
-  import("./sidebar/CodexSettingsPanel").then((m) => ({
-    default: m.CodexSettingsPanel,
+const ImportSettingsPanel = lazy(() =>
+  import("./sidebar/ImportSettingsPanel").then((m) => ({
+    default: m.ImportSettingsPanel,
   }))
 );
 const PrivacySettingsPanel = lazy(() =>
@@ -152,8 +152,8 @@ export const MainContent = ({
               activeDirectory={activeDirectory}
               onClose={() => onSelectView("chat")}
             />
-          ) : activeView === "codex-settings" ? (
-            <CodexSettingsPanel onClose={() => onSelectView("chat")} />
+          ) : activeView === "import-settings" ? (
+            <ImportSettingsPanel onClose={() => onSelectView("chat")} />
           ) : activeView === "skills-settings" ? (
             <SkillsSettingsPanel
               activeDirectory={activeDirectory}

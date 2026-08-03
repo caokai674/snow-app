@@ -50,3 +50,6 @@ AGENTS.md
 .ace-tool/
 .codex-user-data/
 design-qa.md
+/codex/
+/claude-code-docs/
+/opencode/

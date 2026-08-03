@@ -83,11 +83,11 @@ export const SETTINGS_ITEMS: SettingsItem[] = [
     view: "mcp-settings",
   },
   {
-    id: "codex",
+    id: "import-config",
     icon: Download,
-    labelKey: "settings.codexSettings",
-    defaultLabel: "Codex compatibility",
-    view: "codex-settings",
+    labelKey: "settings.importSettings",
+    defaultLabel: "Import configuration",
+    view: "import-settings",
   },
   {
     id: "skills",
