@@ -32,6 +32,7 @@
     "@electron-toolkit/utils": "^4.0.0",
     "@git-diff-view/file": "^0.1.7",
     "@git-diff-view/react": "^0.1.7",
+    "@iarna/toml": "^2.2.5",
     "@napi-rs/triples": "^1.2.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",

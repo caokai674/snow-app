@@ -2768,6 +2768,121 @@ input {
 .skills-settings-summary-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
+
+.codex-settings-summary-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.codex-settings-summary-value {
+  color: var(--text-primary);
+  font-size: 18px;
+  line-height: 1.15;
+}
+
+.codex-settings-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.codex-settings-source {
+  padding: 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+}
+
+.codex-settings-found,
+.codex-settings-missing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent-green-text);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.codex-settings-missing {
+  color: var(--accent-amber-text);
+}
+
+.codex-settings-path-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.codex-settings-path-row {
+  display: grid;
+  grid-template-columns: 16px minmax(112px, 0.3fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+}
+
+.codex-settings-path-row code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-settings-warnings {
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid var(--accent-amber-bg);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--accent-amber-bg) 45%, transparent);
+}
+
+.codex-settings-warnings ul {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.codex-settings-warnings li {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--accent-amber-text);
+  font-size: 11.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.codex-settings-result {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid var(--accent-green-bg);
+  border-radius: var(--radius-md);
+  background: var(--accent-green-bg);
+  color: var(--accent-green-text);
+  font-size: 11.5px;
+}
+
+@media (max-width: 640px) {
+  .codex-settings-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .codex-settings-path-row {
+    grid-template-columns: 16px minmax(0, 1fr);
+  }
+
+  .codex-settings-path-row code {
+    grid-column: 2;
+  }
+}
+
 .hooks-settings-summary-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }

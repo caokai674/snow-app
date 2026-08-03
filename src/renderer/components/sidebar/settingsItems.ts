@@ -1,6 +1,7 @@
 import {
   ChartColumn,
   Database,
+  Download,
   EyeOff,
   Globe,
   FishingHook,
@@ -80,6 +81,13 @@ export const SETTINGS_ITEMS: SettingsItem[] = [
     labelKey: "settings.mcpSettings",
     defaultLabel: "MCP settings",
     view: "mcp-settings",
+  },
+  {
+    id: "codex",
+    icon: Download,
+    labelKey: "settings.codexSettings",
+    defaultLabel: "Codex compatibility",
+    view: "codex-settings",
   },
   {
     id: "skills",
