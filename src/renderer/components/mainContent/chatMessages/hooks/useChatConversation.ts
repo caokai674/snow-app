@@ -332,14 +332,14 @@ export const useChatConversation = (
   const agentLoopApi = useAgentLoop({
     ctx,
     requestToolAuthorizations: toolAuthApi.requestToolAuthorizations,
-    rejectAllToolAuthorizations: toolAuthApi.rejectAllToolAuthorizations,
+    rejectToolAuthorizations: toolAuthApi.rejectToolAuthorizations,
     rejectPendingUserQuestions: userQuestionApi.rejectPendingUserQuestions,
   });
 
   // --- 6. Conversation management (select, new, abort, fork, etc.) ---
   const conversationManagementApi = useConversationManagement({
     ctx,
-    rejectAllToolAuthorizations: toolAuthApi.rejectAllToolAuthorizations,
+    rejectToolAuthorizations: toolAuthApi.rejectToolAuthorizations,
     rejectPendingUserQuestions: userQuestionApi.rejectPendingUserQuestions,
   });
 
@@ -419,6 +419,15 @@ export const useChatConversation = (
     }
   }, [ctx]);
 
+  // 重命名会话后同步更新内存 session 的 summary，使 TopBar 标题即时刷新。
+  // 会话尚未加载过（session 不存在）时 updateSessionField 安全地不执行任何操作。
+  const updateConversationSummary = useCallback(
+    (conversationId: string, summary: string): void => {
+      ctx.updateSessionField(conversationId, "summary", summary);
+    },
+    [ctx]
+  );
+
   return {
     messages: activeSession?.messages ?? [],
     summary: activeSession?.summary ?? "",
@@ -457,6 +466,7 @@ export const useChatConversation = (
       conversationManagementApi.handleSelectConversation,
     handleNewChat: conversationManagementApi.handleNewChat,
     refreshConversations: conversationManagementApi.refreshConversations,
+    updateConversationSummary,
     isStreaming: activeSession?.isStreaming ?? false,
     isAborting: activeSession?.isAborting ?? false,
     isPaused: activeSession?.isPaused ?? false,

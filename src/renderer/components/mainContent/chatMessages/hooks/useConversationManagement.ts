@@ -21,7 +21,7 @@ import {
 
 export type UseConversationManagementParams = {
   ctx: ConversationContextValue;
-  rejectAllToolAuthorizations: () => void;
+  rejectToolAuthorizations: (sessionKey?: string) => void;
   rejectPendingUserQuestions: (sessionKey?: string) => void;
 };
 
@@ -31,7 +31,7 @@ export type UseConversationManagementParams = {
 export const useConversationManagement = (
   params: UseConversationManagementParams
 ) => {
-  const { ctx, rejectAllToolAuthorizations, rejectPendingUserQuestions } =
+  const { ctx, rejectToolAuthorizations, rejectPendingUserQuestions } =
     params;
 
   const withdrawPendingMessage = useCallback((index: number): string | null => {
@@ -406,7 +406,11 @@ export const useConversationManagement = (
       return;
     }
 
-    rejectAllToolAuthorizations();
+    // Reject only this session's pending tool authorizations. The pending
+    // map is shared across all conversations, so a session-scoped reject is
+    // required — a global reject here would silently decline authorization
+    // prompts waiting in other sessions.
+    rejectToolAuthorizations(key);
     rejectPendingUserQuestions(key);
     for (const [decisionId, pendingDecision] of ctx.pendingHookDecisionRef
       .current) {
@@ -485,6 +489,10 @@ export const useConversationManagement = (
       }
       subRef.isAbortRequested = true;
       subRef.isSending = false;
+      // Settle the sub-agent's own pending authorizations (scoped to its
+      // session key) so its agent loop cannot stay blocked awaiting a
+      // decision that will never arrive.
+      rejectToolAuthorizations(subKey);
       killRunningBashExecutions(
         ctx.sessionsRef.current?.[subKey]?.messages ?? []
       );
@@ -526,7 +534,7 @@ export const useConversationManagement = (
     }
   }, [
     ctx.removeStreamingId,
-    rejectAllToolAuthorizations,
+    rejectToolAuthorizations,
     rejectPendingUserQuestions,
     ctx.updateSessionMessages,
     ctx.updateSessionField,
@@ -537,7 +545,7 @@ export const useConversationManagement = (
     (conversationId: string): void => {
       const ref = ctx.sessionsRefData.current.get(conversationId);
 
-      rejectAllToolAuthorizations();
+      rejectToolAuthorizations(conversationId);
       rejectPendingUserQuestions(conversationId);
       killRunningBashExecutions(
         ctx.sessionsRef.current?.[conversationId]?.messages ?? []
@@ -566,7 +574,7 @@ export const useConversationManagement = (
     },
     [
       ctx.removeStreamingId,
-      rejectAllToolAuthorizations,
+      rejectToolAuthorizations,
       rejectPendingUserQuestions,
       ctx.updateSessionField,
     ]

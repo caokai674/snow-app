@@ -510,6 +510,8 @@ export type UseChatConversationResult = {
   ) => Promise<void>;
   handleNewChat: () => void;
   refreshConversations: () => void;
+  /** 同步更新内存中某会话的 summary（如重命名会话后让 TopBar 标题即时刷新）。 */
+  updateConversationSummary: (conversationId: string, summary: string) => void;
   isStreaming: boolean;
   isAborting: boolean;
   isPaused: boolean;

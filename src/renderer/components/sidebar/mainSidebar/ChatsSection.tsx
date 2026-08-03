@@ -53,6 +53,7 @@ export function ChatsSection({
     upsertedConversation,
     subAgentSessionEvents,
     refreshConversations,
+    updateConversationSummary,
     handleSelectConversation,
     handleNewChat,
     activeConversationId,
@@ -246,6 +247,8 @@ export function ChatsSection({
     newTitle: string
   ): Promise<void> => {
     await window.snow.renameConversation(conversation.conversationId, newTitle);
+    // 同步更新内存中 session 的 summary，让 TopBar 标题即时刷新
+    updateConversationSummary(conversation.conversationId, newTitle);
     refreshConversations();
   };
 
