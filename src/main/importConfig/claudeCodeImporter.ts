@@ -32,7 +32,7 @@ import {
 } from "./discovery";
 import type { ImportSource, ReadonlyImportResult } from "../../shared/importDiscovery";
 
-const SOURCE = "claude-code";
+const SOURCE: "claude-code" = "claude-code";
 
 type ConfigSource = {
   scope: "global" | "project";

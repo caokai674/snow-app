@@ -31,7 +31,7 @@ import {
 } from "./discovery";
 import type { ImportSource, ReadonlyImportResult } from "../../shared/importDiscovery";
 
-const SOURCE = "opencode";
+const SOURCE: "opencode" = "opencode";
 type ConfigSource = {
   scope: "global" | "project";
   path: string;

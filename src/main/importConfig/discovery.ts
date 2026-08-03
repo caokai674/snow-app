@@ -192,7 +192,7 @@ export const buildImportDiscovery = (discoveries: ImportSourceDiscovery[]): Impo
     }
   }
 
-  const candidates = groups.map((group) => {
+  const candidates: ImportCandidate[] = groups.map((group) => {
     const primary = group[0];
     const sources = group
       .map((input) => originFor(input, input.canonicalOriginPath))
@@ -209,7 +209,7 @@ export const buildImportDiscovery = (discoveries: ImportSourceDiscovery[]): Impo
       contentHash: primary.contentHash,
       originPaths: sources.map((source) => source.originPath).sort(),
     }).slice(0, 24)}`;
-    const status = group.some((input) => statusFor(input, input.canonicalOriginPath) === "unsupported")
+    const status: ImportCandidateStatus = group.some((input) => statusFor(input, input.canonicalOriginPath) === "unsupported")
       ? "unsupported"
       : group.some((input) => statusFor(input, input.canonicalOriginPath) === "already-effective")
         ? "already-effective"
