@@ -345,20 +345,17 @@ export const ProjectMcpPanel = ({
                       : t("projectMcp.toolsOnDemand")}
                   </span>
                 </button>
-                <label
-                  className={`project-mcp-switch${
-                    serverDisabled ? " is-unavailable" : ""
-                  }`}
-                >
+                <label className="toggle-switch">
                   <input
                     checked={server.enabled}
                     disabled={serverDisabled}
+                    hidden
                     onChange={(event) =>
                       void updateServer(server, event.target.checked)
                     }
                     type="checkbox"
                   />
-                  <span aria-hidden="true" />
+                  <span className="toggle-slider" />
                 </label>
               </div>
               {serverDisabled ? (
@@ -411,16 +408,11 @@ export const ProjectMcpPanel = ({
                           <strong>{toolDisplayName(tool.name)}</strong>
                           <span>{tool.description}</span>
                         </div>
-                        <label
-                          className={`project-mcp-switch project-mcp-tool-switch${
-                            !server.globalEnabled || !server.enabled
-                              ? " is-unavailable"
-                              : ""
-                          }`}
-                        >
+                        <label className="toggle-switch">
                           <input
                             checked={tool.enabled}
                             disabled={!server.globalEnabled || !server.enabled}
+                            hidden
                             onChange={(event) =>
                               void updateTool(
                                 server,
@@ -430,7 +422,7 @@ export const ProjectMcpPanel = ({
                             }
                             type="checkbox"
                           />
-                          <span aria-hidden="true" />
+                          <span className="toggle-slider" />
                         </label>
                       </div>
                     ))

@@ -82,19 +82,41 @@ export const useConversationManagement = (
       // intent so the UI follows the active conversation normally.
       ctx.setNewChatRequested(false);
 
+      // The pending-messages panel mirrors the *active* conversation's
+      // pending queue. When switching sessions the displayed queue must be
+      // reloaded from the target conversation's pendingQueue entry so the
+      // previously active conversation's pending messages do not leak into
+      // the newly selected one (each conversation keeps its own queue in
+      // pendingQueueRef, but activePendingMessages is a single shared state).
+      const targetPendingQueue = ctx.pendingQueueRef.current.get(trimmedId);
+      ctx.setActivePendingMessages(
+        targetPendingQueue
+          ? targetPendingQueue.map((item) => item.text)
+          : []
+      );
+
       // Restore Plan/Goal Mode from the target session's stored state.
-      const targetRef = ctx.sessionsRefData.current.get(trimmedId);
-      const targetPlanMode = targetRef?.planMode ?? false;
-      const targetGoalMode = targetRef?.goalMode ?? false;
+      // Per-conversation isolation: this NEVER writes the global persisted
+      // defaults — the global settings are only mutated by explicit user
+      // toggles. A cold conversation (no in-memory session yet) falls back
+      // to the global defaults; its DB overrides are applied once the
+      // history load resolves below.
+      const cachedRef = ctx.sessionsRefData.current.get(trimmedId);
+      const defaults = ctx.globalModeDefaultsRef.current;
+      const targetPlanMode = cachedRef?.planMode ?? defaults.planMode;
+      const targetGoalMode = cachedRef?.goalMode ?? defaults.goalMode;
+      const targetBudget =
+        cachedRef?.goalModeTokenBudget ?? defaults.goalModeTokenBudget;
       if (ctx.planModeRef.current !== targetPlanMode) {
         ctx.planModeRef.current = targetPlanMode;
         ctx.setPlanModeState(targetPlanMode);
-        void window.snow.setPlanMode(targetPlanMode);
       }
       if (ctx.goalModeRef.current !== targetGoalMode) {
         ctx.goalModeRef.current = targetGoalMode;
         ctx.setGoalModeState(targetGoalMode);
-        void window.snow.setGoalMode(targetGoalMode);
+      }
+      if (ctx.goalModeTokenBudget !== targetBudget) {
+        ctx.setGoalModeTokenBudgetState(targetBudget);
       }
 
       if (hasLoadedCachedHistory) {
@@ -128,13 +150,14 @@ export const useConversationManagement = (
       if (!loadPromise) {
         loadPromise = (async () => {
           try {
-            const [page, conversationRecord] = await Promise.all([
+            const [page, conversationRecord, storedModes] = await Promise.all([
               window.snow.listChatMessagesPaginated(
                 trimmedId,
                 "",
                 CHAT_MESSAGE_PAGE_SIZE
               ),
               window.snow.getChatConversation(trimmedId),
+              window.snow.getConversationModes(trimmedId).catch(() => null),
             ]);
 
             const checkpointIds = Array.from(
@@ -144,6 +167,24 @@ export const useConversationManagement = (
                   .map((record) => record.checkpointId)
               )
             );
+
+            // Resolve the effective modes for this conversation: DB override
+            // wins, then the global defaults. Defensive mutual exclusion: a
+            // corrupt record with both modes set resolves to Plan Mode and is
+            // repaired asynchronously.
+            let storedPlanMode = storedModes?.planMode ?? defaults.planMode;
+            let storedGoalMode = storedModes?.goalMode ?? defaults.goalMode;
+            let storedBudget =
+              storedModes?.goalModeTokenBudget ?? defaults.goalModeTokenBudget;
+            if (storedPlanMode && storedGoalMode) {
+              storedGoalMode = false;
+              void window.snow.setConversationModes(
+                trimmedId,
+                storedPlanMode,
+                false,
+                storedBudget
+              );
+            }
 
             // Re-hydrate the file-change stats from persisted history so the
             // stats panel still shows what this conversation did after an app
@@ -217,27 +258,33 @@ export const useConversationManagement = (
             // never clobbered by an older one. Later selections of the same
             // conversation then render instantly from the cache.
             if (!ctx.sessionsRef.current[trimmedId]) {
-              // A sub-agent conversation whose persisted run status is
-              // terminal is read-only from the moment it is opened: the
-              // input box stays hidden and sends are rejected.
-              const isTerminatedSubAgent =
-                conversationRecord?.conversationType === "sub_agent" &&
-                conversationRecord.subAgentStatus !== "" &&
-                conversationRecord.subAgentStatus !== "running";
-              ctx.sessionsRefData.current.set(trimmedId, {
-                streamId: null,
-                streamPromise: null,
-                summaryPromise: null,
-                isSending: false,
-                isAbortRequested: false,
-                runId: 0,
-                directoryId: conversationDirId,
-                checkpointIds,
-                childSubAgentIds: new Set(),
-                planMode: false,
-                goalMode: false,
-                subAgentTerminated: isTerminatedSubAgent || undefined,
-              });
+              // Never overwrite an existing session ref (e.g. one created by
+              // ensureSession while the history was still loading) — the live
+              // ref is authoritative.
+              if (!ctx.sessionsRefData.current.has(trimmedId)) {
+                // A sub-agent conversation whose persisted run status is
+                // terminal is read-only from the moment it is opened: the
+                // input box stays hidden and sends are rejected.
+                const isTerminatedSubAgent =
+                  conversationRecord?.conversationType === "sub_agent" &&
+                  (conversationRecord.subAgentStatus ?? "") !== "" &&
+                  conversationRecord.subAgentStatus !== "running";
+                ctx.sessionsRefData.current.set(trimmedId, {
+                  streamId: null,
+                  streamPromise: null,
+                  summaryPromise: null,
+                  isSending: false,
+                  isAbortRequested: false,
+                  runId: 0,
+                  directoryId: conversationDirId,
+                  checkpointIds,
+                  childSubAgentIds: new Set(),
+                  planMode: storedPlanMode,
+                  goalMode: storedGoalMode,
+                  goalModeTokenBudget: storedBudget,
+                  subAgentTerminated: isTerminatedSubAgent || undefined,
+                });
+              }
               ctx.setSessions((prev) => {
                 if (prev[trimmedId]) return prev;
                 return {
@@ -289,6 +336,26 @@ export const useConversationManagement = (
         ctx.setIsLoadingInitialHistory(false);
       }
 
+      // Sync the UI state to the session's resolved modes once the load
+      // settles. For a cold conversation with DB overrides this is where the
+      // displayed mode transitions from the global default to its own value.
+      if (selectionRequestId === ctx.selectionRequestIdRef.current) {
+        const settledRef = ctx.sessionsRefData.current.get(trimmedId);
+        if (settledRef) {
+          if (ctx.planModeRef.current !== settledRef.planMode) {
+            ctx.planModeRef.current = settledRef.planMode;
+            ctx.setPlanModeState(settledRef.planMode);
+          }
+          if (ctx.goalModeRef.current !== settledRef.goalMode) {
+            ctx.goalModeRef.current = settledRef.goalMode;
+            ctx.setGoalModeState(settledRef.goalMode);
+          }
+          if (ctx.goalModeTokenBudget !== settledRef.goalModeTokenBudget) {
+            ctx.setGoalModeTokenBudgetState(settledRef.goalModeTokenBudget);
+          }
+        }
+      }
+
       // Execute onSessionStart hooks (fire-and-forget) when the user opens
       // an existing conversation. These are diagnostic/audit hooks that run
       // after the history is loaded — they cannot block the session switch.
@@ -330,6 +397,11 @@ export const useConversationManagement = (
       ctx.setPlanModeState,
       ctx.goalModeRef,
       ctx.setGoalModeState,
+      ctx.goalModeTokenBudget,
+      ctx.setGoalModeTokenBudgetState,
+      ctx.globalModeDefaultsRef,
+      ctx.pendingQueueRef,
+      ctx.setActivePendingMessages,
     ]
   );
 
@@ -429,30 +501,39 @@ export const useConversationManagement = (
     // auto-switching back to the migrated conversation once it finishes.
     ctx.setNewChatRequested(true);
 
-    // Reset Plan Mode so a new chat always starts with it disabled.
-    if (ctx.planModeRef.current) {
-      ctx.planModeRef.current = false;
-      ctx.setPlanModeState(false);
-      void window.snow.setPlanMode(false);
+    // Reset Plan Mode so a new chat always starts with the GLOBAL default
+    // (not the previous conversation's mode — real per-conversation
+    // isolation). The global defaults are only mutated by explicit user
+    // toggles, so no persisted write is needed here.
+    const defaults = ctx.globalModeDefaultsRef.current;
+    if (ctx.planModeRef.current !== defaults.planMode) {
+      ctx.planModeRef.current = defaults.planMode;
+      ctx.setPlanModeState(defaults.planMode);
     }
 
-    // A new chat starts a brand-new task: invalidate every Plan Mode
-    // approval, even when Plan Mode was already off but other conversations
-    // still hold an approved plan.
-    ctx.planApprovedSessionKeysRef.current.clear();
+    // A new chat starts a brand-new task. The pending session's approval is
+    // cleared ONLY when that pending session is not running in the
+    // background — a streaming pending conversation keeps its approved plan
+    // (it will be migrated to its real id). handleSendMessage resets the
+    // new task's own approval on first send, so no other cleanup is needed.
+    const pendingRef = ctx.sessionsRefData.current.get(PENDING_SESSION_KEY);
+    if (!pendingRef?.isSending) {
+      ctx.planApprovedSessionKeysRef.current.delete(PENDING_SESSION_KEY);
+    }
 
-    // Reset Goal Mode so a new chat always starts with it disabled.
-    if (ctx.goalModeRef.current) {
-      ctx.goalModeRef.current = false;
-      ctx.setGoalModeState(false);
-      void window.snow.setGoalMode(false);
+    // Reset Goal Mode so a new chat always starts with the global default.
+    if (ctx.goalModeRef.current !== defaults.goalMode) {
+      ctx.goalModeRef.current = defaults.goalMode;
+      ctx.setGoalModeState(defaults.goalMode);
+    }
+    if (ctx.goalModeTokenBudget !== defaults.goalModeTokenBudget) {
+      ctx.setGoalModeTokenBudgetState(defaults.goalModeTokenBudget);
     }
 
     // Clear stale pending session only if it is NOT actively streaming.
     // When the pending session is streaming, we keep it alive so the AI
     // loop continues in the background and eventually persists the
     // conversation. The user sees the empty greeting instead.
-    const pendingRef = ctx.sessionsRefData.current.get(PENDING_SESSION_KEY);
     if (pendingRef && !pendingRef.isSending) {
       deleteCheckpoints(pendingRef.checkpointIds);
       ctx.sessionsRefData.current.delete(PENDING_SESSION_KEY);
@@ -464,6 +545,17 @@ export const useConversationManagement = (
     }
 
     ctx.setActiveId(undefined);
+
+    // A new chat uses the PENDING_SESSION_KEY. Reload the pending panel from
+    // that key's queue so messages belonging to the previously active
+    // conversation do not bleed into the empty greeting view.
+    const pendingSessionQueue =
+      ctx.pendingQueueRef.current.get(PENDING_SESSION_KEY);
+    ctx.setActivePendingMessages(
+      pendingSessionQueue
+        ? pendingSessionQueue.map((item) => item.text)
+        : []
+    );
   }, [
     ctx.setActiveId,
     ctx.setNewChatRequested,
@@ -472,6 +564,11 @@ export const useConversationManagement = (
     ctx.goalModeRef,
     ctx.setGoalModeState,
     ctx.planApprovedSessionKeysRef,
+    ctx.globalModeDefaultsRef,
+    ctx.goalModeTokenBudget,
+    ctx.setGoalModeTokenBudgetState,
+    ctx.pendingQueueRef,
+    ctx.setActivePendingMessages,
   ]);
 
   const handleAbort = useCallback((): void => {
@@ -640,6 +737,23 @@ export const useConversationManagement = (
       if (ref) {
         deleteCheckpoints(ref.checkpointIds);
       }
+      // When the deleted conversation is the active one, reset the displayed
+      // mode to the global defaults so a stale mode does not linger in the
+      // UI (the DB row is gone with the conversation, so nothing to restore).
+      if (ctx.activeConversationIdRef.current === conversationId) {
+        const defaults = ctx.globalModeDefaultsRef.current;
+        if (ctx.planModeRef.current !== defaults.planMode) {
+          ctx.planModeRef.current = defaults.planMode;
+          ctx.setPlanModeState(defaults.planMode);
+        }
+        if (ctx.goalModeRef.current !== defaults.goalMode) {
+          ctx.goalModeRef.current = defaults.goalMode;
+          ctx.setGoalModeState(defaults.goalMode);
+        }
+        if (ctx.goalModeTokenBudget !== defaults.goalModeTokenBudget) {
+          ctx.setGoalModeTokenBudgetState(defaults.goalModeTokenBudget);
+        }
+      }
       ctx.sessionsRefData.current.delete(conversationId);
       ctx.setSessions((prev) => {
         const next = { ...prev };
@@ -652,6 +766,9 @@ export const useConversationManagement = (
       rejectToolAuthorizations,
       rejectPendingUserQuestions,
       ctx.updateSessionField,
+      ctx.globalModeDefaultsRef,
+      ctx.goalModeTokenBudget,
+      ctx.setGoalModeTokenBudgetState,
     ]
   );
 

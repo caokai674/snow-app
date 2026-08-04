@@ -16,7 +16,8 @@ export type ImportCandidateStatus =
   | "update-available"
   | "conflict"
   | "unsupported"
-  | "managed";
+  | "managed"
+  | "repair";
 
 export type ImportOwnership = {
   owner: "external" | "snow" | "shared";
@@ -35,6 +36,7 @@ export type ImportCandidate = {
   type: ImportCandidateType;
   provider: ImportProvider;
   scope: ImportScope;
+  projectId?: string;
   originPath: string;
   logicalId: string;
   contentHash: string;

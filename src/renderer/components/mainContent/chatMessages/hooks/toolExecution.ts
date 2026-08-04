@@ -80,6 +80,12 @@ export function createToolExecutor(
     toolCalls: ToolCallInfo[],
     authorizationDecisions: ToolAuthorizationDecision[]
   ): Promise<ToolExecutionResult | null> => {
+    // Per-conversation mode snapshot: the Rust write gate must see THIS
+    // session's Plan Mode, never the live global ref (another conversation
+    // toggling its modes must not weaken or strengthen this session's gate).
+    const sessionPlanMode = (key: string): boolean =>
+      ctx.sessionsRefData.current.get(key)?.planMode ??
+      planModeRef.current;
     const structuredToolResults: {
       name: string;
       callId: string;
@@ -576,7 +582,7 @@ export function createToolExecutor(
                   },
                   toolCall.interactionId,
                   undefined,
-                  planModeRef.current,
+                  sessionPlanMode(effectiveKey),
                   planApprovedSessionKeysRef.current.has(effectiveKey)
                 );
 
@@ -750,7 +756,7 @@ export function createToolExecutor(
       // Only the dedicated Plan Mode tool's structured approved=true result
       // can unlock Rust filesystem writes for this conversation's task.
       if (
-        planModeRef.current &&
+        sessionPlanMode(effectiveKey) &&
         !planApprovedSessionKeysRef.current.has(effectiveKey) &&
         isStructuredPlanApproval(toolCall.name, result!)
       ) {

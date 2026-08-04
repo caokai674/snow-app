@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { mkdtempSync } from "node:fs";
 import type { ImportCommitItemResult, ImportProvider, ImportScope } from "../../shared/importDiscovery";
 import type { ImportResourceInput } from "../../shared/importResources";
@@ -18,6 +18,9 @@ import type {
   PluginComponentRecord,
   PluginInput,
   PluginMarketplaceCatalog,
+  PluginMarketplaceInstallPreview,
+  PluginMarketplaceMcpApproval,
+  PluginMarketplaceMcpPreview,
   PluginMarketplacePlugin,
   PluginMarketplaceRecord,
   PluginMarketplaceSourceType,
@@ -41,7 +44,8 @@ import {
   type ImportCandidateInput,
 } from "./discovery";
 import { selectionForInput, type SelectedImportCandidate } from "./selectedImport";
-import { prepareDirectoryCommit, type DirectoryCommit } from "./directoryCommit";
+import { prepareDirectoryCommit } from "./directoryCommit";
+import { ImportExecutionPlan } from "./importTransaction";
 import { asStringArray, asStringRecord, collectSkillDirectories, nonEmptyString, walkFiles } from "./utils";
 
 type PluginRuntimeComponent = {
@@ -79,10 +83,28 @@ const runtimePermissions = new Set<PluginRuntimePermission>([
 const safeSegment = (value: string): string =>
   value.trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\.\.+/g, ".") || "plugin";
 
+const assertSafeMarketplaceName = (value: string, kind: "Marketplace" | "Plugin"): void => {
+  const normalized = value.trim().replace(/\\/g, "/");
+  const normalizedPath = posix.normalize(normalized);
+  const pathSegments = normalized.split("/");
+  if (
+    normalizedPath === "." ||
+    normalizedPath === ".." ||
+    normalizedPath.startsWith("../") ||
+    pathSegments.some((segment) => segment === "." || segment === "..") ||
+    safeSegment(value) === "."
+  ) {
+    throw new Error(`${kind} name must not resolve to a path traversal segment`);
+  }
+};
+
 const isWithinDirectory = (path: string, root: string): boolean => {
   const relativePath = relative(resolve(root), resolve(path));
   return relativePath === "" || (!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath));
 };
+
+const isStrictDescendantDirectory = (path: string, root: string): boolean =>
+  resolve(path) !== resolve(root) && isWithinDirectory(path, root);
 
 const readJson = (path: string, warnings: string[]): Record<string, unknown> | null => {
   try {
@@ -204,13 +226,13 @@ const addMcpComponents = (
   }
 };
 
-const addSkillComponents = (
+const addSkillComponents = async (
   components: PluginRuntimeComponent[],
   plugin: Pick<PluginInput, "pluginId" | "scope">,
   location: PluginLocation,
   root: string
-): void => {
-  for (const sourceDir of collectSkillDirectories(root)) {
+): Promise<void> => {
+  for (const sourceDir of await collectSkillDirectories(root)) {
     const logicalId = relative(root, sourceDir).split(sep).join("/");
     const targetPath = pluginSkillPath(plugin.pluginId, logicalId, plugin.scope, location.projectRoot);
     components.push({
@@ -221,7 +243,7 @@ const addSkillComponents = (
         targetId: pluginSkillId(plugin.pluginId, logicalId),
         targetPath,
         originPath: sourceDir,
-        contentHash: hashImportPath(sourceDir),
+        contentHash: await hashImportPath(sourceDir),
         status: "supported",
         sortOrder: components.length,
       },
@@ -230,13 +252,13 @@ const addSkillComponents = (
   }
 };
 
-const addMarkdownComponents = (
+const addMarkdownComponents = async (
   components: PluginRuntimeComponent[],
-  plugin: Pick<PluginInput, "pluginId" | "name" | "scope" | "state">,
+  plugin: Pick<PluginInput, "pluginId" | "name" | "scope" | "projectId" | "state">,
   type: "command" | "agent",
   root: string
-): void => {
-  for (const path of walkFiles(root, (file) => file.endsWith(".md"))) {
+): Promise<void> => {
+  for (const path of await walkFiles(root, (file) => file.endsWith(".md"))) {
     let content = "";
     try {
       content = readFileSync(path, "utf8").trim();
@@ -262,8 +284,11 @@ const addMarkdownComponents = (
         promptId: targetId,
         name: `${plugin.name} ${type} ${basename(path, ".md")}`,
         content,
-        isActive: plugin.state === "enabled",
+        // Commands and agents are templates, not ambient system instructions.
+        isActive: false,
         sortOrder: components.length,
+        scope: plugin.scope,
+        ...(plugin.scope === "project" && plugin.projectId ? { projectId: plugin.projectId } : {}),
       },
     });
   }
@@ -323,18 +348,19 @@ const runtimeDeclarationFromManifest = (
   };
 };
 
-const pluginDefinitionFromManifest = (
+const pluginDefinitionFromManifest = async (
   provider: "codex" | "claude-code",
   manifestPath: string,
   location: PluginLocation,
-  warnings: string[]
-): PluginImportDefinition | null => {
+  warnings: string[],
+  identityRoot?: string
+): Promise<PluginImportDefinition | null> => {
   const manifest = readJson(manifestPath, warnings);
   if (!manifest) return null;
   const metadataRoot = dirname(manifestPath);
   const root = dirname(metadataRoot);
   const name = nonEmptyString(manifest.name) ?? basename(root);
-  const pluginId = pluginIdFor(provider, name, root);
+  const pluginId = pluginIdFor(provider, name, identityRoot ?? root);
   const state = "enabled" as const;
   const base: Omit<PluginInput, "components" | "capabilities" | "contentHash"> = {
     pluginId,
@@ -348,9 +374,9 @@ const pluginDefinitionFromManifest = (
     state,
   };
   const components: PluginRuntimeComponent[] = [];
-  addSkillComponents(components, base, location, join(root, "skills"));
-  addMarkdownComponents(components, base, "command", join(root, "commands"));
-  addMarkdownComponents(components, base, "agent", join(root, "agents"));
+  await addSkillComponents(components, base, location, join(root, "skills"));
+  await addMarkdownComponents(components, base, "command", join(root, "commands"));
+  await addMarkdownComponents(components, base, "agent", join(root, "agents"));
 
   const mcpPath = join(root, ".mcp.json");
   if (existsSync(mcpPath)) {
@@ -372,7 +398,7 @@ const pluginDefinitionFromManifest = (
       "hook",
       "hooks",
       existsSync(hooksRoot) ? hooksRoot : manifestPath,
-      hashImportPath(existsSync(hooksRoot) ? hooksRoot : manifestPath),
+      await hashImportPath(existsSync(hooksRoot) ? hooksRoot : manifestPath),
       "Plugin hooks and executable code are not supported"
     );
   }
@@ -385,7 +411,7 @@ const pluginDefinitionFromManifest = (
     ...base,
     capabilities,
     ...(runtime ? { runtime } : {}),
-    contentHash: hashImportPath(root),
+    contentHash: await hashImportPath(root),
     components: components.map((item) => item.component),
   };
   return {
@@ -403,12 +429,12 @@ const pluginDefinitionFromManifest = (
   };
 };
 
-const findManifestPaths = (roots: string[], metadataDirectory: string): string[] =>
-  roots.flatMap((root) => walkFiles(
+const findManifestPaths = async (roots: string[], metadataDirectory: string): Promise<string[]> =>
+  (await Promise.all(roots.map((root) => walkFiles(
     root,
     (path) => basename(path) === "plugin.json" && basename(dirname(path)) === metadataDirectory,
     10
-  ));
+  )))).flat();
 
 const discoverManifestPlugins = async (native: NativeBridge): Promise<PluginImportDefinition[]> => {
   const projects = await native.listWorkspaceDirectories();
@@ -433,14 +459,18 @@ const discoverManifestPlugins = async (native: NativeBridge): Promise<PluginImpo
     marketplacePluginStorageRoot(),
     ...projects.filter((item) => item.kind === "local").map((item) => join(item.path, ".claude", "plugins")),
   ];
-  const definitions = [
-    ...findManifestPaths(codexRoots, ".codex-plugin").map((path) =>
+  const [codexManifestPaths, claudeManifestPaths] = await Promise.all([
+    findManifestPaths(codexRoots, ".codex-plugin"),
+    findManifestPaths(claudeRoots, ".claude-plugin"),
+  ]);
+  const definitions = (await Promise.all([
+    ...codexManifestPaths.map((path) =>
       pluginDefinitionFromManifest("codex", path, pluginLocationForPath(path, projects), warnings)
     ),
-    ...findManifestPaths(claudeRoots, ".claude-plugin").map((path) =>
+    ...claudeManifestPaths.map((path) =>
       pluginDefinitionFromManifest("claude-code", path, pluginLocationForPath(path, projects), warnings)
     ),
-  ].filter((item): item is PluginImportDefinition => Boolean(item));
+  ])).filter((item): item is PluginImportDefinition => Boolean(item));
   return definitions;
 };
 
@@ -457,14 +487,14 @@ const discoverOpenCodePlugins = async (native: NativeBridge): Promise<PluginImpo
   const descriptors: PluginImportDefinition[] = [];
   const seen = new Set<string>();
   for (const root of roots) {
-    for (const path of walkFiles(root, (file) => /\.(?:[cm]?js|ts)$/.test(file), 4)) {
+    for (const path of await walkFiles(root, (file) => /\.(?:[cm]?js|ts)$/.test(file), 4)) {
       const sourcePath = resolve(path);
       if (seen.has(sourcePath)) continue;
       seen.add(sourcePath);
       const location = pluginLocationForPath(sourcePath, projects);
       const name = basename(path).replace(/\.(?:[cm]?js|ts)$/, "");
       const pluginId = pluginIdFor("opencode", name, sourcePath);
-      const contentHash = hashImportPath(sourcePath);
+      const contentHash = await hashImportPath(sourcePath);
       const component: PluginComponentInput = {
         componentId: componentIdFor(pluginId, "hook", "runtime"),
         componentType: "hook",
@@ -573,13 +603,40 @@ const marketplaceStorageRoot = (): string => join(homedir(), ".snow", "plugin-ma
 
 const marketplacePluginStorageRoot = (): string => join(homedir(), ".snow", "plugins", "marketplaces");
 
-const marketplaceCacheRoot = (name: string): string =>
-  join(marketplaceStorageRoot(), safeSegment(name));
+const normalizedMarketplaceSourcePath = (source: MarketplaceSource): string => {
+  if (source.type === "local") return resolve(source.path);
+  if (source.type === "github") return `https://github.com/${source.path.trim().toLowerCase()}.git`;
 
-const marketplacePluginCacheRoot = (marketplaceName: string, pluginName: string): string =>
-  join(marketplacePluginStorageRoot(), safeSegment(marketplaceName), safeSegment(pluginName));
+  const scpStyleGit = source.type === "git"
+    ? source.path.match(/^([^@\s/:]+)@([^:\s]+):(.+)$/)
+    : null;
+  const input = scpStyleGit
+    ? `ssh://${scpStyleGit[1]}@${scpStyleGit[2]}/${scpStyleGit[3]}`
+    : source.path;
+  try {
+    const parsed = new URL(input);
+    parsed.hash = "";
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+    if (parsed.hostname === "github.com") parsed.pathname = parsed.pathname.toLowerCase();
+    return parsed.toString();
+  } catch {
+    return source.path.trim();
+  }
+};
 
-const marketplaceIdFor = (name: string): string => `marketplace:${safeSegment(name)}`;
+const marketplaceSourceIdentity = (source: MarketplaceSource): Record<string, string> => ({
+  path: normalizedMarketplaceSourcePath(source),
+  refName: source.refName?.trim() ?? "",
+});
+
+const marketplaceCacheRoot = (source: MarketplaceSource): string =>
+  join(marketplaceStorageRoot(), hashImportValue(marketplaceSourceIdentity(source)).slice(0, 24));
+
+const marketplacePluginCacheRoot = (marketplaceId: string, pluginName: string): string =>
+  join(marketplacePluginStorageRoot(), safeSegment(marketplaceId), safeSegment(pluginName));
+
+const marketplaceIdFor = (source: MarketplaceSource): string =>
+  `marketplace:${hashImportValue(marketplaceSourceIdentity(source)).slice(0, 24)}`;
 
 const runGit = async (args: string[], cwd?: string): Promise<void> => new Promise((resolvePromise, reject) => {
   execFile(
@@ -606,12 +663,14 @@ const parseMarketplaceManifest = (path: string): MarketplaceManifest => {
   if (!isRecord(raw)) throw new Error("Marketplace manifest must be a JSON object");
   const name = nonEmptyString(raw.name);
   if (!name) throw new Error("Marketplace manifest requires a name");
+  assertSafeMarketplaceName(name, "Marketplace");
   if (!Array.isArray(raw.plugins)) throw new Error("Marketplace manifest requires a plugins array");
   const interfaceMetadata = isRecord(raw.interface) ? raw.interface : {};
   const metadata = isRecord(raw.metadata) ? raw.metadata : {};
   const plugins = raw.plugins.flatMap((item): MarketplacePluginEntry[] => {
     if (!isRecord(item)) return [];
     const pluginName = nonEmptyString(item.name);
+    if (pluginName) assertSafeMarketplaceName(pluginName, "Plugin");
     if (!pluginName || item.source === undefined) return [];
     const policy = isRecord(item.policy) ? item.policy : {};
     const installation = nonEmptyString(policy.installation);
@@ -749,7 +808,7 @@ const materializeGitMarketplace = async (source: MarketplaceSource): Promise<Mat
     await runGit(args);
     const manifestPath = findMarketplaceManifest(repository);
     const manifest = parseMarketplaceManifest(manifestPath);
-    const cacheRoot = marketplaceCacheRoot(manifest.name);
+    const cacheRoot = marketplaceCacheRoot(source);
     const target = join(cacheRoot, "source");
     promoteDirectory(repository, target);
     const cachedManifestPath = join(target, relative(repository, manifestPath));
@@ -758,7 +817,7 @@ const materializeGitMarketplace = async (source: MarketplaceSource): Promise<Mat
       manifestPath: cachedManifestPath,
       marketplaceRoot: marketplaceRootForManifest(cachedManifestPath),
       cachePath: cacheRoot,
-      contentHash: hashImportPath(target),
+      contentHash: await hashImportPath(target),
       manifest,
     };
   } finally {
@@ -766,18 +825,58 @@ const materializeGitMarketplace = async (source: MarketplaceSource): Promise<Mat
   }
 };
 
+const readMarketplaceResponse = async (response: Response): Promise<string> => {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredLength = contentLength.trim();
+    if (!/^\d+$/.test(declaredLength)) {
+      throw new Error("Marketplace response has an invalid Content-Length header");
+    }
+    const byteLength = Number(declaredLength);
+    if (!Number.isSafeInteger(byteLength)) {
+      throw new Error("Marketplace response has an invalid Content-Length header");
+    }
+    if (byteLength > MARKETPLACE_MAX_MANIFEST_BYTES) {
+      throw new Error("Marketplace manifest exceeds the 2 MB limit");
+    }
+  }
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let content = "";
+  let byteLength = 0;
+  let completed = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      byteLength += value.byteLength;
+      if (byteLength > MARKETPLACE_MAX_MANIFEST_BYTES) {
+        throw new Error("Marketplace manifest exceeds the 2 MB limit");
+      }
+      content += decoder.decode(value, { stream: true });
+    }
+    completed = true;
+    return content + decoder.decode();
+  } finally {
+    if (!completed) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+};
+
 const materializeUrlMarketplace = async (source: MarketplaceSource): Promise<MaterializedMarketplace> => {
   const response = await fetch(source.path, { signal: AbortSignal.timeout(MARKETPLACE_FETCH_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`Marketplace request failed: ${response.status} ${response.statusText}`);
-  const content = await response.text();
-  if (content.length > MARKETPLACE_MAX_MANIFEST_BYTES) throw new Error("Marketplace manifest exceeds the 2 MB limit");
+  const content = await readMarketplaceResponse(response);
   mkdirSync(marketplaceStorageRoot(), { recursive: true });
   const stage = mkdtempSync(join(marketplaceStorageRoot(), ".marketplace-"));
   try {
     const stagedManifest = join(stage, "marketplace.json");
     writeFileSync(stagedManifest, content, "utf8");
     const manifest = parseMarketplaceManifest(stagedManifest);
-    const cacheRoot = marketplaceCacheRoot(manifest.name);
+    const cacheRoot = marketplaceCacheRoot(source);
     const target = join(cacheRoot, "marketplace.json");
     promoteFile(stagedManifest, target);
     return {
@@ -785,7 +884,7 @@ const materializeUrlMarketplace = async (source: MarketplaceSource): Promise<Mat
       manifestPath: target,
       marketplaceRoot: marketplaceRootForManifest(target),
       cachePath: cacheRoot,
-      contentHash: hashImportPath(target),
+      contentHash: await hashImportPath(target),
       manifest,
     };
   } finally {
@@ -800,7 +899,7 @@ const materializeMarketplace = async (source: MarketplaceSource): Promise<Materi
       source,
       manifestPath,
       marketplaceRoot: marketplaceRootForManifest(manifestPath),
-      contentHash: hashImportPath(manifestPath),
+      contentHash: await hashImportPath(manifestPath),
       manifest: parseMarketplaceManifest(manifestPath),
     };
   }
@@ -877,7 +976,7 @@ const marketplaceEntryCatalog = (
   installedPlugins: PluginRecord[]
 ): PluginMarketplacePlugin => {
   const installedPluginId = installedPlugins.find((plugin) =>
-    resolve(plugin.sourcePath) === resolve(marketplacePluginCacheRoot(marketplace.name, entry.name))
+    resolve(plugin.sourcePath) === resolve(marketplacePluginCacheRoot(marketplace.marketplaceId, entry.name))
   )?.pluginId;
   try {
     if (entry.unavailableReason) throw new Error(entry.unavailableReason);
@@ -933,8 +1032,19 @@ export const addPluginMarketplace = async (
   sourceInput: string
 ): Promise<PluginMarketplaceCatalog[]> => {
   const materialized = await materializeMarketplace(parseMarketplaceSource(sourceInput));
+  const marketplaceId = marketplaceIdFor(materialized.source);
+  const nameConflict = (await native.listPluginMarketplaces()).find((item) =>
+    item.name === materialized.manifest.name && item.marketplaceId !== marketplaceId
+  );
+  if (nameConflict) {
+    if (materialized.cachePath) rmSync(materialized.cachePath, { recursive: true, force: true });
+    throw new Error(
+      `Marketplace name ${JSON.stringify(materialized.manifest.name)} is already used by ${marketplaceSourceLabel(nameConflict)}. ` +
+      "Remove that marketplace and confirm its removal before adding this source."
+    );
+  }
   await native.upsertPluginMarketplace({
-    marketplaceId: marketplaceIdFor(materialized.manifest.name),
+    marketplaceId,
     name: materialized.manifest.name,
     displayName: materialized.manifest.displayName,
     description: materialized.manifest.description,
@@ -976,9 +1086,15 @@ export const updatePluginMarketplace = async (
 export const removePluginMarketplace = async (native: NativeBridge, marketplaceId: string): Promise<void> => {
   const marketplace = (await native.listPluginMarketplaces()).find((item) => item.marketplaceId === marketplaceId);
   if (!marketplace) throw new Error("Plugin marketplace not found");
+  const expectedCachePath = marketplaceCacheRoot(sourceFromMarketplaceRecord(marketplace));
+  const cachePath = marketplace.cachePath &&
+    resolve(marketplace.cachePath) === resolve(expectedCachePath) &&
+    isStrictDescendantDirectory(marketplace.cachePath, marketplaceStorageRoot())
+    ? marketplace.cachePath
+    : undefined;
   await native.deletePluginMarketplace(marketplaceId);
-  if (marketplace.cachePath && isWithinDirectory(marketplace.cachePath, marketplaceStorageRoot())) {
-    rmSync(marketplace.cachePath, { recursive: true, force: true });
+  if (cachePath) {
+    rmSync(cachePath, { recursive: true, force: true });
   }
 };
 
@@ -1007,17 +1123,26 @@ const cloneMarketplacePlugin = async (
   }
 };
 
-const copyMarketplacePlugin = (sourcePath: string, marketplaceName: string, pluginName: string): string => {
-  const target = marketplacePluginCacheRoot(marketplaceName, pluginName);
+type StagedMarketplacePlugin = {
+  pluginRoot: string;
+  target: string;
+  cleanupPath: string;
+};
+
+const stageMarketplacePlugin = (
+  sourcePath: string,
+  marketplaceId: string,
+  pluginName: string
+): StagedMarketplacePlugin => {
+  const target = marketplacePluginCacheRoot(marketplaceId, pluginName);
   mkdirSync(dirname(target), { recursive: true });
   const stage = mkdtempSync(join(dirname(target), ".plugin-"));
   const stagedPlugin = join(stage, "plugin");
   try {
     cpSync(sourcePath, stagedPlugin, { recursive: true, force: true });
-    promoteDirectory(stagedPlugin, target);
-    return target;
+    return { pluginRoot: stagedPlugin, target, cleanupPath: stage };
   } finally {
-    rmSync(stage, { recursive: true, force: true });
+    if (!existsSync(stagedPlugin)) rmSync(stage, { recursive: true, force: true });
   }
 };
 
@@ -1029,11 +1154,19 @@ const findPluginManifest = (root: string): { provider: "codex" | "claude-code"; 
   throw new Error("Plugin package must contain .codex-plugin/plugin.json or .claude-plugin/plugin.json");
 };
 
-export const installPluginFromMarketplace = async (
+type MarketplacePluginSource = {
+  marketplace: PluginMarketplaceRecord;
+  entry: MarketplacePluginEntry;
+  source: ResolvedMarketplacePluginSource;
+  sourcePath: string;
+  cleanupPath?: string;
+};
+
+const resolveMarketplacePlugin = async (
   native: NativeBridge,
   marketplaceId: string,
   pluginName: string
-): Promise<void> => {
+): Promise<MarketplacePluginSource> => {
   const marketplace = (await native.listPluginMarketplaces()).find((item) => item.marketplaceId === marketplaceId);
   if (!marketplace) throw new Error("Plugin marketplace not found");
   const { manifest, root } = loadMarketplaceManifest(marketplace);
@@ -1042,26 +1175,173 @@ export const installPluginFromMarketplace = async (
   if (entry.unavailableReason) throw new Error(entry.unavailableReason);
   const source = resolveMarketplacePluginSource(entry, manifest, root);
   const remoteSource = source.type === "git" ? await cloneMarketplacePlugin(source) : null;
+  const sourcePath = source.type === "local" ? source.path : remoteSource?.sourcePath;
+  if (!sourcePath) {
+    if (remoteSource) rmSync(remoteSource.cleanupPath, { recursive: true, force: true });
+    throw new Error("Unable to resolve Plugin source");
+  }
+  return {
+    marketplace,
+    entry,
+    source,
+    sourcePath,
+    ...(remoteSource ? { cleanupPath: remoteSource.cleanupPath } : {}),
+  };
+};
+
+const marketplaceSourceLabel = (marketplace: PluginMarketplaceRecord): string =>
+  `${marketplace.sourcePath}${marketplace.refName ? `#${marketplace.refName}` : ""}`;
+
+const pluginSourceLabel = (source: ResolvedMarketplacePluginSource): string => {
+  if (source.type === "local") return source.path;
+  const ref = source.sha ?? source.refName;
+  return `${source.url}${ref ? `#${ref}` : ""}${source.subdirectory ? `:${source.subdirectory}` : ""}`;
+};
+
+const parseMcpPreviewArray = (value: string): string[] => {
   try {
-    const sourcePath = source.type === "local" ? source.path : remoteSource?.sourcePath;
-    if (!sourcePath) throw new Error("Unable to resolve Plugin source");
-    const cachedPluginRoot = copyMarketplacePlugin(sourcePath, marketplace.name, entry.name);
-    const { provider, manifestPath } = findPluginManifest(cachedPluginRoot);
-    const warnings: string[] = [];
-    const definition = pluginDefinitionFromManifest(provider, manifestPath, { scope: "global" }, warnings);
-    if (!definition) throw new Error(warnings[0] ?? "Unable to parse Plugin manifest");
-    const existing = (await native.listPlugins()).find((plugin) => plugin.pluginId === definition.input.pluginId);
-    definition.input.state = existing?.state === "disabled" || (!existing && !entry.defaultEnabled) ? "disabled" : "enabled";
-    for (const runtime of definition.runtime) {
-      if (runtime.mcpInput) runtime.mcpInput.enabled = definition.input.state === "enabled";
-      if (runtime.promptInput) runtime.promptInput.isActive = definition.input.state === "enabled";
+    return asStringArray(JSON.parse(value));
+  } catch {
+    return [];
+  }
+};
+
+const parseMcpPreviewRecord = (value: string): Record<string, string> => {
+  try {
+    return asStringRecord(JSON.parse(value));
+  } catch {
+    return {};
+  }
+};
+
+const mcpConnectionHash = (input: Pick<
+  McpServerConfigInput,
+  "transportType" | "url" | "command" | "argsJson" | "envJson" | "headersJson"
+>): string => hashImportValue({
+  transportType: input.transportType,
+  url: input.url,
+  command: input.command,
+  argsJson: input.argsJson,
+  envJson: input.envJson,
+  headersJson: input.headersJson,
+});
+
+const marketplaceMcpPreview = (
+  runtime: PluginRuntimeComponent,
+  root: string
+): PluginMarketplaceMcpPreview | null => {
+  if (!runtime.mcpInput) return null;
+  const declarationPath = relative(root, runtime.component.originPath).split(sep).join("/") || basename(runtime.component.originPath);
+  return {
+    componentId: runtime.component.componentId,
+    name: runtime.mcpInput.name,
+    transportType: runtime.mcpInput.transportType,
+    command: runtime.mcpInput.command,
+    args: parseMcpPreviewArray(runtime.mcpInput.argsJson),
+    env: parseMcpPreviewRecord(runtime.mcpInput.envJson),
+    headers: parseMcpPreviewRecord(runtime.mcpInput.headersJson),
+    url: runtime.mcpInput.url,
+    declarationPath,
+    approvalHash: hashImportValue({
+      componentId: runtime.component.componentId,
+      declarationPath,
+      connectionHash: mcpConnectionHash(runtime.mcpInput),
+    }),
+  };
+};
+
+const marketplaceMcpApprovalsFor = (
+  definition: PluginImportDefinition,
+  approvals: PluginMarketplaceMcpApproval[]
+): Set<string> => {
+  const approvalByComponent = new Map<string, string>();
+  for (const approval of approvals) {
+    if (approvalByComponent.has(approval.componentId)) {
+      throw new Error("Marketplace MCP approvals must not contain duplicate components");
     }
-    const result = await commitPluginImports(native, [definition]);
-    if (result.itemResults.some((item) => item.status === "skipped")) {
-      throw new Error(result.warnings[0] ?? "Plugin installation failed");
+    approvalByComponent.set(approval.componentId, approval.approvalHash);
+  }
+  const previews = definition.runtime
+    .map((runtime) => marketplaceMcpPreview(runtime, definition.input.sourcePath))
+    .filter((item): item is PluginMarketplaceMcpPreview => Boolean(item));
+  const previewByComponent = new Map(previews.map((item) => [item.componentId, item]));
+  for (const [componentId, approvalHash] of approvalByComponent) {
+    const preview = previewByComponent.get(componentId);
+    if (!preview || preview.approvalHash !== approvalHash) {
+      throw new Error("Marketplace MCP declaration changed. Review the command again before enabling it.");
+    }
+  }
+  return new Set(approvalByComponent.keys());
+};
+
+export const previewPluginMarketplaceInstall = async (
+  native: NativeBridge,
+  marketplaceId: string,
+  pluginName: string
+): Promise<PluginMarketplaceInstallPreview> => {
+  const resolved = await resolveMarketplacePlugin(native, marketplaceId, pluginName);
+  try {
+    const { provider, manifestPath } = findPluginManifest(resolved.sourcePath);
+    const warnings: string[] = [];
+    const identityRoot = marketplacePluginCacheRoot(resolved.marketplace.marketplaceId, resolved.entry.name);
+    const definition = await pluginDefinitionFromManifest(provider, manifestPath, { scope: "global" }, warnings, identityRoot);
+    if (!definition) throw new Error(warnings[0] ?? "Unable to parse Plugin manifest");
+    return {
+      marketplaceId: resolved.marketplace.marketplaceId,
+      marketplaceName: resolved.marketplace.displayName,
+      marketplaceSource: marketplaceSourceLabel(resolved.marketplace),
+      pluginName: resolved.entry.name,
+      pluginDisplayName: definition.input.name,
+      pluginSource: pluginSourceLabel(resolved.source),
+      mcpServers: definition.runtime
+        .map((runtime) => marketplaceMcpPreview(runtime, definition.input.sourcePath))
+        .filter((item): item is PluginMarketplaceMcpPreview => Boolean(item)),
+    };
+  } finally {
+    if (resolved.cleanupPath) rmSync(resolved.cleanupPath, { recursive: true, force: true });
+  }
+};
+
+export const installPluginFromMarketplace = async (
+  native: NativeBridge,
+  marketplaceId: string,
+  pluginName: string,
+  approvals: PluginMarketplaceMcpApproval[]
+): Promise<void> => {
+  const resolved = await resolveMarketplacePlugin(native, marketplaceId, pluginName);
+  try {
+    const staged = stageMarketplacePlugin(resolved.sourcePath, resolved.marketplace.marketplaceId, resolved.entry.name);
+    try {
+      const { provider, manifestPath } = findPluginManifest(staged.pluginRoot);
+      const warnings: string[] = [];
+      const stagedDefinition = await pluginDefinitionFromManifest(provider, manifestPath, { scope: "global" }, warnings, staged.target);
+      if (!stagedDefinition) throw new Error(warnings[0] ?? "Unable to parse Plugin manifest");
+      marketplaceMcpApprovalsFor(stagedDefinition, approvals);
+
+      promoteDirectory(staged.pluginRoot, staged.target);
+      const cachedManifest = findPluginManifest(staged.target);
+      const definition = await pluginDefinitionFromManifest(cachedManifest.provider, cachedManifest.manifestPath, { scope: "global" }, warnings);
+      if (!definition) throw new Error(warnings[0] ?? "Unable to parse Plugin manifest");
+      const approvedMcpComponents = marketplaceMcpApprovalsFor(definition, approvals);
+      const existing = (await native.listPlugins()).find((plugin) => plugin.pluginId === definition.input.pluginId);
+      definition.input.state = existing
+        ? desiredPluginState(existing)
+        : resolved.entry.defaultEnabled ? "enabled" : "disabled";
+      for (const runtime of definition.runtime) {
+        if (runtime.mcpInput) runtime.mcpInput.enabled = approvedMcpComponents.has(runtime.component.componentId);
+        if (runtime.promptInput && runtime.component.componentType === "prompt") {
+          runtime.promptInput.isActive = definition.input.state === "enabled";
+        }
+      }
+      const result = await commitPluginImports(native, [definition]);
+      if (result.itemResults.some((item) => item.status === "skipped")) {
+        throw new Error(result.warnings[0] ?? "Plugin installation failed");
+      }
+    } finally {
+      rmSync(staged.cleanupPath, { recursive: true, force: true });
     }
   } finally {
-    if (remoteSource) rmSync(remoteSource.cleanupPath, { recursive: true, force: true });
+    if (resolved.cleanupPath) rmSync(resolved.cleanupPath, { recursive: true, force: true });
   }
 };
 
@@ -1109,98 +1389,86 @@ const promptRecordToInput = (record: SystemPromptItemRecord, isActive: boolean):
   content: record.content,
   isActive,
   sortOrder: record.sortOrder,
+  scope: record.scope,
+  ...(record.scope === "project" && record.projectId ? { projectId: record.projectId } : {}),
 });
 
-const copyPluginSkill = (source: string, target: string): DirectoryCommit => {
+const preparePluginSkill = (source: string, target: string) => {
   if (!existsSync(source)) {
     throw new Error(`Plugin Skill source no longer exists: ${source}`);
   }
-  const transaction = prepareDirectoryCommit(source, target);
-  transaction.commit();
-  return transaction;
+  return prepareDirectoryCommit(source, target);
 };
 
-export const commitPluginImports = async (
+export const preparePluginImports = (
   native: NativeBridge,
-  definitions: PluginImportDefinition[]
-): Promise<{ itemResults: ImportCommitItemResult[]; warnings: string[] }> => {
+  definitions: PluginImportDefinition[],
+  plan: ImportExecutionPlan
+): { itemResults: ImportCommitItemResult[]; warnings: string[] } => {
   const itemResults: ImportCommitItemResult[] = [];
   const warnings: string[] = [];
-  for (const definition of definitions) {
-    const appliedMcp: Array<{ projectId?: string; previous?: McpServerConfigRecord | ProjectMcpServerConfigRecord; input: McpServerConfigInput }> = [];
-    const appliedPrompts: Array<{ previous?: SystemPromptItemRecord; input: SystemPromptItemInput }> = [];
-    const copiedSkills: DirectoryCommit[] = [];
-    try {
-      const globalMcp = await native.listMcpServerConfigs();
-      const projectMcp = definition.input.scope === "project" && definition.input.projectId
-        ? await native.listProjectMcpServerConfigs(definition.input.projectId)
-        : [];
-      const prompts = await native.listSystemPrompts();
+  try {
+    for (const definition of definitions) {
       for (const runtime of definition.runtime) {
         if (runtime.component.status !== "supported") continue;
         if (runtime.mcpInput) {
-          const previous = definition.input.scope === "project"
-            ? projectMcp.find((item) => item.serverId === runtime.mcpInput?.serverId)
-            : globalMcp.find((item) => item.serverId === runtime.mcpInput?.serverId);
           if (definition.input.scope === "project" && definition.input.projectId) {
-            await native.upsertProjectMcpServerConfig(definition.input.projectId, runtime.mcpInput);
+            plan.addProjectMcpServer(definition.input.projectId, runtime.mcpInput);
           } else {
-            await native.upsertMcpServerConfig(runtime.mcpInput);
+            plan.addMcpServer(runtime.mcpInput);
           }
-          appliedMcp.push({ projectId: definition.input.projectId, previous, input: runtime.mcpInput });
         } else if (runtime.promptInput) {
-          const previous = prompts.find((item) => item.promptId === runtime.promptInput?.promptId);
-          await native.upsertSystemPrompt(runtime.promptInput);
-          appliedPrompts.push({ previous, input: runtime.promptInput });
+          plan.addSystemPrompt(runtime.promptInput);
         } else if (runtime.skillSourceDir) {
-          copiedSkills.push(copyPluginSkill(runtime.skillSourceDir, runtime.component.targetPath));
-          await native.setSkillEnabled(definition.input.projectId, runtime.component.targetId, definition.input.state === "enabled");
+          plan.addDirectory(
+            preparePluginSkill(runtime.skillSourceDir, runtime.component.targetPath),
+            true,
+            () => native.setSkillEnabled(
+              definition.input.projectId,
+              runtime.component.targetId,
+              definition.input.state === "enabled"
+            )
+          );
         }
       }
-      await native.upsertPlugins([definition.input]);
+      plan.addPlugin(definition.input);
       const resources = definition.input.components
         .map((component) => pluginResourceFor(definition.input, component))
         .filter((item): item is ImportResourceInput => Boolean(item));
-      if (resources.length > 0) await native.upsertImportResources(resources);
+      if (resources.length > 0) plan.addImportResources(resources);
       itemResults.push({
         candidateId: definition.input.pluginId,
         type: "plugin",
         logicalId: definition.input.pluginId,
         status: "imported",
       });
-    } catch (error) {
-      for (const applied of [...appliedMcp].reverse()) {
-        if (applied.projectId) {
-          if (applied.previous) await native.upsertProjectMcpServerConfig(applied.projectId, mcpRecordToInput(applied.previous, applied.previous.enabled));
-          else await native.deleteProjectMcpServerConfig(applied.projectId, applied.input.serverId);
-        } else if (applied.previous) {
-          await native.upsertMcpServerConfig(mcpRecordToInput(applied.previous, applied.previous.enabled));
-        } else {
-          await native.deleteMcpServerConfig(applied.input.serverId);
-        }
-      }
-      for (const applied of [...appliedPrompts].reverse()) {
-        if (applied.previous) await native.upsertSystemPrompt(promptRecordToInput(applied.previous, applied.previous.isActive));
-        else await native.deleteSystemPrompt(applied.input.promptId);
-      }
-      for (const skill of copiedSkills.reverse()) {
-        try {
-          skill.rollback();
-        } catch (rollbackError) {
-          warnings.push(
-            `Plugin Skill rollback was incomplete: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-          );
-        }
-      }
-      warnings.push(`Unable to import Plugin ${definition.input.name}: ${error instanceof Error ? error.message : String(error)}`);
-      itemResults.push({ type: "plugin", logicalId: definition.input.pluginId, candidateId: definition.input.pluginId, status: "skipped", message: warnings.at(-1) });
-    } finally {
-      for (const skill of copiedSkills) {
-        skill.cleanup();
-      }
     }
+  } catch (error) {
+    plan.discard();
+    throw new Error(
+      "Plugin import preparation failed: " +
+        (error instanceof Error ? error.message : String(error))
+    );
   }
   return { itemResults, warnings };
+};
+
+export const commitPluginImports = async (
+  native: NativeBridge,
+  definitions: PluginImportDefinition[]
+): Promise<{ itemResults: ImportCommitItemResult[]; warnings: string[] }> => {
+  const plan = new ImportExecutionPlan();
+  try {
+    const result = preparePluginImports(native, definitions, plan);
+    await plan.commit(native);
+    return result;
+  } catch (error) {
+    plan.discard();
+    throw new Error(
+      "Plugin import was rolled back: " +
+        (error instanceof Error ? error.message : String(error))
+    );
+  }
 };
 
 const pluginById = async (native: NativeBridge, pluginId: string): Promise<PluginRecord> => {
@@ -1208,6 +1476,9 @@ const pluginById = async (native: NativeBridge, pluginId: string): Promise<Plugi
   if (!plugin) throw new Error("Plugin not found");
   return plugin;
 };
+
+const desiredPluginState = (plugin: PluginRecord): "enabled" | "disabled" =>
+  plugin.desiredState ?? (plugin.state === "disabled" ? "disabled" : "enabled");
 
 export const setManagedPluginEnabled = async (
   native: NativeBridge,
@@ -1232,11 +1503,15 @@ export const setManagedPluginEnabled = async (
         ? projectMcp.find((item) => item.serverId === component.targetId)
         : globalMcp.find((item) => item.serverId === component.targetId);
       if (!current) throw new Error(`Plugin MCP component is missing: ${component.logicalId}`);
+      // A Plugin-wide toggle must not become a second authorization path for
+      // executable MCP declarations. Re-enabling the Plugin leaves MCPs off
+      // until the user has reviewed and enabled each one explicitly.
+      if (enabled) continue;
       if (plugin.scope === "project" && plugin.projectId) {
-        actions.push(() => native.upsertProjectMcpServerConfig(plugin.projectId as string, mcpRecordToInput(current, enabled)));
+        actions.push(() => native.upsertProjectMcpServerConfig(plugin.projectId as string, mcpRecordToInput(current, false)));
         rollback.push(() => native.upsertProjectMcpServerConfig(plugin.projectId as string, mcpRecordToInput(current, current.enabled)));
       } else {
-        actions.push(() => native.upsertMcpServerConfig(mcpRecordToInput(current, enabled)));
+        actions.push(() => native.upsertMcpServerConfig(mcpRecordToInput(current, false)));
         rollback.push(() => native.upsertMcpServerConfig(mcpRecordToInput(current, current.enabled)));
       }
     } else if (component.componentType === "skill") {
@@ -1244,7 +1519,7 @@ export const setManagedPluginEnabled = async (
       if (!current) throw new Error(`Plugin Skill component is missing: ${component.logicalId}`);
       actions.push(() => native.setSkillEnabled(plugin.projectId, component.targetId, enabled));
       rollback.push(() => native.setSkillEnabled(plugin.projectId, component.targetId, current.enabled));
-    } else {
+    } else if (component.componentType === "prompt") {
       const current = prompts.find((item) => item.promptId === component.targetId);
       if (!current) throw new Error(`Plugin prompt component is missing: ${component.logicalId}`);
       actions.push(() => native.upsertSystemPrompt(promptRecordToInput(current, enabled)));
@@ -1304,6 +1579,9 @@ export const refreshManagedPlugins = async (native: NativeBridge): Promise<Plugi
     const current = byId.get(plugin.pluginId);
     if (!current) return native.setPluginState(plugin.pluginId, "broken");
     if (current.contentHash !== plugin.contentHash) return native.setPluginState(plugin.pluginId, "update-available");
+    if (plugin.state !== desiredPluginState(plugin)) {
+      return native.setPluginState(plugin.pluginId, desiredPluginState(plugin));
+    }
   }));
   return native.listPlugins();
 };
@@ -1312,10 +1590,25 @@ export const updateManagedPlugin = async (native: NativeBridge, pluginId: string
   const definition = (await discoverPluginImports(native)).find((item) => item.input.pluginId === pluginId);
   if (!definition) throw new Error("Plugin source is no longer available");
   const existing = await pluginById(native, pluginId);
-  definition.input.state = existing.state === "disabled" ? "disabled" : "enabled";
+  definition.input.state = desiredPluginState(existing);
+  const [globalMcp, projectMcp] = await Promise.all([
+    native.listMcpServerConfigs(),
+    definition.input.scope === "project" && definition.input.projectId
+      ? native.listProjectMcpServerConfigs(definition.input.projectId)
+      : Promise.resolve([]),
+  ]);
   for (const runtime of definition.runtime) {
-    if (runtime.mcpInput) runtime.mcpInput.enabled = definition.input.state === "enabled";
-    if (runtime.promptInput) runtime.promptInput.isActive = definition.input.state === "enabled";
+    if (runtime.mcpInput) {
+      const current = definition.input.scope === "project"
+        ? projectMcp.find((item) => item.serverId === runtime.component.targetId)
+        : globalMcp.find((item) => item.serverId === runtime.component.targetId);
+      runtime.mcpInput.enabled = definition.input.state === "enabled" && Boolean(
+        current?.enabled && mcpConnectionHash(current) === mcpConnectionHash(runtime.mcpInput)
+      );
+    }
+    if (runtime.promptInput && runtime.component.componentType === "prompt") {
+      runtime.promptInput.isActive = definition.input.state === "enabled";
+    }
   }
   const result = await commitPluginImports(native, [definition]);
   if (result.itemResults.some((item) => item.status === "skipped")) throw new Error(result.warnings[0] ?? "Plugin update failed");
@@ -1399,7 +1692,7 @@ export const ensureLegacyCodexPluginMigration = async (native: NativeBridge): Pr
       targetId: skill.id,
       targetPath: skill.path,
       originPath: skill.path,
-      contentHash: hashImportPath(skill.path),
+      contentHash: await hashImportPath(skill.path),
       status: "supported",
     });
   }

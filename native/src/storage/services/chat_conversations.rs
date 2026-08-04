@@ -1869,3 +1869,95 @@ fn create_chat_id(prefix: &str) -> String {
         .unwrap_or_else(|| Utc::now().timestamp_micros() * 1_000);
     format!("{prefix}-{timestamp}-{}", std::process::id())
 }
+
+/// Per-conversation Plan/Goal Mode overrides. `None` means the conversation
+/// row does not exist and the caller follows the global default. Rows whose
+/// stored flags are NULL (legacy data) are read as `Some(false)` — NULL is
+/// synonymous with 0 (disabled).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConversationModes {
+    pub plan_mode: Option<bool>,
+    pub goal_mode: Option<bool>,
+    pub goal_mode_token_budget: Option<i64>,
+}
+
+/// Read a conversation's Plan/Goal Mode overrides. Returns an all-`None`
+/// record when the conversation row does not exist.
+///
+/// Legacy compatibility: rows created before per-conversation modes existed
+/// (or before the mode columns were backfilled) carry NULL flags. NULL is
+/// read as disabled — synonymous with 0 — so old conversations open with
+/// both modes off instead of inheriting the global defaults. The token
+/// budget keeps NULL = "follow the global default budget".
+pub fn get_conversation_modes(
+    database_path: &Path,
+    conversation_id: &str,
+) -> Result<ConversationModes> {
+    database::open_connection(database_path)
+        .and_then(|connection| {
+            connection
+                .query_row(
+                    "SELECT plan_mode, goal_mode, goal_mode_token_budget
+                       FROM chat_conversations
+                      WHERE conversation_id = ?1
+                      LIMIT 1",
+                    params![conversation_id],
+                    |row| {
+                        Ok(ConversationModes {
+                            plan_mode: Some(
+                                row.get::<_, Option<i64>>(0)?.map(|v| v != 0).unwrap_or(false),
+                            ),
+                            goal_mode: Some(
+                                row.get::<_, Option<i64>>(1)?.map(|v| v != 0).unwrap_or(false),
+                            ),
+                            goal_mode_token_budget: row.get::<_, Option<i64>>(2)?,
+                        })
+                    },
+                )
+                .optional()
+        })
+        .map(|record| record.unwrap_or_default())
+        .map_err(|error| {
+            database::database_error(database_path, "get conversation modes", error)
+        })
+}
+
+/// Upsert a conversation's Plan/Goal Mode overrides. Only the columns whose
+/// value is `Some` are updated; `None` leaves the stored override untouched.
+/// The row is created on first write (all other columns fall back to their
+/// defaults) so a mode can be recorded even before the first exchange.
+///
+/// The INSERT branch must supply `id`: SQLite evaluates NOT NULL constraints
+/// before resolving the upsert's UNIQUE conflict, so an omitted `id` aborts
+/// the statement with a NOT NULL violation even when the conversation row
+/// already exists.
+pub fn set_conversation_modes(
+    database_path: &Path,
+    conversation_id: &str,
+    plan_mode: Option<bool>,
+    goal_mode: Option<bool>,
+    goal_mode_token_budget: Option<i64>,
+) -> Result<()> {
+    database::open_connection(database_path)
+        .and_then(|connection| {
+            connection.execute(
+                "INSERT INTO chat_conversations (
+                   id, conversation_id, plan_mode, goal_mode, goal_mode_token_budget
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(conversation_id) DO UPDATE SET
+                   plan_mode = COALESCE(excluded.plan_mode, chat_conversations.plan_mode),
+                   goal_mode = COALESCE(excluded.goal_mode, chat_conversations.goal_mode),
+                   goal_mode_token_budget = COALESCE(excluded.goal_mode_token_budget, chat_conversations.goal_mode_token_budget)",
+                params![
+                    database::create_snowflake_id(),
+                    conversation_id,
+                    plan_mode.map(|v| if v { 1 } else { 0 }),
+                    goal_mode.map(|v| if v { 1 } else { 0 }),
+                    goal_mode_token_budget,
+                ],
+            )?;
+            Ok(())
+        })
+        .map_err(|error| database::database_error(database_path, "set conversation modes", error))
+}

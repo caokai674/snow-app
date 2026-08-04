@@ -13,7 +13,7 @@ use crate::storage::services::chat_conversations::ChatContextMessage;
 use crate::api::responses::ResponsesApiRequest;
 use crate::storage::ApiConfigRecord;
 
-pub(super) fn resolve_gemini_endpoint(
+pub(crate) fn resolve_gemini_endpoint(
     api_config: &ApiConfigRecord,
     model: &str,
     api_key: &str,
@@ -272,7 +272,7 @@ fn normalize_gemini_role(role: &str) -> &str {
     }
 }
 
-fn build_gemini_thinking_config(config_json: &str) -> Option<Value> {
+pub(crate) fn build_gemini_thinking_config(config_json: &str) -> Option<Value> {
     let parsed = serde_json::from_str::<Value>(config_json).ok()?;
     let gemini_thinking = parsed
         .get("snowcfg")?

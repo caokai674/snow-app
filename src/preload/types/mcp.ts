@@ -85,6 +85,18 @@ export type BrowserCommandResponse = {
   error?: string;
 };
 
+export type TerminalCommandRequest = {
+  commandId: string;
+  operation: string;
+  argsJson: string;
+};
+
+export type TerminalCommandResponse = {
+  commandId: string;
+  resultJson?: string;
+  error?: string;
+};
+
 export type UserQuestionRequest = {
   questionId: string;
   interactionId: string;

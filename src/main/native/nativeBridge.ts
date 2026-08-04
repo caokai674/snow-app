@@ -89,6 +89,18 @@ export const loadNativeBridge = (): NativeBridge => {
             "Rust native bridge is required to write Goal mode token budget"
           )
         ),
+      getConversationModes: () =>
+        Promise.reject(
+          new Error(
+            "Rust native bridge is required to read conversation modes"
+          )
+        ),
+      setConversationModes: () =>
+        Promise.reject(
+          new Error(
+            "Rust native bridge is required to write conversation modes"
+          )
+        ),
       getRequestLogging: () =>
         Promise.reject(
           new Error("Rust native bridge is required to read Request logging")
@@ -320,6 +332,10 @@ export const loadNativeBridge = (): NativeBridge => {
       upsertImportResources: () =>
         Promise.reject(
           new Error("Rust native bridge is required to write import resources")
+        ),
+      commitImportTransaction: () =>
+        Promise.reject(
+          new Error("Rust native bridge is required to commit imported resources")
         ),
       releaseImportResource: () =>
         Promise.reject(
@@ -772,6 +788,12 @@ export const loadNativeBridge = (): NativeBridge => {
         Promise.reject(
           new Error(
             "Rust native bridge is required to check project .gitignore"
+          )
+        ),
+      checkProjectIsRemote: () =>
+        Promise.reject(
+          new Error(
+            "Rust native bridge is required to check project remote workspace"
           )
         ),
       startCodebaseEmbedding: () =>

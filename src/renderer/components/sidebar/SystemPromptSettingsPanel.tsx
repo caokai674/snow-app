@@ -176,6 +176,10 @@ export function SystemPromptSettingsPanel({
         sortOrder: isExisting
           ? existing?.sortOrder ?? maxSortOrder + 1
           : maxSortOrder + 1,
+        scope: existing?.scope ?? "global",
+        ...(existing?.scope === "project" && existing.projectId
+          ? { projectId: existing.projectId }
+          : {}),
       });
 
       await adoptImportedResource(importResource);
@@ -215,6 +219,10 @@ export function SystemPromptSettingsPanel({
         content: prompt.content,
         isActive: !prompt.isActive,
         sortOrder: prompt.sortOrder,
+        scope: prompt.scope,
+        ...(prompt.scope === "project" && prompt.projectId
+          ? { projectId: prompt.projectId }
+          : {}),
       });
       await adoptImportedResource(importResources.find((resource) =>
         (resource.resourceType === "prompt" ||

@@ -6,7 +6,7 @@
 //! `stream` modules so that this file stays focused on orchestration.
 
 mod event;
-mod payload;
+pub(crate) mod payload;
 mod stream;
 
 use std::collections::HashMap;

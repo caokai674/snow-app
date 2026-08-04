@@ -4,6 +4,7 @@ import type { ApiConfigRecord } from "../../../../../preload";
 
 import type {
   ConversationContextValue,
+  GlobalModeDefaults,
   FileChangeRecord,
   PauseController,
   UseChatConversationResult,
@@ -170,6 +171,16 @@ export const useChatConversation = (
   const yoloModeRef = useRef(yoloMode);
   const planModeRef = useRef(planMode);
   const goalModeRef = useRef(goalMode);
+  // Global Plan/Goal Mode defaults from persisted settings. Mutated ONLY by
+  // explicit user toggles (setPlanMode/setGoalMode/setGoalModeTokenBudget)
+  // and the initial settings load — never by conversation switches. This is
+  // what makes per-conversation isolation real: switching chats restores the
+  // target session's own mode and never touches these defaults.
+  const globalModeDefaultsRef = useRef<GlobalModeDefaults>({
+    planMode: false,
+    goalMode: false,
+    goalModeTokenBudget: 2000000,
+  });
   const alwaysApprovedToolsRef = useRef(new Set<string>());
   const pendingToolAuthorizationRef = useRef(
     new Map<
@@ -302,6 +313,7 @@ export const useChatConversation = (
     yoloModeRef,
     planModeRef,
     goalModeRef,
+    globalModeDefaultsRef,
     alwaysApprovedToolsRef,
     planApprovedSessionKeysRef,
     pendingToolAuthorizationRef,

@@ -1,6 +1,8 @@
 import { ipcRenderer } from "electron";
 import type {
   PluginMarketplaceCatalog,
+  PluginMarketplaceInstallPreview,
+  PluginMarketplaceMcpApproval,
   PluginRecord,
   PluginRuntimePermission,
   PluginRuntimeStatus,
@@ -24,6 +26,15 @@ export const pluginsApi = {
     ipcRenderer.invoke("plugins:marketplaces:update", marketplaceId),
   removePluginMarketplace: (marketplaceId: string): Promise<void> =>
     ipcRenderer.invoke("plugins:marketplaces:remove", marketplaceId),
-  installPluginFromMarketplace: (marketplaceId: string, pluginName: string): Promise<void> =>
-    ipcRenderer.invoke("plugins:marketplaces:install", marketplaceId, pluginName),
+  previewPluginMarketplaceInstall: (
+    marketplaceId: string,
+    pluginName: string
+  ): Promise<PluginMarketplaceInstallPreview> =>
+    ipcRenderer.invoke("plugins:marketplaces:preview-install", marketplaceId, pluginName),
+  installPluginFromMarketplace: (
+    marketplaceId: string,
+    pluginName: string,
+    approvedMcpComponents: PluginMarketplaceMcpApproval[]
+  ): Promise<void> =>
+    ipcRenderer.invoke("plugins:marketplaces:install", marketplaceId, pluginName, approvedMcpComponents),
 };

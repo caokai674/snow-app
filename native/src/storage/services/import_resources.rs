@@ -87,7 +87,37 @@ pub fn release_import_resource(
         .map_err(|error| database::database_error(database_path, "release import resource", error))
 }
 
-fn upsert_resource(
+pub(crate) fn delete_mcp_tracking_for_target(
+    transaction: &Transaction<'_>,
+    scope: &str,
+    project_id: Option<&str>,
+    target_id: &str,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "DELETE FROM import_resources
+          WHERE resource_type = 'mcp'
+            AND scope = ?1
+            AND project_id IS ?2
+            AND target_id = ?3",
+        params![scope, project_id, target_id],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn delete_prompt_tracking_for_target(
+    transaction: &Transaction<'_>,
+    target_id: &str,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "DELETE FROM import_resources
+          WHERE resource_type IN ('prompt', 'command', 'agent')
+            AND target_id = ?1",
+        [target_id],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn upsert_resource(
     transaction: &Transaction<'_>,
     item: &ImportResourceInput,
 ) -> rusqlite::Result<()> {

@@ -227,60 +227,82 @@ const addPrompt = (
   prompts: Map<string, SystemPromptItemInput>,
   id: string,
   name: string,
-  content: string | null
+  content: string | null,
+  scope: "global" | "project",
+  projectId?: string,
+  isActive = true
 ): void => {
   if (!content) {
     return;
   }
   const prompt = createPrompt(id, name, content, prompts.size);
   if (prompt) {
-    prompts.set(id, prompt);
+    prompts.set(id, {
+      ...prompt,
+      isActive,
+      scope,
+      ...(scope === "project" && projectId ? { projectId } : {}),
+    });
   }
 };
 
-const collectPrompts = (
+const collectPrompts = async (
   claudeHome: string,
   projects: WorkspaceDirectoryRecord[],
   warnings: string[]
-): { prompts: SystemPromptItemInput[]; instructionPaths: string[] } => {
+): Promise<{ prompts: SystemPromptItemInput[]; instructionPaths: string[] }> => {
   const prompts = new Map<string, SystemPromptItemInput>();
   const instructionPaths: string[] = [];
-  const addFile = (id: string, name: string, path: string): void => {
+  const addFile = (
+    id: string,
+    name: string,
+    path: string,
+    scope: "global" | "project",
+    projectId?: string,
+    isActive = true
+  ): void => {
     const content = readText(path, warnings);
     if (content) {
       instructionPaths.push(path);
-      addPrompt(prompts, id, name, content);
+      addPrompt(prompts, id, name, content, scope, projectId, isActive);
     }
   };
 
-  addFile(`${SOURCE}:global:claude-md`, "Claude Code CLAUDE.md", join(claudeHome, "CLAUDE.md"));
-  for (const path of walkFiles(join(claudeHome, "rules"), (file) => file.endsWith(".md"))) {
-    addFile(`${SOURCE}:global:rule:${safeSegment(path)}`, "Claude Code rule", path);
+  addFile(`${SOURCE}:global:claude-md`, "Claude Code CLAUDE.md", join(claudeHome, "CLAUDE.md"), "global");
+  for (const path of await walkFiles(join(claudeHome, "rules"), (file) => file.endsWith(".md"))) {
+    addFile(`${SOURCE}:global:rule:${safeSegment(path)}`, "Claude Code rule", path, "global");
   }
-  for (const path of walkFiles(join(claudeHome, "commands"), (file) => file.endsWith(".md"))) {
-    addFile(`${SOURCE}:global:command:${safeSegment(path)}`, "Claude Code command", path);
+  for (const path of await walkFiles(join(claudeHome, "commands"), (file) => file.endsWith(".md"))) {
+    addFile(`${SOURCE}:global:command:${safeSegment(path)}`, "Claude Code command", path, "global", undefined, false);
   }
 
   for (const project of projects.filter((item) => item.kind === "local")) {
     addFile(
       `${SOURCE}:project:${project.directoryId}:claude-md`,
       `Claude Code CLAUDE.md (${project.directoryId})`,
-      join(project.path, "CLAUDE.md")
+      join(project.path, "CLAUDE.md"),
+      "project",
+      project.directoryId
     );
     addFile(
       `${SOURCE}:project:${project.directoryId}:claude-dir-md`,
       `Claude Code .claude/CLAUDE.md (${project.directoryId})`,
-      join(project.path, ".claude", "CLAUDE.md")
+      join(project.path, ".claude", "CLAUDE.md"),
+      "project",
+      project.directoryId
     );
     for (const [kind, root] of [
       ["rule", join(project.path, ".claude", "rules")],
       ["command", join(project.path, ".claude", "commands")],
     ] as const) {
-      for (const path of walkFiles(root, (file) => file.endsWith(".md"))) {
+      for (const path of await walkFiles(root, (file) => file.endsWith(".md"))) {
         addFile(
           `${SOURCE}:project:${project.directoryId}:${kind}:${safeSegment(path)}`,
           `Claude Code ${kind}`,
-          path
+          path,
+          "project",
+          project.directoryId,
+          kind !== "command"
         );
       }
     }
@@ -288,18 +310,18 @@ const collectPrompts = (
   return { prompts: [...prompts.values()], instructionPaths };
 };
 
-const collectSkills = (
+const collectSkills = async (
   claudeHome: string,
   projects: WorkspaceDirectoryRecord[]
-): DiscoveredSkill[] => {
+): Promise<DiscoveredSkill[]> => {
   const skills: DiscoveredSkill[] = [];
   const sourcePaths = new Set<string>();
-  const addRoot = (
+  const addRoot = async (
     sourceRoot: string,
     scope: "global" | "project",
     project?: WorkspaceDirectoryRecord
   ): void => {
-    for (const sourceDir of collectSkillDirectories(sourceRoot)) {
+    for (const sourceDir of await collectSkillDirectories(sourceRoot)) {
       const key = resolve(sourceDir);
       if (sourcePaths.has(key)) {
         continue;
@@ -312,9 +334,9 @@ const collectSkills = (
       });
     }
   };
-  addRoot(join(claudeHome, "skills"), "global");
+  await addRoot(join(claudeHome, "skills"), "global");
   for (const project of projects.filter((item) => item.kind === "local")) {
-    addRoot(join(project.path, ".claude", "skills"), "project", project);
+    await addRoot(join(project.path, ".claude", "skills"), "project", project);
   }
   return skills;
 };
@@ -330,8 +352,10 @@ const buildContext = async (native: NativeBridge): Promise<ImportContext> => {
     ...collectClaudeJsonSources(claudeJson, projects),
   ];
   const mcp = collectMcpServers(sources, warnings);
-  const promptData = collectPrompts(claudeHome, projects, warnings);
-  const skills = collectSkills(claudeHome, projects);
+  const [promptData, skills] = await Promise.all([
+    collectPrompts(claudeHome, projects, warnings),
+    collectSkills(claudeHome, projects),
+  ]);
   const configPaths = [
     { label: "User configuration", path: claudeJsonPath, found: existsSync(claudeJsonPath) },
     { label: "User settings", path: join(claudeHome, "settings.json"), found: existsSync(join(claudeHome, "settings.json")) },
@@ -364,6 +388,16 @@ export const discoverClaudeCodeImport = async (
   native: NativeBridge
 ): Promise<ImportSourceDiscovery> => {
   const context = await buildContext(native);
+  const skillCandidates = await Promise.all(context.skills.map(async (skill) => ({
+    type: "skill" as const,
+    provider: SOURCE,
+    scope: skill.scope,
+    originPath: skill.sourceDir,
+    logicalId: skillLogicalId(skill.sourceDir),
+    contentHash: await hashImportPath(skill.sourceDir),
+    ...(skill.projectId ? { projectId: skill.projectId } : {}),
+    ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
+  })));
   const candidates: ImportCandidateInput[] = [
     ...context.mcpServers.map((server) => ({
       type: "mcp" as const,
@@ -382,23 +416,15 @@ export const discoverClaudeCodeImport = async (
       ...(server.projectId ? { projectId: server.projectId } : {}),
     })),
     ...context.prompts.map((prompt) => ({
-      type: "prompt" as const,
+      type: prompt.promptId.includes(":command:") ? "command" as const : "prompt" as const,
       provider: SOURCE,
-      scope: prompt.promptId.includes(":project:") ? "project" as const : "global" as const,
+      scope: prompt.scope ?? "global",
       originPath: context.source.sourceHome,
       logicalId: prompt.promptId,
       contentHash: hashImportValue(prompt.content),
+      ...(prompt.projectId ? { projectId: prompt.projectId } : {}),
     })),
-    ...context.skills.map((skill) => ({
-      type: "skill" as const,
-      provider: SOURCE,
-      scope: skill.scope,
-      originPath: skill.sourceDir,
-      logicalId: skillLogicalId(skill.sourceDir),
-      contentHash: hashImportPath(skill.sourceDir),
-      ...(skill.projectId ? { projectId: skill.projectId } : {}),
-      ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
-    })),
+    ...skillCandidates,
   ];
   return { source: context.source, candidates };
 };
@@ -437,17 +463,24 @@ export const resolveClaudeCodeSelectedImports = async (
     }
   }
   for (const prompt of context.prompts) {
+    const type = prompt.promptId.includes(":command:") ? "command" as const : "prompt" as const;
     const input: ImportCandidateInput = {
-      type: "prompt",
+      type,
       provider: SOURCE,
-      scope: prompt.promptId.includes(":project:") ? "project" : "global",
+      scope: prompt.scope ?? "global",
       originPath: context.source.sourceHome,
       logicalId: prompt.promptId,
       contentHash: hashImportValue(prompt.content),
+      ...(prompt.projectId ? { projectId: prompt.projectId } : {}),
     };
     const candidate = selectionForInput(input, selected);
     if (candidate) {
-      actions.push({ candidate, scope: input.scope, promptInput: prompt });
+      actions.push({
+        candidate,
+        scope: input.scope,
+        ...(prompt.projectId ? { projectId: prompt.projectId } : {}),
+        promptInput: prompt,
+      });
     }
   }
   for (const skill of context.skills) {
@@ -457,7 +490,7 @@ export const resolveClaudeCodeSelectedImports = async (
       scope: skill.scope,
       originPath: skill.sourceDir,
       logicalId: skillLogicalId(skill.sourceDir),
-      contentHash: hashImportPath(skill.sourceDir),
+      contentHash: await hashImportPath(skill.sourceDir),
       ...(skill.projectId ? { projectId: skill.projectId } : {}),
       ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
     };

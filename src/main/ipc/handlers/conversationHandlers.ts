@@ -430,14 +430,6 @@ export const registerConversationHandlers = (native: NativeBridge): void => {
       );
     }
   );
-  ipcMain.handle("sub-agent-configs:get", async (_event, agentId: unknown) => {
-    if (typeof agentId !== "string" || !agentId.trim()) {
-      throw new Error("Agent ID is required to get sub-agent config");
-    }
-
-    return native.getSubAgentConfig(agentId.trim());
-  });
-
   // ===== Conversation export =====
   // Rust 端负责从 SQLite 读取会话与消息并格式化为目标格式文本，
   // 主进程负责弹出保存对话框并将文本写入用户选择的文件路径。

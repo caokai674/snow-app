@@ -11,6 +11,7 @@ pub mod skills;
 pub mod skills_config;
 pub mod skills_installer;
 pub mod sub_agents;
+pub mod terminal;
 pub mod todo;
 pub mod user_interaction;
 pub mod websearch;

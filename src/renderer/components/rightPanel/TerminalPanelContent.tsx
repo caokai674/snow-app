@@ -3,8 +3,10 @@ import { Terminal } from "@xterm/xterm";
 import type { ITheme } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import { useTerminalSettings } from "./useTerminalSettings";
+import { useTerminalMcpInstance } from "./terminal/useTerminalMcpInstance";
 
 export type TerminalPanelContentProps = {
+  tabId: string;
   cwd: string;
   isActive: boolean;
   onTitleChange?: (title: string) => void;
@@ -38,6 +40,7 @@ const DEFAULT_FONT_FAMILY =
   "'SF Mono', 'Menlo', 'Consolas', 'Liberation Mono', monospace";
 
 export const TerminalPanelContent = ({
+  tabId,
   cwd,
   isActive,
   onTitleChange,
@@ -48,6 +51,10 @@ export const TerminalPanelContent = ({
   const fitRef = useRef<FitAddon | null>(null);
   const ptyIdRef = useRef<string | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
+
+  // Register this terminal tab with the MCP controller so that
+  // terminal-send/read/resize/wait commands can reach it.
+  useTerminalMcpInstance(tabId, cwd, isActive, termRef, ptyIdRef);
 
   // Only shellPath triggers PTY recreation; font settings update live.
   const { shellPath } = settings;

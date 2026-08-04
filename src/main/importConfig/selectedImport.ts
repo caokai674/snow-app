@@ -7,7 +7,7 @@ import type {
   ImportCommitResult,
   ImportScope,
 } from "../../shared/importDiscovery";
-import type { ImportResourceInput } from "../../shared/importResources";
+import type { ImportResourceInput, ImportResourceRecord } from "../../shared/importResources";
 import type {
   McpServerConfigInput,
   McpServerConfigRecord,
@@ -21,7 +21,8 @@ import {
   normalizeLogicalId,
   type ImportCandidateInput,
 } from "./discovery";
-import { prepareDirectoryCommit, type DirectoryCommit } from "./directoryCommit";
+import { prepareDirectoryCommit } from "./directoryCommit";
+import { ImportExecutionPlan } from "./importTransaction";
 
 export type SelectedImportCandidate = ImportCandidate;
 
@@ -44,6 +45,7 @@ const candidateMatchesInput = (
   candidate.provider === input.provider &&
   candidate.type === input.type &&
   candidate.scope === input.scope &&
+  candidate.projectId === input.projectId &&
   candidate.logicalId === normalizeLogicalId(input.logicalId) &&
   candidate.contentHash === input.contentHash;
 
@@ -68,23 +70,6 @@ export const skillDestination = (
     : join(homedir(), ".snow", "skills");
   return join(root, provider, skillId);
 };
-
-const mcpRecordToInput = (
-  record: McpServerConfigRecord | ProjectMcpServerConfigRecord
-): McpServerConfigInput => ({
-  serverId: record.serverId,
-  name: record.name,
-  transportType: record.transportType,
-  url: record.url,
-  command: record.command,
-  argsJson: record.argsJson,
-  envJson: record.envJson,
-  headersJson: record.headersJson,
-  enabled: record.enabled,
-  ...(record.timeoutMs === null ? {} : { timeoutMs: record.timeoutMs }),
-  sortOrder: record.sortOrder,
-  source: record.source,
-});
 
 const mcpRecordsEqual = (
   left: McpServerConfigRecord | ProjectMcpServerConfigRecord,
@@ -111,56 +96,9 @@ const promptRecordsEqual = (
   left.name === right.name &&
   left.content === right.content &&
   left.isActive === right.isActive &&
-  left.sortOrder === right.sortOrder;
-
-type Mutation =
-  | {
-      kind: "global-mcp";
-      serverId: string;
-      previous?: McpServerConfigRecord;
-    }
-  | {
-      kind: "project-mcp";
-      projectId: string;
-      serverId: string;
-      previous?: ProjectMcpServerConfigRecord;
-    }
-  | {
-      kind: "prompt";
-      promptId: string;
-      previous?: SystemPromptItemRecord;
-    };
-
-const rollbackMutations = async (
-  native: NativeBridge,
-  mutations: Mutation[]
-): Promise<void> => {
-  for (const mutation of [...mutations].reverse()) {
-    if (mutation.kind === "global-mcp") {
-      if (mutation.previous) {
-        await native.upsertMcpServerConfig(mcpRecordToInput(mutation.previous));
-      } else {
-        await native.deleteMcpServerConfig(mutation.serverId);
-      }
-    } else if (mutation.kind === "project-mcp") {
-      if (mutation.previous) {
-        await native.upsertProjectMcpServerConfig(
-          mutation.projectId,
-          mcpRecordToInput(mutation.previous)
-        );
-      } else {
-        await native.deleteProjectMcpServerConfig(
-          mutation.projectId,
-          mutation.serverId
-        );
-      }
-    } else if (mutation.previous) {
-      await native.upsertSystemPrompt(mutation.previous);
-    } else {
-      await native.deleteSystemPrompt(mutation.promptId);
-    }
-  }
-};
+  left.sortOrder === right.sortOrder &&
+  left.scope === (right.scope ?? "global") &&
+  left.projectId === ((right.scope ?? "global") === "project" ? right.projectId : undefined);
 
 const summaryFor = (results: ImportCommitItemResult[]): ImportCommitResult["summary"] => ({
   selected: results.length,
@@ -240,10 +178,38 @@ const resourceForAction = (action: ResolvedImportAction): ImportResourceInput | 
   };
 };
 
-export const commitSelectedImport = async (
+const isUnmodifiedManagedSkillSnapshot = (
+  resource: ImportResourceRecord,
+  action: ResolvedImportAction,
+  destinationHash: string
+): boolean => {
+  if (!action.skill ||
+      resource.resourceType !== "skill" ||
+      resource.management !== "snapshot" ||
+      resource.scope !== action.scope ||
+      resource.projectId !== action.projectId ||
+      resource.targetPath !== action.skill.destinationDir) {
+    return false;
+  }
+
+  const tracksCandidateSource = resource.sources.some((trackedSource) =>
+    action.candidate.sources.some((source) =>
+      source.provider === trackedSource.provider &&
+      source.scope === trackedSource.scope &&
+      source.originPath === trackedSource.originPath &&
+      source.projectId === trackedSource.projectId
+    )
+  );
+  return tracksCandidateSource && resource.sources.every(
+    (source) => source.importedHash === destinationHash
+  );
+};
+
+export const prepareSelectedImport = async (
   native: NativeBridge,
   candidates: SelectedImportCandidate[],
   actions: ResolvedImportAction[],
+  plan: ImportExecutionPlan,
   warnings: string[] = []
 ): Promise<ImportCommitResult> => {
   const results = new Map<string, ImportCommitItemResult>();
@@ -275,6 +241,7 @@ export const commitSelectedImport = async (
     !results.has(action.candidate.candidateId)
   );
   const globalMcp = await native.listMcpServerConfigs();
+  const managedResources = await native.listImportResources();
   const projectIds = [...new Set(actionable
     .filter((action) => action.projectId && action.mcpInput)
     .map((action) => action.projectId as string))];
@@ -283,13 +250,6 @@ export const commitSelectedImport = async (
     projectMcp.set(projectId, await native.listProjectMcpServerConfigs(projectId));
   }
   const prompts = await native.listSystemPrompts();
-  const mutations: Mutation[] = [];
-  const appliedMutations: Mutation[] = [];
-  const stagedSkills: Array<{
-    action: ResolvedImportAction;
-    transaction: DirectoryCommit;
-  }> = [];
-  const committedSkills: DirectoryCommit[] = [];
 
   try {
     for (const action of actionable) {
@@ -301,15 +261,16 @@ export const commitSelectedImport = async (
             results.set(action.candidate.candidateId, resultFor(action, "unchanged"));
             continue;
           }
-          mutations.push({ kind: "project-mcp", projectId: action.projectId, serverId: input.serverId, previous: existing });
+          plan.addProjectMcpServer(action.projectId, input);
         } else {
           const existing = globalMcp.find((item) => item.serverId === input.serverId);
           if (existing && mcpRecordsEqual(existing, input)) {
             results.set(action.candidate.candidateId, resultFor(action, "unchanged"));
             continue;
           }
-          mutations.push({ kind: "global-mcp", serverId: input.serverId, previous: existing });
+          plan.addMcpServer(input);
         }
+        results.set(action.candidate.candidateId, resultFor(action, "imported"));
       } else if (action.promptInput) {
         const input = action.promptInput;
         const existing = prompts.find((item) => item.promptId === input.promptId);
@@ -317,7 +278,8 @@ export const commitSelectedImport = async (
           results.set(action.candidate.candidateId, resultFor(action, "unchanged"));
           continue;
         }
-        mutations.push({ kind: "prompt", promptId: input.promptId, previous: existing });
+        plan.addSystemPrompt(input);
+        results.set(action.candidate.candidateId, resultFor(action, "imported"));
       } else if (action.skill) {
         if (!existsSync(action.skill.sourceDir)) {
           results.set(resultFor(action, "unsupported").candidateId, resultFor(
@@ -328,24 +290,34 @@ export const commitSelectedImport = async (
           continue;
         }
         if (existsSync(action.skill.destinationDir)) {
-          if (hashImportPath(action.skill.destinationDir) === action.candidate.contentHash) {
+          const destinationHash = await hashImportPath(action.skill.destinationDir);
+          if (destinationHash === action.candidate.contentHash) {
             results.set(action.candidate.candidateId, resultFor(action, "unchanged"));
           } else {
-            results.set(action.candidate.candidateId, resultFor(
-              action,
-              "skipped",
-              "Snow destination already exists with different content"
-            ));
+            const managedSnapshot = managedResources.find((resource) =>
+              isUnmodifiedManagedSkillSnapshot(resource, action, destinationHash)
+            );
+            if (!managedSnapshot) {
+              results.set(action.candidate.candidateId, resultFor(
+                action,
+                "skipped",
+                "Snow destination already exists with different content"
+              ));
+              continue;
+            }
+            plan.addDirectory(
+              prepareDirectoryCommit(action.skill.sourceDir, action.skill.destinationDir),
+              true
+            );
+            results.set(action.candidate.candidateId, resultFor(action, "imported"));
           }
           continue;
         }
-        stagedSkills.push({
-          action,
-          transaction: prepareDirectoryCommit(
-            action.skill.sourceDir,
-            action.skill.destinationDir
-          ),
-        });
+        plan.addDirectory(
+          prepareDirectoryCommit(action.skill.sourceDir, action.skill.destinationDir),
+          false
+        );
+        results.set(action.candidate.candidateId, resultFor(action, "imported"));
       } else {
         results.set(action.candidate.candidateId, resultFor(
           action,
@@ -353,34 +325,6 @@ export const commitSelectedImport = async (
           "No import handler is available for this resource"
         ));
       }
-    }
-
-    for (const mutation of mutations) {
-      const action = actionable.find((item) =>
-        mutation.kind === "prompt"
-          ? item.promptInput?.promptId === mutation.promptId
-          : mutation.kind === "global-mcp"
-            ? item.mcpInput?.serverId === mutation.serverId && item.scope === "global"
-            : item.mcpInput?.serverId === mutation.serverId && item.projectId === mutation.projectId
-      );
-      if (!action) {
-        continue;
-      }
-      if (mutation.kind === "prompt" && action.promptInput) {
-        await native.upsertSystemPrompt(action.promptInput);
-      } else if (mutation.kind === "global-mcp" && action.mcpInput) {
-        await native.upsertMcpServerConfig(action.mcpInput);
-      } else if (mutation.kind === "project-mcp" && action.mcpInput && action.projectId) {
-        await native.upsertProjectMcpServerConfig(action.projectId, action.mcpInput);
-      }
-      appliedMutations.push(mutation);
-      results.set(action.candidate.candidateId, resultFor(action, "imported"));
-    }
-
-    for (const staged of stagedSkills) {
-      staged.transaction.commit({ replaceExisting: false });
-      committedSkills.push(staged.transaction);
-      results.set(staged.action.candidate.candidateId, resultFor(staged.action, "imported"));
     }
 
     const resources = actionable
@@ -391,35 +335,11 @@ export const commitSelectedImport = async (
       .map(resourceForAction)
       .filter((resource): resource is ImportResourceInput => Boolean(resource));
     if (resources.length > 0) {
-      await native.upsertImportResources(resources);
+      plan.addImportResources(resources);
     }
   } catch (error) {
-    for (const transaction of [...committedSkills].reverse()) {
-      try {
-        transaction.rollback();
-      } catch (rollbackError) {
-        warnings.push(
-          "Skill rollback was incomplete: " +
-            (rollbackError instanceof Error ? rollbackError.message : String(rollbackError))
-        );
-      }
-    }
-    try {
-      await rollbackMutations(native, appliedMutations);
-    } catch (rollbackError) {
-      warnings.push(
-        "Import rollback was incomplete: " +
-          (rollbackError instanceof Error ? rollbackError.message : String(rollbackError))
-      );
-    }
-    throw new Error(
-      "Selected import was rolled back: " +
-        (error instanceof Error ? error.message : String(error))
-    );
-  } finally {
-    for (const staged of stagedSkills) {
-      staged.transaction.cleanup();
-    }
+    plan.discard();
+    throw error;
   }
 
   for (const action of actionable) {
@@ -443,4 +363,24 @@ export const commitSelectedImport = async (
     summary: summaryFor(itemResults),
     warnings,
   };
+};
+
+export const commitSelectedImport = async (
+  native: NativeBridge,
+  candidates: SelectedImportCandidate[],
+  actions: ResolvedImportAction[],
+  warnings: string[] = []
+): Promise<ImportCommitResult> => {
+  const plan = new ImportExecutionPlan();
+  try {
+    const result = await prepareSelectedImport(native, candidates, actions, plan, warnings);
+    await plan.commit(native);
+    return result;
+  } catch (error) {
+    plan.discard();
+    throw new Error(
+      "Selected import was rolled back: " +
+        (error instanceof Error ? error.message : String(error))
+    );
+  }
 };

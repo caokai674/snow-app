@@ -5,6 +5,7 @@ import { join, relative, resolve, sep } from "node:path";
 import type { NativeBridge } from "../../native/types";
 import type {
   ImportCommitItemResult,
+  ImportCommitResult,
   ImportCommitSummary,
   ImportSelection,
 } from "../../../shared/importDiscovery";
@@ -13,6 +14,7 @@ import type {
   ImportResourceRecord,
   ImportResourceReleaseInput,
 } from "../../../shared/importResources";
+import type { PluginMarketplaceMcpApproval } from "../../../shared/plugins";
 import { resolveCodexSelectedImports } from "../../codex/importer";
 import {
   importClaudeCode,
@@ -24,15 +26,17 @@ import {
   previewOpenCodeImport,
   resolveOpenCodeSelectedImports,
 } from "../../importConfig/openCodeImporter";
-import { commitSelectedImport } from "../../importConfig/selectedImport";
+import { prepareSelectedImport } from "../../importConfig/selectedImport";
 import { discoverAllImportCandidates } from "../../importConfig/unifiedDiscovery";
 import { ensureLegacyImportResourceMigration } from "../../importConfig/legacyImportMigration";
+import { clearImportDiscoveryCache } from "../../importConfig/discoveryWorker";
 import {
-  commitPluginImports,
+  preparePluginImports,
   addPluginMarketplace,
   ensureLegacyCodexPluginMigration,
   installPluginFromMarketplace,
   listPluginMarketplaces,
+  previewPluginMarketplaceInstall,
   refreshManagedPlugins,
   removePluginMarketplace,
   removeManagedPlugin,
@@ -41,6 +45,7 @@ import {
   updatePluginMarketplace,
   updateManagedPlugin,
 } from "../../importConfig/pluginManager";
+import { ImportExecutionPlan } from "../../importConfig/importTransaction";
 import { PluginRuntimeManager } from "../../plugins/pluginRuntimeManager";
 
 const resourceInputForRecord = (resource: ImportResourceRecord): ImportResourceInput => ({
@@ -129,6 +134,23 @@ const pluginIdFrom = (value: unknown): string => {
   return value;
 };
 
+const marketplaceMcpApprovalsFrom = (value: unknown): PluginMarketplaceMcpApproval[] => {
+  if (!Array.isArray(value)) throw new Error("Marketplace MCP approvals are required");
+  const approvals = value.map((item) => {
+    if (!item || typeof item !== "object") throw new Error("Marketplace MCP approval is invalid");
+    const approval = item as Partial<PluginMarketplaceMcpApproval>;
+    if (typeof approval.componentId !== "string" || !approval.componentId.trim() ||
+        typeof approval.approvalHash !== "string" || !approval.approvalHash.trim()) {
+      throw new Error("Marketplace MCP approval is invalid");
+    }
+    return { componentId: approval.componentId, approvalHash: approval.approvalHash };
+  });
+  if (new Set(approvals.map((approval) => approval.componentId)).size !== approvals.length) {
+    throw new Error("Marketplace MCP approvals must not contain duplicate components");
+  }
+  return approvals;
+};
+
 const pluginStateSummary = (items: ImportCommitSummary, pluginItems: ImportCommitItemResult[]) => ({
   selected: items.selected + pluginItems.length,
   imported: items.imported + pluginItems.filter((item) => item.status === "imported").length,
@@ -148,7 +170,11 @@ export const registerImportConfigHandlers = (native: NativeBridge, pluginRuntime
     if (!plugin) throw new Error("Plugin not found");
     return plugin;
   };
-  ipcMain.handle("import-config:discover", () => discoverAllImportCandidates(native));
+  ipcMain.handle("import-config:discover", async () => {
+    await clearImportDiscoveryCache();
+    await ensureLegacyImportResourceMigration(native);
+    return discoverAllImportCandidates(native);
+  });
   ipcMain.handle("import-config:list-managed-resources", async () => {
     await ensureLegacyImportResourceMigration(native);
     return native.listImportResources();
@@ -159,6 +185,7 @@ export const registerImportConfigHandlers = (native: NativeBridge, pluginRuntime
   });
   ipcMain.handle("plugins:rescan", async () => {
     await ensureLegacyCodexPluginMigration(native);
+    await clearImportDiscoveryCache();
     const plugins = await refreshManagedPlugins(native);
     for (const plugin of plugins) {
       if (plugin.state !== "enabled") pluginRuntime.stopForLifecycleChange(plugin.pluginId);
@@ -209,10 +236,15 @@ export const registerImportConfigHandlers = (native: NativeBridge, pluginRuntime
     if (typeof marketplaceId !== "string" || !marketplaceId.trim()) throw new Error("Marketplace ID is required");
     return removePluginMarketplace(native, marketplaceId);
   });
-  ipcMain.handle("plugins:marketplaces:install", async (_event, marketplaceId: unknown, pluginName: unknown) => {
+  ipcMain.handle("plugins:marketplaces:preview-install", async (_event, marketplaceId: unknown, pluginName: unknown) => {
     if (typeof marketplaceId !== "string" || !marketplaceId.trim()) throw new Error("Marketplace ID is required");
     if (typeof pluginName !== "string" || !pluginName.trim()) throw new Error("Plugin name is required");
-    await installPluginFromMarketplace(native, marketplaceId, pluginName);
+    return previewPluginMarketplaceInstall(native, marketplaceId, pluginName);
+  });
+  ipcMain.handle("plugins:marketplaces:install", async (_event, marketplaceId: unknown, pluginName: unknown, approvals: unknown) => {
+    if (typeof marketplaceId !== "string" || !marketplaceId.trim()) throw new Error("Marketplace ID is required");
+    if (typeof pluginName !== "string" || !pluginName.trim()) throw new Error("Plugin name is required");
+    await installPluginFromMarketplace(native, marketplaceId, pluginName, marketplaceMcpApprovalsFrom(approvals));
   });
   ipcMain.handle("import-config:release-managed-resource", async (_event, value: unknown) => {
     const input = parseReleaseInput(value);
@@ -241,6 +273,7 @@ export const registerImportConfigHandlers = (native: NativeBridge, pluginRuntime
       throw new Error("Select at least one import candidate");
     }
 
+    await clearImportDiscoveryCache();
     await Promise.all([
       ensureLegacyImportResourceMigration(native),
       ensureLegacyCodexPluginMigration(native),
@@ -255,7 +288,13 @@ export const registerImportConfigHandlers = (native: NativeBridge, pluginRuntime
     const selected = candidates.filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
     const logicalResources = new Map<string, string>();
     for (const candidate of selected) {
-      const resourceKey = `${candidate.type}:${candidate.scope}:${candidate.logicalId}`;
+      const resourceKey = [
+        candidate.provider,
+        candidate.type,
+        candidate.scope,
+        candidate.projectId ?? "",
+        candidate.logicalId,
+      ].join(":");
       const previousHash = logicalResources.get(resourceKey);
       if (previousHash && previousHash !== candidate.contentHash) {
         throw new Error(`Select only one content variant for ${candidate.logicalId}`);
@@ -270,13 +309,27 @@ export const registerImportConfigHandlers = (native: NativeBridge, pluginRuntime
       resolveOpenCodeSelectedImports(native, regularCandidates),
       selectedPluginImports(native, selected),
     ]);
-    const regularResult = await commitSelectedImport(
-      native,
-      regularCandidates,
-      [...codex.actions, ...claudeCode.actions, ...openCode.actions],
-      [...discovery.warnings, ...codex.warnings, ...claudeCode.warnings, ...openCode.warnings]
-    );
-    const pluginResult = await commitPluginImports(native, plugins);
+    const plan = new ImportExecutionPlan();
+    let regularResult: ImportCommitResult;
+    let pluginResult: ReturnType<typeof preparePluginImports>;
+    try {
+      regularResult = await prepareSelectedImport(
+        native,
+        regularCandidates,
+        [...codex.actions, ...claudeCode.actions, ...openCode.actions],
+        plan,
+        [...discovery.warnings, ...codex.warnings, ...claudeCode.warnings, ...openCode.warnings]
+      );
+      pluginResult = preparePluginImports(native, plugins, plan);
+      await plan.commit(native);
+      await clearImportDiscoveryCache();
+    } catch (error) {
+      plan.discard();
+      throw new Error(
+        "Selected import was rolled back: " +
+          (error instanceof Error ? error.message : String(error))
+      );
+    }
     const itemResults = [
       ...regularResult.itemResults,
       ...pluginResult.itemResults.map((item) => ({

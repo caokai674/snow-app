@@ -370,7 +370,7 @@ fn normalize_message_role(role: &str) -> &str {
     }
 }
 
-fn build_responses_reasoning(config_json: &str) -> Option<Value> {
+pub(crate) fn build_responses_reasoning(config_json: &str) -> Option<Value> {
     let parsed = serde_json::from_str::<Value>(config_json).ok()?;
     let responses_reasoning = parsed
         .get("snowcfg")?

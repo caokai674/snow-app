@@ -16,6 +16,7 @@ import { useI18n } from "../i18n";
 import { useChatConversationContext } from "./mainContent/chatMessages";
 import { CodebaseSyncIndicator } from "./TopBar/CodebaseSyncIndicator";
 import { TodoPanelButton } from "./TopBar/TodoPanelButton";
+import { ContextMenu, type ContextMenuItem } from "./common/ContextMenu";
 import { useCodebaseWatcher } from "../hooks/useCodebaseWatcher";
 
 type TopBarProps = {
@@ -58,6 +59,11 @@ export const TopBar = ({
   const [isPlusMenuOpen, setIsPlusMenuOpen] = useState(false);
   const [isTodoPanelOpen, setIsTodoPanelOpen] = useState(false);
   const [isTodoPanelPinned, setIsTodoPanelPinned] = useState(false);
+  // 项目标签右键菜单：记录触发位置。
+  const [branchContextMenu, setBranchContextMenu] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
   const [codebaseEnabled, setCodebaseEnabled] = useState(false);
   const [codebaseIndexed, setCodebaseIndexed] = useState(false);
   // Error message of the last failed embedding for the active project.
@@ -326,6 +332,44 @@ export const TopBar = ({
   // 代码库功能已开启且当前项目嵌入完毕后，才在 Plus 菜单中提供“代码库”项。
   const canOpenCodebase = effectiveEnabled && codebaseIndexed && activeProjectId;
 
+  // 项目标签右键菜单：与 Plus 菜单一致，快速在当前项目打开终端/浏览器/代码库。
+  const branchContextMenuItems: ContextMenuItem[] = [
+    {
+      id: "terminal",
+      label: "终端",
+      icon: <Terminal size={13} strokeWidth={1.8} />,
+      onClick: () => {
+        setBranchContextMenu(null);
+        onOpenTerminal?.();
+      },
+    },
+    {
+      id: "browser",
+      label: "浏览器",
+      icon: <Globe size={13} strokeWidth={1.8} />,
+      onClick: () => {
+        setBranchContextMenu(null);
+        onOpenBrowser?.();
+      },
+    },
+    ...(canOpenCodebase && activeProjectId
+      ? [
+          {
+            id: "codebase",
+            label: t("topBar.plusMenu.codebase"),
+            icon: <Database size={13} strokeWidth={1.8} />,
+            onClick: () => {
+              setBranchContextMenu(null);
+              onOpenCodebase?.(
+                activeProjectId,
+                activeDirectory?.name ?? activeProjectId
+              );
+            },
+          },
+        ]
+      : []),
+  ];
+
   const plusMenuItems = [
     { id: "terminal", label: "终端", icon: Terminal },
     { id: "browser", label: "浏览器", icon: Globe },
@@ -414,7 +458,17 @@ export const TopBar = ({
       <div className="top-bar-right">
         <div className="top-bar-branch-info">
           {activeDirectory && (
-            <span className="top-bar-branch-label">
+            <span
+              className="top-bar-branch-label"
+              title={activeDirectory.name}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setBranchContextMenu({
+                  x: event.clientX,
+                  y: event.clientY,
+                });
+              }}
+            >
               <GitBranch size={13} strokeWidth={1.8} />
               <span>{activeDirectory.name}</span>
             </span>
@@ -475,6 +529,14 @@ export const TopBar = ({
           </button>
         </div>
       </div>
+      {branchContextMenu && (
+        <ContextMenu
+          x={branchContextMenu.x}
+          y={branchContextMenu.y}
+          items={branchContextMenuItems}
+          onClose={() => setBranchContextMenu(null)}
+        />
+      )}
     </header>
   );
 };

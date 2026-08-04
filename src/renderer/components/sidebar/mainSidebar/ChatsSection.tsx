@@ -20,21 +20,55 @@ import {
 const CHAT_PAGE_SIZE = 20;
 
 /**
- * 按 updatedAt 倒序排序会话列表。
+ * 排序会话列表：运行中的会话永远置顶，其余按 updatedAt 倒序。
+ *
+ * 运行中会话（streamingConversationIds）内部按 updatedAt 倒序，
+ * 非运行中会话也按 updatedAt 倒序，两组拼接后返回。
+ *
  * 必须基于时间戳比较，不能直接用字符串 localeCompare：
  * 占位符会话的 updatedAt 是 ISO UTC 格式（带 T 与 Z），
  * 而数据库返回的是 SQLite 本地时间格式（空格分隔、无时区），
  * 两种格式的字典序与真实时间顺序不一致，会导致新会话排到旧会话下方。
+ *
+ * 注意：streamingConversationIds 只在会话开始/结束时变化（非每 token），
+ * 因此不会导致流式过程中频繁重排序。
  */
 const sortConversationsByUpdatedAt = (
-  items: ChatConversationRecord[]
-): ChatConversationRecord[] =>
-  [...items].sort(
-    (a, b) =>
-      parseDbTimestamp(b.updatedAt).getTime() -
-        parseDbTimestamp(a.updatedAt).getTime() ||
-      b.conversationId.localeCompare(a.conversationId)
-  );
+  items: ChatConversationRecord[],
+  streamingIds?: Set<string>
+): ChatConversationRecord[] => {
+  if (!streamingIds || streamingIds.size === 0) {
+    return [...items].sort(
+      (a, b) =>
+        parseDbTimestamp(b.updatedAt).getTime() -
+          parseDbTimestamp(a.updatedAt).getTime() ||
+        b.conversationId.localeCompare(a.conversationId)
+    );
+  }
+
+  const streaming: ChatConversationRecord[] = [];
+  const rest: ChatConversationRecord[] = [];
+  for (const item of items) {
+    if (streamingIds.has(item.conversationId)) {
+      streaming.push(item);
+    } else {
+      rest.push(item);
+    }
+  }
+
+  const compareByTime = (
+    a: ChatConversationRecord,
+    b: ChatConversationRecord
+  ): number =>
+    parseDbTimestamp(b.updatedAt).getTime() -
+      parseDbTimestamp(a.updatedAt).getTime() ||
+    b.conversationId.localeCompare(a.conversationId);
+
+  streaming.sort(compareByTime);
+  rest.sort(compareByTime);
+
+  return [...streaming, ...rest];
+};
 
 type ChatsSectionProps = {
   isSwitchingDirectory: boolean;
@@ -161,7 +195,7 @@ export function ChatsSection({
         const updated = prev.map((item) =>
           item.conversationId === conv.conversationId ? conv : item
         );
-        return sortConversationsByUpdatedAt(updated);
+        return sortConversationsByUpdatedAt(updated, streamingConversationIds);
       }
 
       // If the real conversation arrives, replace the pending placeholder.
@@ -172,18 +206,32 @@ export function ChatsSection({
         const replaced = prev.map((item, index) =>
           index === pendingIndex ? conv : item
         );
-        return sortConversationsByUpdatedAt(replaced);
+        return sortConversationsByUpdatedAt(replaced, streamingConversationIds);
       }
 
       isNew = true;
       // New conversation: prepend and re-sort by updatedAt
-      return sortConversationsByUpdatedAt([conv, ...prev]);
+      return sortConversationsByUpdatedAt(
+        [conv, ...prev],
+        streamingConversationIds
+      );
     });
 
     if (isNew) {
       setTotal((prev) => prev + 1);
     }
-  }, [upsertedConversation, directoryId]);
+  }, [upsertedConversation, directoryId, streamingConversationIds]);
+
+  // 当流式状态变化时（会话开始/结束），重新排序使运行中会话移到顶部。
+  // streamingConversationIds 只在会话开始/结束时变化，不会在流式过程中频繁更新。
+  useEffect(() => {
+    if (streamingConversationIds.size === 0) {
+      return;
+    }
+    setConversations((prev) =>
+      sortConversationsByUpdatedAt(prev, streamingConversationIds)
+    );
+  }, [streamingConversationIds]);
 
   const loadMore = useCallback(async (): Promise<void> => {
     if (isLoadingMore || !hasMore || !directoryId || isLoading) {
@@ -339,7 +387,11 @@ export function ChatsSection({
     );
   };
 
-  const timeGroups = groupConversationsByTime(conversations);
+  const timeGroups = groupConversationsByTime(
+    conversations,
+    new Date(),
+    streamingConversationIds
+  );
 
   useEffect(() => {
     const current = conversationsRef.current;
@@ -485,6 +537,8 @@ export function ChatsSection({
 
   const getGroupLabel = (key: TimeGroupKey): string => {
     switch (key) {
+      case "running":
+        return t("sidebar.chatTimeRunning", { defaultValue: "Running" });
       case "today":
         return t("sidebar.chatTimeToday", { defaultValue: "Today" });
       case "yesterday":

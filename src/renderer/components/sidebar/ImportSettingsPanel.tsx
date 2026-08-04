@@ -57,6 +57,7 @@ const statusLabel = (
     conflict: t("settings.importStatusConflict", { defaultValue: "Conflict" }),
     unsupported: t("settings.importStatusUnsupported", { defaultValue: "Unsupported" }),
     managed: t("settings.importStatusManaged", { defaultValue: "Managed" }),
+    repair: t("settings.importStatusRepair", { defaultValue: "Repair required" }),
   };
   return labels[status];
 };
@@ -88,10 +89,17 @@ const candidateIcon = (candidate: ImportCandidate): typeof Plug => {
 const isSelectable = (candidate: ImportCandidate): boolean =>
   candidate.status === "new" ||
   candidate.status === "update-available" ||
-  candidate.status === "conflict";
+  candidate.status === "conflict" ||
+  candidate.status === "repair";
 
 const conflictKey = (candidate: ImportCandidate): string =>
-  `${candidate.type}:${candidate.scope}:${candidate.logicalId}`;
+  [
+    candidate.provider,
+    candidate.type,
+    candidate.scope,
+    candidate.projectId ?? "",
+    candidate.logicalId,
+  ].join(":");
 
 const summaryFor = (
   discovery: ImportDiscovery,

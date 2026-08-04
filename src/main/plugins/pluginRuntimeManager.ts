@@ -79,7 +79,7 @@ export class PluginRuntimeManager {
     if (existing) return this.getStatus(plugin);
 
     try {
-      if (hashImportPath(plugin.sourcePath) !== plugin.contentHash) {
+      if (await hashImportPath(plugin.sourcePath) !== plugin.contentHash) {
         return this.setStatus(plugin.pluginId, {
           state: "stopped",
           message: "Plugin source changed; rescan and update it before running external code",

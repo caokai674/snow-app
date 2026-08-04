@@ -15,6 +15,10 @@
 | [2-使用指南/2-安装与管理Skills](zh-CN/2-使用指南/2-安装与管理Skills.md) | [2-guides/2-install-and-manage-skills](en/2-guides/2-install-and-manage-skills.md) | Skills 安装与管理 / Install & manage skills |
 | [2-使用指南/3-配置API密钥与模型](zh-CN/2-使用指南/3-配置API密钥与模型.md) | [2-guides/3-configure-api-keys](en/2-guides/3-configure-api-keys.md) | API 与模型配置 / Configure API & models |
 | [2-使用指南/4-配置代理与网络](zh-CN/2-使用指南/4-配置代理与网络.md) | [2-guides/4-configure-proxy](en/2-guides/4-configure-proxy.md) | 代理与网络 / Proxy & network |
+| [2-使用指南/5-配置Hooks与子代理](zh-CN/2-使用指南/5-配置Hooks与子代理.md) | [2-guides/5-configure-hooks-and-subagents](en/2-guides/5-configure-hooks-and-subagents.md) | Hooks 与子代理配置 / Configure hooks & sub-agents |
+| [2-使用指南/6-浏览器自动化](zh-CN/2-使用指南/6-浏览器自动化.md) | [2-guides/6-browser-automation](en/2-guides/6-browser-automation.md) | 浏览器自动化 / Browser automation |
+| [2-使用指南/7-代码库索引与代码诊断](zh-CN/2-使用指南/7-代码库索引与代码诊断.md) | [2-guides/7-codebase-index-and-diagnostics](en/2-guides/7-codebase-index-and-diagnostics.md) | 代码库索引与代码诊断 / Codebase index & diagnostics |
+| [2-使用指南/8-第三方配置导入](zh-CN/2-使用指南/8-第三方配置导入.md) | [2-guides/8-third-party-configuration-import](en/2-guides/8-third-party-configuration-import.md) | 第三方配置导入 / Import third-party configuration |
 | [3-参考手册/1-settings.json配置参考](zh-CN/3-参考手册/1-settings.json配置参考.md) | [3-reference/1-settings-json-reference](en/3-reference/1-settings-json-reference.md) | settings.json 字段参考 / settings.json reference |
 | [3-参考手册/2-内置工具参考](zh-CN/3-参考手册/2-内置工具参考.md) | [3-reference/2-builtin-tools-reference](en/3-reference/2-builtin-tools-reference.md) | 内置工具参考 / Built-in tools reference |
 

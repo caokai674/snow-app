@@ -1,6 +1,5 @@
 import {
   existsSync,
-  readdirSync,
   readFileSync,
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
@@ -9,6 +8,7 @@ import type {
   SystemPromptItemInput,
 } from "../native/types";
 import { isRecord, toBoolean } from "../utils/value";
+import { IMPORT_SCAN_LIMITS, walkImportFilesInWorker } from "./discoveryWorker";
 
 export type ImportScope = "global" | "project";
 
@@ -190,41 +190,12 @@ export const walkFiles = (
   root: string,
   predicate: (filePath: string) => boolean,
   maxDepth = 10
-): string[] => {
-  if (!existsSync(root)) {
-    return [];
-  }
+): Promise<string[]> =>
+  walkImportFilesInWorker(root, Math.min(maxDepth, IMPORT_SCAN_LIMITS.maxDepth))
+    .then((files) => files.filter(predicate));
 
-  const matches: string[] = [];
-  const visit = (current: string, depth: number): void => {
-    if (depth > maxDepth) {
-      return;
-    }
-    let entries;
-    try {
-      entries = readdirSync(current, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "sessions") {
-        continue;
-      }
-      const entryPath = join(current, entry.name);
-      if (entry.isDirectory()) {
-        visit(entryPath, depth + 1);
-      } else if (entry.isFile() && predicate(entryPath)) {
-        matches.push(entryPath);
-      }
-    }
-  };
-
-  visit(root, 0);
-  return matches;
-};
-
-export const collectSkillDirectories = (root: string): string[] =>
-  walkFiles(root, (filePath) => filePath.endsWith(`${sep}SKILL.md`)).map(dirname);
+export const collectSkillDirectories = async (root: string): Promise<string[]> =>
+  (await walkFiles(root, (filePath) => filePath.endsWith(`${sep}SKILL.md`))).map(dirname);
 
 export const createPrompt = (
   promptId: string,

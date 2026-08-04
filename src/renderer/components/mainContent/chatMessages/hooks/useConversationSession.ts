@@ -21,6 +21,11 @@ export const useConversationSession = (ctx: ConversationContextValue) => {
   const ensureSession = useCallback(
     (key: string, dirId?: string): void => {
       if (!ctx.sessionsRefData.current.has(key)) {
+        // New sessions inherit the GLOBAL defaults — not the currently
+        // displayed session's mode. This is what keeps conversations fully
+        // isolated: creating a chat in session A with Plan Mode on does not
+        // leak Plan Mode into a fresh chat.
+        const defaults = ctx.globalModeDefaultsRef.current;
         ctx.sessionsRefData.current.set(key, {
           streamId: null,
           streamPromise: null,
@@ -31,8 +36,9 @@ export const useConversationSession = (ctx: ConversationContextValue) => {
           directoryId: dirId,
           checkpointIds: [],
           childSubAgentIds: new Set(),
-          planMode: ctx.planModeRef.current,
-          goalMode: ctx.goalModeRef.current,
+          planMode: defaults.planMode,
+          goalMode: defaults.goalMode,
+          goalModeTokenBudget: defaults.goalModeTokenBudget,
         });
       }
       ctx.setSessions((prev) => {
@@ -60,7 +66,7 @@ export const useConversationSession = (ctx: ConversationContextValue) => {
         };
       });
     },
-    [ctx.sessionsRefData, ctx.setSessions, ctx.planModeRef, ctx.goalModeRef]
+    [ctx.sessionsRefData, ctx.setSessions, ctx.globalModeDefaultsRef]
   );
 
   const updateSessionMessages = useCallback(

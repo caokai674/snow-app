@@ -20,14 +20,22 @@ pub fn upsert_mcp_server_config(database_path: &Path, item: &McpServerConfigInpu
 
 pub fn delete_mcp_server_config(database_path: &Path, server_id: &str) -> Result<()> {
     database::open_connection(database_path)
-        .and_then(|connection| {
-            connection.execute("DELETE FROM mcp_server_configs WHERE server_id = ?1", [server_id])?;
+        .and_then(|mut connection| {
+            let transaction = connection.transaction()?;
+            transaction.execute("DELETE FROM mcp_server_configs WHERE server_id = ?1", [server_id])?;
+            super::import_resources::delete_mcp_tracking_for_target(
+                &transaction,
+                "global",
+                None,
+                server_id,
+            )?;
+            transaction.commit()?;
             Ok(())
         })
         .map_err(|error| database::database_error(database_path, "delete MCP server config", error))
 }
 
-fn query_mcp_server_configs(
+pub(crate) fn query_mcp_server_configs(
     connection: &Connection,
 ) -> rusqlite::Result<Vec<McpServerConfigRecord>> {
     let mut statement = connection.prepare(
@@ -73,7 +81,7 @@ fn query_mcp_server_configs(
     rows.collect()
 }
 
-fn upsert_mcp_server_config_with_connection(
+pub(crate) fn upsert_mcp_server_config_with_connection(
     connection: &Connection,
     item: &McpServerConfigInput,
 ) -> rusqlite::Result<()> {
@@ -128,4 +136,94 @@ fn upsert_mcp_server_config_with_connection(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs::remove_file,
+        path::PathBuf,
+        process,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+    use crate::storage::{ImportResourceInput, ImportResourceSourceInput};
+
+    fn test_database_path() -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "snow-mcp-server-configs-{}-{timestamp}.sqlite",
+            process::id()
+        ))
+    }
+
+    fn tracked_resource(resource_id: &str, target_id: &str) -> ImportResourceInput {
+        ImportResourceInput {
+            resource_id: resource_id.to_string(),
+            resource_type: "mcp".to_string(),
+            scope: "global".to_string(),
+            project_id: None,
+            target_id: target_id.to_string(),
+            target_path: String::new(),
+            management: "snapshot".to_string(),
+            sources: vec![ImportResourceSourceInput {
+                provider: "codex".to_string(),
+                scope: "global".to_string(),
+                origin_path: format!("/source/{target_id}"),
+                project_id: None,
+                content_hash: "hash".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn deleting_mcp_removes_only_its_import_tracking() {
+        let database_path = test_database_path();
+        database::ensure_database(&database_path).expect("create test database");
+        let server_id = "global:tracked";
+        upsert_mcp_server_config(
+            &database_path,
+            &McpServerConfigInput {
+                server_id: server_id.to_string(),
+                name: "Tracked".to_string(),
+                transport_type: "stdio".to_string(),
+                url: String::new(),
+                command: "node".to_string(),
+                args_json: "[]".to_string(),
+                env_json: "{}".to_string(),
+                headers_json: "{}".to_string(),
+                enabled: true,
+                timeout_ms: None,
+                sort_order: 0,
+                source: "manual".to_string(),
+            },
+        )
+        .expect("store MCP server");
+        super::super::import_resources::upsert_import_resources(
+            &database_path,
+            &[
+                tracked_resource("mcp:tracked", server_id),
+                tracked_resource("mcp:other", "global:other"),
+            ],
+        )
+        .expect("store import tracking");
+
+        delete_mcp_server_config(&database_path, server_id).expect("delete MCP server");
+
+        assert!(list_mcp_server_configs(&database_path)
+            .expect("list MCP servers")
+            .is_empty());
+        let resources = super::super::import_resources::list_import_resources(&database_path)
+            .expect("list import tracking");
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].resource_id, "mcp:other");
+
+        let _ = remove_file(&database_path);
+        let _ = remove_file(database_path.with_extension("sqlite-shm"));
+        let _ = remove_file(database_path.with_extension("sqlite-wal"));
+    }
 }

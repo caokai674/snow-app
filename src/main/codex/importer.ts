@@ -1,6 +1,5 @@
 import {
   existsSync,
-  readdirSync,
   readFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -24,6 +23,7 @@ import {
   type ImportSourceDiscovery,
 } from "../importConfig/discovery";
 import type { ImportSource } from "../../shared/importDiscovery";
+import { walkFiles as walkImportFiles } from "../importConfig/utils";
 import {
   selectionForInput,
   skillDestination,
@@ -164,41 +164,11 @@ const readJson = (
   }
 };
 
-const walkFiles = (root: string, predicate: (filePath: string) => boolean): string[] => {
-  if (!existsSync(root)) {
-    return [];
-  }
+const walkFiles = (root: string, predicate: (filePath: string) => boolean): Promise<string[]> =>
+  walkImportFiles(root, predicate, MAX_SCAN_DEPTH);
 
-  const matches: string[] = [];
-  const visit = (current: string, depth: number): void => {
-    if (depth > MAX_SCAN_DEPTH) {
-      return;
-    }
-    let entries;
-    try {
-      entries = readdirSync(current, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "sessions") {
-        continue;
-      }
-      const entryPath = join(current, entry.name);
-      if (entry.isDirectory()) {
-        visit(entryPath, depth + 1);
-      } else if (entry.isFile() && predicate(entryPath)) {
-        matches.push(entryPath);
-      }
-    }
-  };
-
-  visit(root, 0);
-  return matches;
-};
-
-const collectSkillDirectories = (root: string): string[] => {
-  const files = walkFiles(root, (filePath) => filePath.endsWith(`${sep}${SKILL_FILE_NAME}`));
+const collectSkillDirectories = async (root: string): Promise<string[]> => {
+  const files = await walkFiles(root, (filePath) => filePath.endsWith(`${sep}${SKILL_FILE_NAME}`));
   return files.map(dirname).filter((skillDir) => relative(root, skillDir) !== "");
 };
 
@@ -352,12 +322,12 @@ const loadPlugin = (
   };
 };
 
-const collectPlugins = (
+const collectPlugins = async (
   codexHome: string,
   projects: WorkspaceDirectoryRecord[],
   configs: ConfigSource[],
   warnings: string[]
-): PluginDescriptor[] => {
+): Promise<PluginDescriptor[]> => {
   const roots = [
     join(codexHome, ".tmp", "marketplaces"),
     join(codexHome, "plugins"),
@@ -367,9 +337,9 @@ const collectPlugins = (
     ...projects.filter((project) => project.kind === "local").map((project) => join(project.path, ".agents", "plugins")),
     ...projects.filter((project) => project.kind === "local").map((project) => join(project.path, "plugins")),
   ];
-  const manifestPaths = roots.flatMap((root) =>
+  const manifestPaths = (await Promise.all(roots.map((root) =>
     walkFiles(root, (filePath) => filePath.endsWith(`${sep}plugin.json`) && pluginManifestFile(filePath))
-  );
+  ))).flat();
   const seen = new Set<string>();
   return manifestPaths
     .map((path) => loadPlugin(path, codexHome, projects, configs, warnings))
@@ -444,7 +414,14 @@ const collectPrompts = (
 ): ImportedPrompt[] => {
   const prompts = new Map<string, ImportedPrompt>();
   let order = 0;
-  const add = (id: string, name: string, content: string): void => {
+  const add = (
+    id: string,
+    name: string,
+    content: string,
+    scope: ImportScope,
+    projectId?: string,
+    isActive = true
+  ): void => {
     const trimmed = content.trim();
     if (!trimmed) {
       return;
@@ -453,14 +430,16 @@ const collectPrompts = (
       promptId: id,
       name,
       content: trimmed,
-      isActive: true,
+      isActive,
       sortOrder: order++,
+      scope,
+      ...(scope === "project" && projectId ? { projectId } : {}),
     });
   };
 
   const globalAgents = readAgentsPrompt(codexHome);
   if (globalAgents) {
-    add("codex:global:agents", "Codex AGENTS.md", globalAgents.content);
+    add("codex:global:agents", "Codex AGENTS.md", globalAgents.content, "global");
   }
 
   const collectConfigPrompts = (
@@ -477,7 +456,7 @@ const collectPrompts = (
     for (const [key, name, idPart] of labels) {
       const value = nonEmptyString(values[key]);
       if (value) {
-        add(idFor(idPart), name + labelSuffix, value);
+        add(idFor(idPart), name + labelSuffix, value, config.scope, config.projectId);
       }
     }
     const filePrompts: Array<[string, string, string]> = [
@@ -491,7 +470,7 @@ const collectPrompts = (
       }
       const path = resolveDeclaredPath(dirname(config.configPath), declaredPath);
       try {
-        add(idFor(idPart), name + labelSuffix, readFileSync(path, "utf8"));
+        add(idFor(idPart), name + labelSuffix, readFileSync(path, "utf8"), config.scope, config.projectId);
       } catch (error) {
         warnings.push("Unable to read Codex prompt file " + path + ": " + (error instanceof Error ? error.message : String(error)));
       }
@@ -516,7 +495,13 @@ const collectPrompts = (
     if (config.projectRoot) {
       const agents = readAgentsPrompt(config.projectRoot);
       if (agents) {
-        add(promptId(config, "agents"), "Codex AGENTS.md (" + (config.projectId ?? "unknown") + ")", agents.content);
+        add(
+          promptId(config, "agents"),
+          "Codex AGENTS.md (" + (config.projectId ?? "unknown") + ")",
+          agents.content,
+          config.scope,
+          config.projectId
+        );
       }
     }
   }
@@ -529,13 +514,25 @@ const collectPrompts = (
   for (const project of projects.filter((item) => item.kind === "local" && !configuredProjectIds.has(item.directoryId))) {
     const agents = readAgentsPrompt(project.path);
     if (agents) {
-      add("codex:project:" + project.directoryId + ":agents", "Codex AGENTS.md (" + project.directoryId + ")", agents.content);
+      add(
+        "codex:project:" + project.directoryId + ":agents",
+        "Codex AGENTS.md (" + project.directoryId + ")",
+        agents.content,
+        "project",
+        project.directoryId
+      );
     }
   }
 
   for (const plugin of plugins.filter((item) => item.enabled)) {
     for (const [index, content] of plugin.defaultPrompts.entries()) {
-      add(`codex-plugin:${plugin.id}:prompt:${index}`, `${plugin.name} prompt ${index + 1}`, content);
+      add(
+        `codex-plugin:${plugin.id}:prompt:${index}`,
+        `${plugin.name} prompt ${index + 1}`,
+        content,
+        plugin.scope,
+        plugin.projectId
+      );
     }
   }
   return [...prompts.values()];
@@ -619,10 +616,10 @@ const collectMcpServers = (
   return servers;
 };
 
-const collectSkillCopies = (
+const collectSkillCopies = async (
   codexHome: string,
   projects: WorkspaceDirectoryRecord[]
-): DiscoveredSkill[] => {
+): Promise<DiscoveredSkill[]> => {
   const skills: DiscoveredSkill[] = [];
   const sourcePaths = new Set<string>();
   const addSkill = (
@@ -650,14 +647,14 @@ const collectSkillCopies = (
     join(homedir(), ".agents", "skills"),
   ];
   for (const sourceRoot of globalSkillRoots) {
-    for (const skillDir of collectSkillDirectories(sourceRoot)) {
+    for (const skillDir of await collectSkillDirectories(sourceRoot)) {
       addSkill(skillDir, "global");
     }
   }
   for (const project of projects.filter((item) => item.kind === "local")) {
     const projectRoot = project.path;
     for (const sourceRoot of [join(projectRoot, ".codex", "skills"), join(projectRoot, ".agents", "skills")]) {
-      for (const skillDir of collectSkillDirectories(sourceRoot)) {
+      for (const skillDir of await collectSkillDirectories(sourceRoot)) {
         addSkill(skillDir, "project", project.directoryId, project.path);
       }
     }
@@ -669,10 +666,10 @@ const buildContext = async (native: NativeBridge): Promise<CodexImportContext> =
   const codexHome = getCodexHome();
   const warnings: string[] = [];
   const { configs, projects } = await collectConfigs(native, codexHome, warnings);
-  const plugins = collectPlugins(codexHome, projects, configs, warnings);
+  const plugins = await collectPlugins(codexHome, projects, configs, warnings);
   const mcpServers = collectMcpServers(configs, warnings);
   const prompts = collectPrompts(codexHome, configs, projects, [], warnings);
-  const skills = collectSkillCopies(codexHome, projects);
+  const skills = await collectSkillCopies(codexHome, projects);
   const configPath = getCodexConfigPath();
   const globalInstructionsPath = readAgentsPrompt(codexHome)?.path ?? null;
   const source: ImportSource = {
@@ -703,6 +700,16 @@ export const discoverCodexImport = async (
   native: NativeBridge
 ): Promise<ImportSourceDiscovery> => {
   const context = await buildContext(native);
+  const skillCandidates = await Promise.all(context.skills.map(async (skill) => ({
+    type: "skill" as const,
+    provider: "codex" as const,
+    scope: skill.scope,
+    originPath: skill.sourceDir,
+    logicalId: skillLogicalId(skill.sourceDir),
+    contentHash: await hashImportPath(skill.sourceDir),
+    ...(skill.projectId ? { projectId: skill.projectId } : {}),
+    ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
+  })));
   const candidates: ImportCandidateInput[] = [
     ...context.mcpServers.map((server) => ({
       type: "mcp" as const,
@@ -723,21 +730,13 @@ export const discoverCodexImport = async (
     ...context.prompts.map((prompt) => ({
       type: "prompt" as const,
       provider: "codex" as const,
-      scope: prompt.promptId.includes(":project:") ? "project" as const : "global" as const,
+      scope: prompt.scope ?? "global",
       originPath: context.source.sourceHome,
       logicalId: prompt.promptId,
       contentHash: hashImportValue(prompt.content),
+      ...(prompt.projectId ? { projectId: prompt.projectId } : {}),
     })),
-    ...context.skills.map((skill) => ({
-      type: "skill" as const,
-      provider: "codex" as const,
-      scope: skill.scope,
-      originPath: skill.sourceDir,
-      logicalId: skillLogicalId(skill.sourceDir),
-      contentHash: hashImportPath(skill.sourceDir),
-      ...(skill.projectId ? { projectId: skill.projectId } : {}),
-      ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
-    })),
+    ...skillCandidates,
   ];
   return { source: context.source, candidates };
 };
@@ -779,14 +778,20 @@ export const resolveCodexSelectedImports = async (
     const input: ImportCandidateInput = {
       type: "prompt",
       provider: "codex",
-      scope: prompt.promptId.includes(":project:") ? "project" : "global",
+      scope: prompt.scope ?? "global",
       originPath: context.source.sourceHome,
       logicalId: prompt.promptId,
       contentHash: hashImportValue(prompt.content),
+      ...(prompt.projectId ? { projectId: prompt.projectId } : {}),
     };
     const candidate = selectionForInput(input, selected);
     if (candidate) {
-      actions.push({ candidate, scope: input.scope, promptInput: prompt });
+      actions.push({
+        candidate,
+        scope: input.scope,
+        ...(prompt.projectId ? { projectId: prompt.projectId } : {}),
+        promptInput: prompt,
+      });
     }
   }
   for (const skill of context.skills.filter((item) => !item.plugin)) {
@@ -796,7 +801,7 @@ export const resolveCodexSelectedImports = async (
       scope: skill.scope,
       originPath: skill.sourceDir,
       logicalId: skillLogicalId(skill.sourceDir),
-      contentHash: hashImportPath(skill.sourceDir),
+      contentHash: await hashImportPath(skill.sourceDir),
       ...(skill.projectId ? { projectId: skill.projectId } : {}),
       ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
     };

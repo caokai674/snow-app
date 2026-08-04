@@ -8,7 +8,8 @@ type TokenUsageRingProps = {
   isLoading?: boolean;
 };
 
-const RING_SIZE = 18;
+// 与发送按钮 (.send-btn) 保持相同的 28x28 尺寸
+const RING_SIZE = 28;
 const STROKE_WIDTH = 2.5;
 const RADIUS = (RING_SIZE - STROKE_WIDTH) / 2;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
@@ -98,6 +99,7 @@ export const TokenUsageRing = ({
   }
 
   const formatTokens = (value: number): string => value.toLocaleString(locale);
+  const percent = Math.round(segments.ratio * 100);
   const tooltipContent = (
     <div className="token-usage-tooltip">
       <div className="token-usage-tooltip-row">
@@ -188,6 +190,7 @@ export const TokenUsageRing = ({
           r={RADIUS}
           fill="none"
           strokeWidth={STROKE_WIDTH}
+          strokeLinecap="butt"
           className="token-usage-ring-input"
           strokeDasharray={`${segments.inputLength} ${
             CIRCUMFERENCE - segments.inputLength
@@ -200,6 +203,7 @@ export const TokenUsageRing = ({
           r={RADIUS}
           fill="none"
           strokeWidth={STROKE_WIDTH}
+          strokeLinecap="butt"
           className="token-usage-ring-output"
           strokeDasharray={`${segments.outputLength} ${
             CIRCUMFERENCE - segments.outputLength
@@ -212,6 +216,7 @@ export const TokenUsageRing = ({
           r={RADIUS}
           fill="none"
           strokeWidth={STROKE_WIDTH}
+          strokeLinecap="butt"
           className="token-usage-ring-cache"
           strokeDasharray={`${segments.cacheLength} ${
             CIRCUMFERENCE - segments.cacheLength
@@ -219,8 +224,12 @@ export const TokenUsageRing = ({
           strokeDashoffset={-(segments.inputLength + segments.outputLength)}
         />
       </svg>
-      <span className="token-usage-ring-text">
-        {(segments.ratio * 100).toFixed(1)}%
+      <span
+        className={`token-usage-ring-text${
+          percent === 100 ? " is-compact" : ""
+        }`}
+      >
+        {percent}%
       </span>
       {showTooltip && tooltipContent}
     </div>

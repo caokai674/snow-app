@@ -39,6 +39,34 @@ export type PluginMarketplaceCatalog = PluginMarketplaceRecord & {
   loadError?: string;
 };
 
+export type PluginMarketplaceMcpPreview = {
+  componentId: string;
+  name: string;
+  transportType: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  headers: Record<string, string>;
+  url: string;
+  declarationPath: string;
+  approvalHash: string;
+};
+
+export type PluginMarketplaceInstallPreview = {
+  marketplaceId: string;
+  marketplaceName: string;
+  marketplaceSource: string;
+  pluginName: string;
+  pluginDisplayName: string;
+  pluginSource: string;
+  mcpServers: PluginMarketplaceMcpPreview[];
+};
+
+export type PluginMarketplaceMcpApproval = {
+  componentId: string;
+  approvalHash: string;
+};
+
 export type PluginRuntimePermission = "storage" | "network" | "child-process";
 
 export type PluginRuntimeDeclaration = {
@@ -109,6 +137,7 @@ export type PluginComponentRecord = PluginComponentInput & {
 };
 
 export type PluginRecord = Omit<PluginInput, "components"> & {
+  desiredState: "enabled" | "disabled";
   importedAt: string;
   updatedAt: string;
   components: PluginComponentRecord[];

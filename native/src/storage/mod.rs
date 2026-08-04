@@ -1,4 +1,5 @@
 pub mod database;
+mod migrations;
 mod paths;
 pub mod services;
 
@@ -90,6 +91,8 @@ pub struct SystemPromptItemInput {
     pub content: String,
     pub is_active: bool,
     pub sort_order: i32,
+    pub scope: Option<String>,
+    pub project_id: Option<String>,
 }
 
 #[napi(object)]
@@ -100,6 +103,8 @@ pub struct SystemPromptItemRecord {
     pub content: String,
     pub is_active: bool,
     pub sort_order: i32,
+    pub scope: String,
+    pub project_id: Option<String>,
     pub updated_at: String,
 }
 
@@ -220,6 +225,21 @@ pub struct ImportResourceInput {
 }
 
 #[napi(object)]
+pub struct ProjectMcpServerImportInput {
+    pub project_id: String,
+    pub input: McpServerConfigInput,
+}
+
+#[napi(object)]
+pub struct ImportDatabaseTransactionInput {
+    pub mcp_servers: Vec<McpServerConfigInput>,
+    pub project_mcp_servers: Vec<ProjectMcpServerImportInput>,
+    pub system_prompts: Vec<SystemPromptItemInput>,
+    pub plugins: Vec<PluginInput>,
+    pub import_resources: Vec<ImportResourceInput>,
+}
+
+#[napi(object)]
 pub struct ImportResourceSourceRecord {
     pub source_id: String,
     pub provider: String,
@@ -324,6 +344,7 @@ pub struct PluginRecord {
     pub scope: String,
     pub project_id: Option<String>,
     pub state: String,
+    pub desired_state: String,
     pub capabilities: Vec<String>,
     pub runtime: Option<PluginRuntimeDeclaration>,
     pub content_hash: String,
@@ -373,6 +394,9 @@ pub struct SubAgentConfigInput {
     pub builtin: bool,
     pub sort_order: i32,
     pub source: String,
+    /// 项目 ID。空/缺省表示全局子代理；指定后为项目级子代理
+    /// （项目级与全局同 agent_id 时，项目级优先）。
+    pub project_id: Option<String>,
 }
 
 #[napi(object)]
@@ -388,6 +412,8 @@ pub struct SubAgentConfigRecord {
     pub sort_order: i32,
     pub source: String,
     pub updated_at: String,
+    /// 项目 ID，空字符串表示全局子代理。
+    pub project_id: String,
 }
 
 #[napi(object)]
@@ -654,6 +680,29 @@ pub fn get_goal_mode_token_budget() -> Result<i64> {
 pub fn set_goal_mode_token_budget(budget: i64) -> Result<()> {
     let database_path = ensure_database_file()?;
     services::goal_settings::set_goal_mode_token_budget(&database_path, budget)
+}
+
+pub fn get_conversation_modes(
+    conversation_id: &str,
+) -> Result<services::chat_conversations::ConversationModes> {
+    let database_path = ensure_database_file()?;
+    services::chat_conversations::get_conversation_modes(&database_path, conversation_id)
+}
+
+pub fn set_conversation_modes(
+    conversation_id: &str,
+    plan_mode: Option<bool>,
+    goal_mode: Option<bool>,
+    goal_mode_token_budget: Option<i64>,
+) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    services::chat_conversations::set_conversation_modes(
+        &database_path,
+        conversation_id,
+        plan_mode,
+        goal_mode,
+        goal_mode_token_budget,
+    )
 }
 
 pub fn get_request_logging() -> Result<bool> {
@@ -972,6 +1021,30 @@ pub fn check_project_has_gitignore(project_id: String) -> Result<bool> {
     Ok(gitignore_path.exists())
 }
 
+/// Returns whether the project belongs to a remote (SSH) workspace directory.
+/// Remote workspaces have no local filesystem to index, so codebase features
+/// are unavailable for them.
+pub fn check_project_is_remote(project_id: String) -> Result<bool> {
+    let database_path = ensure_database_file()?;
+    let normalized_project_id = project_id.trim().to_string();
+    if normalized_project_id.is_empty() {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "Project id is required".to_string(),
+        ));
+    }
+
+    let Some(kind) = services::workspace_directories::get_workspace_directory_kind(
+        &database_path,
+        &normalized_project_id,
+    )?
+    else {
+        return Ok(false);
+    };
+
+    Ok(kind == "ssh")
+}
+
 pub fn list_api_configs() -> Result<Vec<ApiConfigRecord>> {
     let database_path = ensure_database_file()?;
     services::api_configs::list_api_configs(&database_path)
@@ -1131,6 +1204,45 @@ pub fn upsert_import_resources(items: Vec<ImportResourceInput>) -> Result<()> {
     services::import_resources::upsert_import_resources(&database_path, &items)
 }
 
+pub fn commit_import_transaction(input: ImportDatabaseTransactionInput) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    commit_import_transaction_at_path(&database_path, input)
+}
+
+fn commit_import_transaction_at_path(
+    database_path: &std::path::Path,
+    input: ImportDatabaseTransactionInput,
+) -> Result<()> {
+    database::open_connection(database_path)
+        .and_then(|mut connection| {
+            let transaction = connection.transaction()?;
+            for item in &input.mcp_servers {
+                services::mcp_server_configs::upsert_mcp_server_config_with_connection(
+                    &transaction,
+                    item,
+                )?;
+            }
+            for item in &input.project_mcp_servers {
+                services::project_mcp_server_configs::upsert_project_mcp_server_config_with_connection(
+                    &transaction,
+                    &item.project_id,
+                    &item.input,
+                )?;
+            }
+            for item in &input.system_prompts {
+                services::system_prompts::upsert_system_prompt_with_connection(&transaction, item)?;
+            }
+            for item in &input.plugins {
+                services::plugins::upsert_plugin(&transaction, item)?;
+            }
+            for item in &input.import_resources {
+                services::import_resources::upsert_resource(&transaction, item)?;
+            }
+            transaction.commit()
+        })
+        .map_err(|error| database::database_error(database_path, "commit import transaction", error))
+}
+
 pub fn release_import_resource(input: ImportResourceReleaseInput) -> Result<ImportResourceRelease> {
     let database_path = ensure_database_file()?;
     services::import_resources::release_import_resource(&database_path, &input)
@@ -1170,14 +1282,23 @@ pub fn delete_plugin_marketplace(marketplace_id: String) -> Result<()> {
     let database_path = ensure_database_file()?;
     services::plugin_marketplaces::delete_plugin_marketplace(&database_path, &marketplace_id)
 }
-pub fn list_sub_agent_configs() -> Result<Vec<SubAgentConfigRecord>> {
+/// 列出子代理配置。project_id 为 None 时返回全部（全局 + 所有项目），
+/// 指定时只返回该项目的子代理。
+pub fn list_sub_agent_configs(project_id: Option<String>) -> Result<Vec<SubAgentConfigRecord>> {
     let database_path = ensure_database_file()?;
-    services::sub_agent_configs::list_sub_agent_configs(&database_path)
+    services::sub_agent_configs::list_sub_agent_configs(&database_path, project_id.as_deref())
 }
 
-pub fn get_sub_agent_config(agent_id: String) -> Result<Option<SubAgentConfigRecord>> {
+pub fn get_sub_agent_config(
+    agent_id: String,
+    project_id: Option<String>,
+) -> Result<Option<SubAgentConfigRecord>> {
     let database_path = ensure_database_file()?;
-    services::sub_agent_configs::get_sub_agent_config(&database_path, &agent_id)
+    services::sub_agent_configs::get_sub_agent_config(
+        &database_path,
+        &agent_id,
+        project_id.as_deref(),
+    )
 }
 
 pub fn upsert_sub_agent_config(item: SubAgentConfigInput) -> Result<()> {
@@ -1185,9 +1306,13 @@ pub fn upsert_sub_agent_config(item: SubAgentConfigInput) -> Result<()> {
     services::sub_agent_configs::upsert_sub_agent_config(&database_path, &item)
 }
 
-pub fn delete_sub_agent_config(agent_id: String) -> Result<()> {
+pub fn delete_sub_agent_config(agent_id: String, project_id: Option<String>) -> Result<()> {
     let database_path = ensure_database_file()?;
-    services::sub_agent_configs::delete_sub_agent_config(&database_path, &agent_id)
+    services::sub_agent_configs::delete_sub_agent_config(
+        &database_path,
+        &agent_id,
+        project_id.as_deref(),
+    )
 }
 
 pub fn list_sensitive_command_configs() -> Result<Vec<SensitiveCommandConfigRecord>> {
@@ -1764,4 +1889,75 @@ pub fn set_keyboard_shortcuts_settings(
 ) -> Result<()> {
     let database_path = ensure_database_file()?;
     services::keyboard_shortcuts::set_keyboard_shortcuts_settings(&database_path, &settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::remove_file;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn test_database_path() -> std::path::PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "snow-import-transaction-{}-{timestamp}.sqlite",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn import_transaction_rolls_back_plugin_when_resource_tracking_is_invalid() {
+        let database_path = test_database_path();
+        database::ensure_database(&database_path).expect("create test database");
+
+        let result = commit_import_transaction_at_path(
+            &database_path,
+            ImportDatabaseTransactionInput {
+                mcp_servers: vec![],
+                project_mcp_servers: vec![],
+                system_prompts: vec![],
+                plugins: vec![PluginInput {
+                    plugin_id: "plugin:atomic".to_string(),
+                    name: "Atomic Plugin".to_string(),
+                    version: "1.0.0".to_string(),
+                    provider: "codex".to_string(),
+                    source_path: "/source/plugin".to_string(),
+                    manifest_path: "/source/plugin/.codex-plugin/plugin.json".to_string(),
+                    scope: "global".to_string(),
+                    project_id: None,
+                    state: "enabled".to_string(),
+                    capabilities: vec![],
+                    runtime: None,
+                    content_hash: "plugin-hash".to_string(),
+                    components: vec![],
+                }],
+                import_resources: vec![ImportResourceInput {
+                    resource_id: "plugin:atomic:skill".to_string(),
+                    resource_type: "skill".to_string(),
+                    scope: "global".to_string(),
+                    project_id: None,
+                    target_id: "atomic-skill".to_string(),
+                    target_path: "/target/atomic-skill".to_string(),
+                    management: "snapshot".to_string(),
+                    sources: vec![],
+                }],
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(services::plugins::list_plugins(&database_path)
+            .expect("list plugins")
+            .is_empty());
+        assert!(services::import_resources::list_import_resources(&database_path)
+            .expect("list import resources")
+            .is_empty());
+
+        let _ = remove_file(&database_path);
+        let _ = remove_file(database_path.with_extension("sqlite-shm"));
+        let _ = remove_file(database_path.with_extension("sqlite-wal"));
+    }
 }

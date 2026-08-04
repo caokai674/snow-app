@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import type {
   ImportCandidate,
   ImportCandidateOrigin,
@@ -15,6 +15,7 @@ import type {
   ImportSource,
 } from "../../shared/importDiscovery";
 import type { ImportResourceRecord } from "../../shared/importResources";
+import { hashImportPathInWorker } from "./discoveryWorker";
 
 export type ImportCandidateInput = {
   type: ImportCandidateType;
@@ -32,8 +33,6 @@ export type ImportSourceDiscovery = {
   source: ImportSource;
   candidates: ImportCandidateInput[];
 };
-
-const ignoredDirectoryNames = new Set([".git", "node_modules", "sessions"]);
 
 const canonicalPath = (path: string): string => {
   const resolved = resolve(path);
@@ -60,38 +59,7 @@ const stableValue = (value: unknown): string => {
 export const hashImportValue = (value: unknown): string =>
   createHash("sha256").update(stableValue(value)).digest("hex");
 
-export const hashImportPath = (path: string): string => {
-  const hasher = createHash("sha256");
-  const root = canonicalPath(path);
-  if (!existsSync(root)) {
-    return hashImportValue({ missing: root });
-  }
-
-  const visit = (current: string): void => {
-    const metadata = statSync(current);
-    if (metadata.isFile()) {
-      hasher.update(relative(root, current));
-      hasher.update(readFileSync(current));
-      return;
-    }
-    if (!metadata.isDirectory()) {
-      return;
-    }
-    for (const entry of readdirSync(current, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
-      if (entry.isSymbolicLink()) {
-        hasher.update(`symlink:${entry.name}`);
-        continue;
-      }
-      if (entry.isDirectory() && ignoredDirectoryNames.has(entry.name)) {
-        continue;
-      }
-      visit(join(current, entry.name));
-    }
-  };
-
-  visit(root);
-  return hasher.digest("hex");
-};
+export const hashImportPath = (path: string): Promise<string> => hashImportPathInWorker(path);
 
 export const normalizeLogicalId = (value: string): string =>
   value.trim().replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
@@ -132,11 +100,18 @@ const originFor = (input: ImportCandidateInput, originPath: string): ImportCandi
   ...(input.projectId ? { projectId: input.projectId } : {}),
 });
 
-const sameResource = (left: ImportCandidateInput & { canonicalOriginPath: string }, right: ImportCandidateInput & { canonicalOriginPath: string }): boolean =>
-  left.type === right.type && (
-    left.contentHash === right.contentHash ||
-    (left.logicalId === right.logicalId && left.canonicalOriginPath === right.canonicalOriginPath)
-  );
+const sameImportTarget = (
+  left: ImportCandidateInput,
+  right: ImportCandidateInput
+): boolean =>
+  left.provider === right.provider &&
+  left.type === right.type &&
+  left.scope === right.scope &&
+  left.projectId === right.projectId &&
+  left.logicalId === right.logicalId;
+
+const sameResource = (left: ImportCandidateInput, right: ImportCandidateInput): boolean =>
+  sameImportTarget(left, right) && left.contentHash === right.contentHash;
 
 const resultFor = (candidate: ImportCandidate): ImportCandidateResult => {
   if (candidate.status === "already-effective") {
@@ -176,7 +151,8 @@ const resultFor = (candidate: ImportCandidate): ImportCandidateResult => {
 
 export const buildImportDiscovery = (
   discoveries: ImportSourceDiscovery[],
-  managedResources: ImportResourceRecord[] = []
+  managedResources: ImportResourceRecord[] = [],
+  existingManagedResourceIds?: ReadonlySet<string>
 ): ImportDiscovery => {
   const inputs = discoveries
     .flatMap((discovery) => discovery.candidates)
@@ -209,6 +185,9 @@ export const buildImportDiscovery = (
         ) === index
       );
     const candidateId = `${primary.type}:${hashImportValue({
+      provider: primary.provider,
+      scope: primary.scope,
+      projectId: primary.projectId,
       logicalId: primary.logicalId,
       contentHash: primary.contentHash,
       originPaths: sources.map((source) => source.originPath).sort(),
@@ -223,6 +202,7 @@ export const buildImportDiscovery = (
       type: primary.type,
       provider: primary.provider,
       scope: primary.scope,
+      ...(primary.projectId ? { projectId: primary.projectId } : {}),
       originPath: primary.canonicalOriginPath,
       logicalId: primary.logicalId,
       contentHash: primary.contentHash,
@@ -239,8 +219,7 @@ export const buildImportDiscovery = (
     candidates
       .filter((candidate) => candidates.some((other) =>
         other.candidateId !== candidate.candidateId &&
-        other.type === candidate.type &&
-        other.logicalId === candidate.logicalId &&
+        sameImportTarget(candidate, other) &&
         other.contentHash !== candidate.contentHash
       ))
       .map((candidate) => candidate.candidateId)
@@ -250,12 +229,16 @@ export const buildImportDiscovery = (
       candidate.status = "conflict";
       continue;
     }
-    if (candidate.status === "unsupported" || candidate.status === "already-effective") {
+    if (
+      candidate.status === "unsupported" ||
+      candidate.status === "already-effective"
+    ) {
       continue;
     }
-    const resource = managedResources.find((record) =>
+    const matchingResources = managedResources.filter((record) =>
       record.resourceType === candidate.type &&
       record.scope === candidate.scope &&
+      record.projectId === candidate.projectId &&
       record.sources.some((trackedSource) => candidate.sources.some((source) =>
         source.provider === trackedSource.provider &&
         source.scope === trackedSource.scope &&
@@ -263,6 +246,9 @@ export const buildImportDiscovery = (
         source.projectId === trackedSource.projectId
       ))
     );
+    const resource = existingManagedResourceIds
+      ? matchingResources.find((record) => existingManagedResourceIds.has(record.resourceId)) ?? matchingResources[0]
+      : matchingResources[0];
     if (resource) {
       const sourceChanged = resource.sources.some((trackedSource) =>
         candidate.sources.some((source) =>
@@ -273,7 +259,11 @@ export const buildImportDiscovery = (
           trackedSource.importedHash !== candidate.contentHash
         )
       );
-      candidate.status = sourceChanged ? "update-available" : "managed";
+      candidate.status = existingManagedResourceIds && !existingManagedResourceIds.has(resource.resourceId)
+        ? "repair"
+        : sourceChanged
+          ? "update-available"
+          : "managed";
       candidate.ownership = {
         owner: resource.sourceCount > 1
           ? "shared"

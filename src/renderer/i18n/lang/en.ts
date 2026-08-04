@@ -184,6 +184,7 @@ export const en = {
   "scheduledTask.errorPromptRequired": "Prompt is required",
   "scheduledTask.errorInvalidSchedule": "Invalid schedule",
   "scheduledTask.errorCreateFailed": "Failed to create task",
+  "sidebar.chatTimeRunning": "Running",
   "sidebar.chatTimeToday": "Today",
   "sidebar.chatTimeYesterday": "Yesterday",
   "sidebar.chatTimeLast7Days": "Last 7 days",
@@ -229,10 +230,14 @@ export const en = {
   "chat.greetingNoProject": "Select a workspace project to get started.",
   "chat.scrollToBottom": "Scroll to bottom",
   "chat.userMessageRail.title": "User messages",
-  "chat.subAgentModelFixed": "Sub-agent uses the model from its own configuration",
-  "chat.subAgentFinished.completed": "This sub-agent has finished. The conversation is read-only.",
-  "chat.subAgentFinished.failed": "This sub-agent failed. The conversation is read-only.",
-  "chat.subAgentFinished.cancelled": "This sub-agent was cancelled. The conversation is read-only.",
+  "chat.subAgentModelFixed":
+    "Sub-agent uses the model from its own configuration",
+  "chat.subAgentFinished.completed":
+    "This sub-agent has finished. The conversation is read-only.",
+  "chat.subAgentFinished.failed":
+    "This sub-agent failed. The conversation is read-only.",
+  "chat.subAgentFinished.cancelled":
+    "This sub-agent was cancelled. The conversation is read-only.",
   "chat.subAgentFinished.backToParent": "Back to parent conversation",
   "chat.quickActionAddProject": "Add a project",
   "chat.quickActionAddProjectDesc": "Open a local workspace directory",
@@ -303,7 +308,8 @@ export const en = {
   "toolCall.bash.interactivePlaceholder": "Type input and press Enter...",
   "toolCall.bash.kill": "Stop",
   "toolCall.bash.killing": "Stopping...",
-  "toolCall.bash.killTitle": "Kill the running command without waiting for the timeout",
+  "toolCall.bash.killTitle":
+    "Kill the running command without waiting for the timeout",
   "toolCall.bash.status.pending": "Pending",
   "toolCall.bash.status.running": "Running",
   "toolCall.bash.status.completed": "Completed",
@@ -568,7 +574,8 @@ export const en = {
   "common.retry": "Retry",
   "common.loading": "Loading...",
   "common.errorTitle": "Something went wrong",
-  "common.errorDescription": "The app hit an unexpected error. Reloading usually resolves it.",
+  "common.errorDescription":
+    "The app hit an unexpected error. Reloading usually resolves it.",
   "common.reload": "Reload",
   "sidebar.search": "Search",
   "sidebar.settings": "Settings",
@@ -618,6 +625,8 @@ export const en = {
   "settings.apiVisionRequestMethod": "Vision method",
   "settings.apiVisionModel": "Vision model",
   "settings.apiStreamIdleTimeout": "Stream idle timeout (s)",
+  "settings.apiMaxRetries": "Max retries",
+  "settings.apiRetryBaseDelayMs": "Retry delay (ms)",
   "settings.apiEnableAutoCompress": "Enable auto compress",
   "settings.apiAutoCompressThreshold": "Auto compress threshold",
   "settings.apiAutoCompressThresholdNeedMaxContext":
@@ -934,6 +943,18 @@ export const en = {
   "settings.pluginsMarketplaceSourceType.git": "Git",
   "settings.pluginsMarketplaceSourceType.url": "URL",
   "settings.pluginsMarketplaceTrustNote": "Only install Plugins from sources you trust. Snow reads declarative components and does not run install scripts.",
+  "settings.pluginsMarketplaceReviewTitle": "Review Plugin installation",
+  "settings.pluginsMarketplaceReviewMessage": "MCP servers are disabled by default. Select each server you want to authorize after reviewing its declaration.",
+  "settings.pluginsMarketplacePluginSourceLabel": "Plugin source",
+  "settings.pluginsMarketplaceNoMcp": "This Plugin does not declare MCP servers.",
+  "settings.pluginsMarketplaceEnableMcp": "Enable this MCP server",
+  "settings.pluginsMarketplaceDeclarationSource": "Declaration",
+  "settings.pluginsMarketplaceTransport": "Transport",
+  "settings.pluginsMarketplaceCommand": "Command",
+  "settings.pluginsMarketplaceArgs": "Arguments",
+  "settings.pluginsMarketplaceEnv": "Environment",
+  "settings.pluginsMarketplaceUrl": "URL",
+  "settings.pluginsMarketplaceHeaders": "HTTP headers",
   "settings.closeImportSettings": "Close import settings",
   "settings.importCodexDescription": "Import MCP, Skills, Plugins, and prompts from Codex.",
   "settings.importClaudeCodeDescription": "Import MCP, Skills, CLAUDE.md, rules, and commands from Claude Code.",
@@ -984,6 +1005,7 @@ export const en = {
   "settings.importStatusConflict": "Conflict",
   "settings.importStatusUnsupported": "Unsupported",
   "settings.importStatusManaged": "Managed",
+  "settings.importStatusRepair": "Repair required",
   "settings.importTypeMcp": "MCP",
   "settings.importTypeSkill": "Skill",
   "settings.importTypePrompt": "Prompt",
@@ -1153,12 +1175,15 @@ export const en = {
     "Failed to initialize the MCP server connection. The server may not be compatible with the current protocol.",
   "settings.mcpErrorHttpConnectFailed":
     "Failed to connect to the MCP HTTP server. Check the URL and network.",
-  "settings.mcpErrorMissingCommand": "This MCP server has no command configured.",
+  "settings.mcpErrorMissingCommand":
+    "This MCP server has no command configured.",
   "settings.mcpErrorMissingUrl": "This MCP server has no URL configured.",
   "settings.mcpErrorNotConfigured":
     "This MCP server is no longer configured. Re-add it and try again.",
-  "settings.mcpErrorListToolsFailed": "Failed to fetch the tool list from the MCP server.",
-  "settings.mcpErrorLoadConfigsFailed": "Failed to load MCP server configurations.",
+  "settings.mcpErrorListToolsFailed":
+    "Failed to fetch the tool list from the MCP server.",
+  "settings.mcpErrorLoadConfigsFailed":
+    "Failed to load MCP server configurations.",
   "settings.mcpErrorInvalidConfigJson":
     "The MCP server configuration contains invalid JSON values.",
   "settings.mcpFetchToolsErrorDetail": "Failed to fetch MCP tools: {{detail}}",
@@ -1253,6 +1278,13 @@ export const en = {
   "settings.subAgentManageTitle": "Manage sub-agents",
   "settings.subAgentManageInfo":
     "Sub-agent configurations are stored in the local database.",
+  "settings.subAgentScopeTabs": "Sub-agent scope",
+  "settings.subAgentTabGlobal": "Global",
+  "settings.subAgentTabProject": "Project",
+  "settings.subAgentGlobalTabInfo":
+    "Manage sub-agents shared by all projects. Sub-agent configurations are stored in the local database.",
+  "settings.subAgentProjectTabInfo":
+    "Manage sub-agents for {{name}}. Project sub-agents override global ones with the same id.",
   "settings.subAgentEditorTitle": "Sub-agent editor",
   "settings.subAgentListTitle": "Sub-agent list",
   "settings.subAgentEmpty": "No sub-agent configurations are available.",
@@ -1790,8 +1822,7 @@ export const en = {
   "personalization.globalPlaceholder":
     "Enter global rules here, e.g. role definition, output style, coding conventions...",
   "personalization.globalSaved": "Global rules saved.",
-  "personalization.globalHint":
-    "Changes take effect in the next conversation.",
+  "personalization.globalHint": "Changes take effect in the next conversation.",
   "personalization.projectTitle": "Project rules",
   "personalization.projectInfo":
     "Project-specific rules are loaded after global rules.",
@@ -1876,6 +1907,8 @@ export const en = {
     "Embedding, reranking and chunking parameters are configured in Settings.",
   "projectCodebase.gitignoreMissing":
     "No .gitignore file detected in the project root. To avoid embedding large amounts of irrelevant files (such as node_modules, build artifacts, etc.), please create a .gitignore in the project root before enabling codebase indexing.",
+  "projectCodebase.remoteUnsupported":
+    "Codebase features are not available for remote (SSH) workspaces. Please switch to a local project directory and try again.",
   "projectCodebase.embedding.title": "Vector Index",
   "projectCodebase.embedding.description":
     "Chunk project code files and embed them into a vector database for semantic search.",
@@ -1995,6 +2028,7 @@ export const en = {
   "rightPanel.browserTab": "Browser",
   "rightPanel.codebaseTab": "Codebase",
   "rightPanel.closeTab": "Close tab",
+  "rightPanel.closeAllTabs": "Close all tabs",
   "rightPanel.tabContextNewTerminal": "New Terminal",
   "rightPanel.tabContextNewBrowser": "New Browser",
   "rightPanel.closeDiff": "Close diff",
@@ -2043,9 +2077,11 @@ export const en = {
   "codebase.panel.sphereError": "Failed to load similarity data",
   "codebase.panel.sphereEmpty": "No files to display for the current project",
   "codebase.panel.sphereNodes": "Showing {{count}} files",
-  "codebase.panel.sphereNodesLimited": "Showing first {{count}} of {{total}} files",
+  "codebase.panel.sphereNodesLimited":
+    "Showing first {{count}} of {{total}} files",
   "codebase.panel.sphereLimitAll": "All",
-  "codebase.panel.sphereLimitTitle": "Node count: All renders every file, may be slow for large codebases",
+  "codebase.panel.sphereLimitTitle":
+    "Node count: All renders every file, may be slow for large codebases",
   "codebase.panel.sphereSearchPlaceholder": "Search files...",
   "codebase.panel.sphereSearchNoMatch": "No matching files",
   "codebase.panel.sphereHint": "Drag to rotate · Hover for details",

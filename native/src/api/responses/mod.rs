@@ -7,7 +7,7 @@
 //! stays focused on type definitions and orchestration.
 
 mod event;
-mod payload;
+pub(crate) mod payload;
 mod stream;
 
 use std::collections::HashMap;

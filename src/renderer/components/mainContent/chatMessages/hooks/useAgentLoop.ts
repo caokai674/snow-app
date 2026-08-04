@@ -262,6 +262,11 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
         // delete/truncate. Without this, the Rust store_chat_exchange write
         // transaction races with the delete/truncate write transaction and
         // can exceed the busy_timeout, producing "database is locked".
+        // Per-conversation mode snapshot: read the modes from THIS session's
+        // ref (falling back to the global defaults for safety), never from
+        // the live global refs — another conversation toggling its modes
+        // must not alter the behaviour of a background-running loop.
+        const iterRef = ctx.sessionsRefData.current.get(effectiveKey);
         const streamPromise = window.snow.createResponseStream(
           {
             messages: requestMessages,
@@ -270,8 +275,8 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
             conversationId: currentConversationId,
             directoryId: sessionDirId,
             checkpointId,
-            planMode: ctx.planModeRef.current,
-            goalMode: ctx.goalModeRef.current,
+            planMode: iterRef?.planMode ?? ctx.planModeRef.current,
+            goalMode: iterRef?.goalMode ?? ctx.goalModeRef.current,
           },
           createStreamChunkHandler(
             ctx,
@@ -367,6 +372,20 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
             ctx.migrateSession(PENDING_SESSION_KEY, response.conversationId);
             effectiveKey = response.conversationId;
             finalSessionKey = response.conversationId;
+            // The pending session's Plan/Goal Mode (set before the session
+            // had a real id) now has a persisted conversation id: write it
+            // through so the modes survive a restart.
+            const migratedRef = ctx.sessionsRefData.current.get(
+              response.conversationId
+            );
+            if (migratedRef) {
+              void window.snow.setConversationModes(
+                response.conversationId,
+                migratedRef.planMode,
+                migratedRef.goalMode,
+                migratedRef.goalModeTokenBudget
+              );
+            }
             // Only set active conversation on the first iteration when
             // migrating from pending. Subsequent tool iterations must NOT
             // override the active conversation — the user may have switched

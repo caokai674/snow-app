@@ -1,5 +1,43 @@
 # Release Notes
 
+## v0.1.16 (Unreleased)
+
+## New Features
+
+- **Config Server Full Coverage**: The built-in `config` server now manages
+  every config file under `~/.snow/` — 11 file scopes (`settings`, `snowcfg`
+  with all 30 keys, `proxy`, `app`, `custom-headers`, `system-prompt`,
+  `theme`, `language`, `permissions`, `lsp-config`, `buddy`) plus the
+  existing DB-backed scopes (`subAgents`/`hooks`/`skills`) and a new
+  read-only `logs` scope for agent-driven diagnostics (`~/.snow/log`
+  listing, tail reads with `limit`, level shortcuts). A new `ValueType::Number`
+  supports float values (e.g. `theme.diffOpacity`).
+- **Project-Scoped mcpServers & sensitiveCommands**: Passing `projectId` to
+  `settings.mcpServers` / `settings.sensitiveCommands` now reads/writes
+  project-level config in the app database (full-replace semantics;
+  sensitive-command ids matching global rules become enabled overrides,
+  others become project custom rules).
+- **Deep Structural Validation**: `settings.codebase`, `custom-header
+  schemes`, `system-prompt prompts` and `lsp-config servers` are deeply
+  validated on write (known fields type-checked, unknown fields allowed for
+  forward compatibility), so an agent cannot corrupt nested config.
+
+## Improvements
+
+- **Docs Coverage**: Added a config-file field reference (every file's fields
+  with types and sensitive markers), browser-automation and codebase/diagnostics
+  guides (zh/en), and aligned the `snow-app-docs` skill with the full config
+  coverage.
+
+## Bug Fixes
+
+- **Sub-Agent Plan/Goal Mode Isolation**: Plan/Goal/Goal-budget toggles are
+  disabled in sub-agent conversations so toggling can no longer pollute the
+  global mode defaults; the terminal sub-agent status event is broadcast
+  immediately after the read-only flag to shrink the input-visible-but-sends-
+  dropped window; `isSubAgentFinished` now uses a terminal-status whitelist
+  and `subAgentStatus` is null-guarded.
+
 ## v0.1.15
 
 ## New Features
@@ -39,6 +77,8 @@
 
 ## New Features
 
+- **Agent-Managed Sub-Agents & Hooks**: The built-in `config` MCP server now exposes three new scopes — `subAgents` (create/update/delete sub-agents, global or project-scoped via `projectId`), `hooks` (configure all 9 lifecycle hooks, global or project-scoped) and `skills` (toggle/install/uninstall skills, delegating to the skill manager). Sub-agent and hook configs are written directly to the app database, identical to the UI settings panels, and take effect immediately. The former `skills-config-*` tools have been removed in favor of the `config` server's `skills` scope.
+- **Project-Scoped Sub-Agents**: The `sub_agent_configs` table gains a `project_id` column (composite unique key, automatic migration for existing databases). The sub-agent settings panel adds Global/Project scope tabs, and sub-agent activation resolves project-scoped agents first, falling back to the global one with the same id.
 - **App Error Boundary**: Added an application-level error boundary that automatically refreshes and self-heals when dynamic sub-package loading fails. Refresh attempts are limited via `sessionStorage` to prevent infinite refresh loops when build artifacts are missing.
 - **Direct Sub-Agent Interaction**: Sub-agent sessions are no longer read-only — they now use the regular `ChatInput` for direct interaction, and the separate monitor UI has been removed. The sub-agent model is fixed to its own `advancedModel` to prevent misleading model memorization by the parent session.
 - **Collapsible Projects Section**: The Projects section in the sidebar is now collapsible, with its expand/collapse state persisted to `localStorage`.

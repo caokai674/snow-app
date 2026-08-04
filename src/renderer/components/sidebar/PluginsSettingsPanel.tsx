@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   PluginComponentRecord,
   PluginMarketplaceCatalog,
+  PluginMarketplaceInstallPreview,
   PluginMarketplacePlugin,
   PluginRecord,
   PluginRuntimePermission,
@@ -128,6 +129,8 @@ export function PluginsSettingsPanel({ onClose, embedded = false }: PluginsSetti
   const [isAddingMarketplace, setIsAddingMarketplace] = useState(false);
   const [busyMarketplaceId, setBusyMarketplaceId] = useState("");
   const [installingPluginKey, setInstallingPluginKey] = useState("");
+  const [pendingMarketplaceInstall, setPendingMarketplaceInstall] = useState<PluginMarketplaceInstallPreview | null>(null);
+  const [approvedMarketplaceMcpIds, setApprovedMarketplaceMcpIds] = useState<Set<string>>(() => new Set());
   const [pendingMarketplaceRemoval, setPendingMarketplaceRemoval] = useState<PluginMarketplaceCatalog | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [busyPluginId, setBusyPluginId] = useState("");
@@ -368,13 +371,40 @@ export function PluginsSettingsPanel({ onClose, embedded = false }: PluginsSetti
     }
   };
 
-  const installMarketplacePlugin = async (marketplace: PluginMarketplaceCatalog, plugin: PluginMarketplacePlugin): Promise<void> => {
+  const previewMarketplacePluginInstall = async (marketplace: PluginMarketplaceCatalog, plugin: PluginMarketplacePlugin): Promise<void> => {
     const key = `${marketplace.marketplaceId}:${plugin.pluginName}`;
     setInstallingPluginKey(key);
     setError("");
     setStatus("");
     try {
-      await window.snow.installPluginFromMarketplace(marketplace.marketplaceId, plugin.pluginName);
+      const preview = await window.snow.previewPluginMarketplaceInstall(marketplace.marketplaceId, plugin.pluginName);
+      setPendingMarketplaceInstall(preview);
+      setApprovedMarketplaceMcpIds(new Set());
+    } catch (installError) {
+      setError(installError instanceof Error ? installError.message : t("settings.pluginsMarketplaceInstallError", {
+        defaultValue: "Failed to install Plugin",
+      }));
+    } finally {
+      setInstallingPluginKey("");
+    }
+  };
+
+  const installMarketplacePlugin = async (): Promise<void> => {
+    const preview = pendingMarketplaceInstall;
+    if (!preview) return;
+    const key = `${preview.marketplaceId}:${preview.pluginName}`;
+    setPendingMarketplaceInstall(null);
+    setInstallingPluginKey(key);
+    setError("");
+    setStatus("");
+    try {
+      await window.snow.installPluginFromMarketplace(
+        preview.marketplaceId,
+        preview.pluginName,
+        preview.mcpServers
+          .filter((mcp) => approvedMarketplaceMcpIds.has(mcp.componentId))
+          .map((mcp) => ({ componentId: mcp.componentId, approvalHash: mcp.approvalHash }))
+      );
       await Promise.all([load(), loadMarketplaces()]);
       setStatus(t("settings.pluginsMarketplaceInstallSuccess", { defaultValue: "Plugin installed." }));
     } catch (installError) {
@@ -384,6 +414,15 @@ export function PluginsSettingsPanel({ onClose, embedded = false }: PluginsSetti
     } finally {
       setInstallingPluginKey("");
     }
+  };
+
+  const toggleMarketplaceMcpApproval = (componentId: string): void => {
+    setApprovedMarketplaceMcpIds((current) => {
+      const next = new Set(current);
+      if (next.has(componentId)) next.delete(componentId);
+      else next.add(componentId);
+      return next;
+    });
   };
 
   const startSplitResize = useCallback(
@@ -746,7 +785,7 @@ export function PluginsSettingsPanel({ onClose, embedded = false }: PluginsSetti
                             </span>
                           ) : null}
                           {plugin.supported ? (
-                            <button className="api-settings-form-btn secondary plugins-marketplace-install-button" type="button" onClick={() => void installMarketplacePlugin(selectedMarketplace, plugin)} disabled={installing || Boolean(installingPluginKey) || Boolean(busyMarketplaceId)}>
+                            <button className="api-settings-form-btn secondary plugins-marketplace-install-button" type="button" onClick={() => void previewMarketplacePluginInstall(selectedMarketplace, plugin)} disabled={installing || Boolean(installingPluginKey) || Boolean(busyMarketplaceId)}>
                               {installing ? <Loader2 size={14} className="spin" /> : plugin.installedPluginId ? <RefreshCw size={14} /> : <Download size={14} />}
                               <span>{t(installing ? "settings.pluginsMarketplaceInstalling" : plugin.installedPluginId ? "settings.pluginsUpdate" : "settings.pluginsMarketplaceInstall", { defaultValue: installing ? "Installing..." : plugin.installedPluginId ? "Update Plugin" : "Install Plugin" })}</span>
                             </button>
@@ -763,6 +802,63 @@ export function PluginsSettingsPanel({ onClose, embedded = false }: PluginsSetti
           ) : null}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={Boolean(pendingMarketplaceInstall)}
+        title={t("settings.pluginsMarketplaceReviewTitle", { defaultValue: "Review Plugin installation" })}
+        message={t("settings.pluginsMarketplaceReviewMessage", { defaultValue: "MCP servers are disabled by default. Select each server you want to authorize after reviewing its declaration." })}
+        confirmLabel={t("settings.pluginsMarketplaceInstall", { defaultValue: "Install Plugin" })}
+        cancelLabel={t("common.cancel", { defaultValue: "Cancel" })}
+        onConfirm={() => void installMarketplacePlugin()}
+        onCancel={() => setPendingMarketplaceInstall(null)}
+        variant="warning"
+        className="plugin-marketplace-install-review"
+      >
+        {pendingMarketplaceInstall ? (
+          <div className="plugin-marketplace-install-review-content">
+            <dl className="plugin-marketplace-install-sources">
+              <div>
+                <dt>{t("settings.pluginsMarketplaceSourceLabel", { defaultValue: "Marketplace source" })}</dt>
+                <dd><code>{pendingMarketplaceInstall.marketplaceSource}</code></dd>
+              </div>
+              <div>
+                <dt>{t("settings.pluginsMarketplacePluginSourceLabel", { defaultValue: "Plugin source" })}</dt>
+                <dd><code>{pendingMarketplaceInstall.pluginSource}</code></dd>
+              </div>
+            </dl>
+            {pendingMarketplaceInstall.mcpServers.length === 0 ? (
+              <p className="plugin-marketplace-install-empty">
+                {t("settings.pluginsMarketplaceNoMcp", { defaultValue: "This Plugin does not declare MCP servers." })}
+              </p>
+            ) : (
+              <div className="plugin-marketplace-install-mcps">
+                {pendingMarketplaceInstall.mcpServers.map((mcp) => (
+                  <section className="plugin-marketplace-install-mcp" key={mcp.componentId}>
+                    <label className="plugin-marketplace-install-mcp-toggle">
+                      <input
+                        type="checkbox"
+                        checked={approvedMarketplaceMcpIds.has(mcp.componentId)}
+                        onChange={() => toggleMarketplaceMcpApproval(mcp.componentId)}
+                      />
+                      <span>{t("settings.pluginsMarketplaceEnableMcp", { defaultValue: "Enable this MCP server" })}</span>
+                    </label>
+                    <strong>{mcp.name}</strong>
+                    <dl className="plugin-marketplace-install-mcp-details">
+                      <div><dt>{t("settings.pluginsMarketplaceDeclarationSource", { defaultValue: "Declaration" })}</dt><dd><code>{mcp.declarationPath}</code></dd></div>
+                      <div><dt>{t("settings.pluginsMarketplaceTransport", { defaultValue: "Transport" })}</dt><dd><code>{mcp.transportType}</code></dd></div>
+                      <div><dt>{t("settings.pluginsMarketplaceCommand", { defaultValue: "Command" })}</dt><dd><code>{mcp.command || "-"}</code></dd></div>
+                      <div><dt>{t("settings.pluginsMarketplaceArgs", { defaultValue: "Arguments" })}</dt><dd><code>{JSON.stringify(mcp.args)}</code></dd></div>
+                      <div><dt>{t("settings.pluginsMarketplaceEnv", { defaultValue: "Environment" })}</dt><dd><code>{JSON.stringify(mcp.env)}</code></dd></div>
+                      <div><dt>{t("settings.pluginsMarketplaceUrl", { defaultValue: "URL" })}</dt><dd><code>{mcp.url || "-"}</code></dd></div>
+                      {Object.keys(mcp.headers).length > 0 ? <div><dt>{t("settings.pluginsMarketplaceHeaders", { defaultValue: "HTTP headers" })}</dt><dd><code>{JSON.stringify(mcp.headers)}</code></dd></div> : null}
+                    </dl>
+                  </section>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={Boolean(pendingRuntimeStart)}

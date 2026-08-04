@@ -5,7 +5,10 @@ import { Modal } from "../common/Modal";
 import { useI18n } from "../../i18n";
 import type { ApiConfigRecord } from "../../../preload";
 import { ApiSettingsActions } from "./apiSettings/ApiSettingsActions";
-import { ApiSettingsFormActions, ApiSettingsFormPanel } from "./apiSettings/ApiSettingsFormPanel";
+import {
+  ApiSettingsFormActions,
+  ApiSettingsFormPanel,
+} from "./apiSettings/ApiSettingsFormPanel";
 import { ApiSettingsSummary } from "./apiSettings/ApiSettingsSummary";
 import { ApiSettingsTable } from "./apiSettings/ApiSettingsTable";
 import {
@@ -14,6 +17,7 @@ import {
 } from "./apiSettings/apiSettingsConstants";
 import {
   emptyApiConfigForm,
+  extractThinkingValueFromConfigJson,
   toApiConfigPayload,
 } from "./apiSettings/apiSettingsUtils";
 import { calculateAutoCompressThresholdPercent } from "./apiSettings/autoCompressThreshold";
@@ -240,6 +244,10 @@ export function ApiSettingsTreePanel({
         config.retryBaseDelayMs != null ? String(config.retryBaseDelayMs) : "",
       systemPromptIdsJson: config.systemPromptIdsJson ?? "",
       customHeaderSchemeId: config.customHeaderSchemeId ?? "",
+      thinkingValue: extractThinkingValueFromConfigJson(
+        config.configJson,
+        config.requestMethod || DEFAULT_REQUEST_METHOD
+      ),
     });
   };
 

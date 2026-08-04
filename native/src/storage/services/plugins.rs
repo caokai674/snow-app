@@ -37,7 +37,14 @@ pub fn set_plugin_state(database_path: &Path, plugin_id: &str, state: &str) -> R
     database::open_connection(database_path)
         .and_then(|connection| {
             let changed = connection.execute(
-                "UPDATE plugins SET state = ?2, updated_at = datetime('now', 'localtime') WHERE plugin_id = ?1",
+                "UPDATE plugins
+                    SET state = ?2,
+                        desired_state = CASE
+                            WHEN ?2 IN ('enabled', 'disabled') THEN ?2
+                            ELSE desired_state
+                        END,
+                        updated_at = datetime('now', 'localtime')
+                  WHERE plugin_id = ?1",
                 params![plugin_id, state],
             )?;
             if changed == 0 {
@@ -61,14 +68,14 @@ pub fn delete_plugin(database_path: &Path, plugin_id: &str) -> Result<()> {
         .map_err(|error| database::database_error(database_path, "delete plugin", error))
 }
 
-fn upsert_plugin(transaction: &Transaction<'_>, item: &PluginInput) -> rusqlite::Result<()> {
+pub(crate) fn upsert_plugin(transaction: &Transaction<'_>, item: &PluginInput) -> rusqlite::Result<()> {
     validate_plugin(item).map_err(invalid_input)?;
     transaction.execute(
         "INSERT INTO plugins (
            plugin_id, name, version, provider, source_path, manifest_path, scope, project_id,
-           state, capabilities_json, runtime_json, content_hash, imported_at, updated_at
+           state, desired_state, capabilities_json, runtime_json, content_hash, imported_at, updated_at
          ) VALUES (
-           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?11, ?12,
            datetime('now', 'localtime'), datetime('now', 'localtime')
          ) ON CONFLICT(plugin_id) DO UPDATE SET
            name = excluded.name,
@@ -79,6 +86,10 @@ fn upsert_plugin(transaction: &Transaction<'_>, item: &PluginInput) -> rusqlite:
            scope = excluded.scope,
            project_id = excluded.project_id,
            state = excluded.state,
+           desired_state = CASE
+             WHEN excluded.state IN ('enabled', 'disabled') THEN excluded.state
+             ELSE plugins.desired_state
+           END,
            capabilities_json = excluded.capabilities_json,
            runtime_json = excluded.runtime_json,
            content_hash = excluded.content_hash,
@@ -207,7 +218,7 @@ fn query_plugin(
     let row = connection
         .query_row(
             "SELECT plugin_id, name, version, provider, source_path, manifest_path, scope, project_id,
-                    state, capabilities_json, runtime_json, content_hash, imported_at, updated_at
+                    state, desired_state, capabilities_json, runtime_json, content_hash, imported_at, updated_at
                FROM plugins WHERE plugin_id = ?1",
             [plugin_id],
             |row| {
@@ -216,7 +227,7 @@ fn query_plugin(
                     row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?,
                     row.get::<_, String>(9)?, row.get::<_, String>(10)?, row.get::<_, String>(11)?,
-                    row.get::<_, String>(12)?, row.get::<_, String>(13)?,
+                    row.get::<_, String>(12)?, row.get::<_, String>(13)?, row.get::<_, String>(14)?,
                 ))
             },
         )
@@ -231,6 +242,7 @@ fn query_plugin(
         scope,
         project_id,
         state,
+        desired_state,
         capabilities_json,
         runtime_json,
         content_hash,
@@ -275,6 +287,7 @@ fn query_plugin(
         scope,
         project_id,
         state,
+        desired_state,
         capabilities,
         runtime,
         content_hash,
@@ -282,4 +295,69 @@ fn query_plugin(
         updated_at,
         components,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        process,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    fn test_database_path() -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "snow-plugin-state-{}-{timestamp}.sqlite",
+            process::id()
+        ))
+    }
+
+    #[test]
+    fn transient_source_states_preserve_the_desired_state() {
+        let database_path = test_database_path();
+        database::ensure_database(&database_path).expect("initialize test database");
+        let connection = database::open_connection(&database_path).expect("open test database");
+        connection
+            .execute(
+                "INSERT INTO plugins (
+                   plugin_id, name, provider, source_path, manifest_path, scope,
+                   state, desired_state, content_hash
+                 ) VALUES (
+                   'plugin:state', 'State', 'codex', '/tmp/source', '/tmp/source/plugin.json', 'global',
+                   'disabled', 'disabled', 'hash'
+                 )",
+                [],
+            )
+            .expect("insert plugin");
+        drop(connection);
+
+        set_plugin_state(&database_path, "plugin:state", "update-available")
+            .expect("mark plugin update available");
+        let plugin = list_plugins(&database_path)
+            .expect("list plugins")
+            .pop()
+            .expect("plugin record");
+        assert_eq!(plugin.state, "update-available");
+        assert_eq!(plugin.desired_state, "disabled");
+
+        set_plugin_state(&database_path, "plugin:state", "disabled")
+            .expect("restore plugin state");
+        let plugin = list_plugins(&database_path)
+            .expect("list plugins")
+            .pop()
+            .expect("plugin record");
+        assert_eq!(plugin.state, "disabled");
+        assert_eq!(plugin.desired_state, "disabled");
+
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_file(database_path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(database_path.with_extension("sqlite-shm"));
+    }
 }
