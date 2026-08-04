@@ -97,7 +97,7 @@ const execute = <T extends string | string[]>(operation: ScanOperation, path?: s
 
 export const hashImportPathInWorker = (path: string): Promise<string> => execute<string>("hash", path);
 
-export const walkImportFilesInWorker = (path: string, maxDepth = IMPORT_SCAN_LIMITS.maxDepth): Promise<string[]> =>
+export const walkImportFilesInWorker = (path: string, maxDepth: number = IMPORT_SCAN_LIMITS.maxDepth): Promise<string[]> =>
   execute<string[]>("walk", path, maxDepth);
 
 export const listImportDirectoriesInWorker = (path: string): Promise<string[]> =>

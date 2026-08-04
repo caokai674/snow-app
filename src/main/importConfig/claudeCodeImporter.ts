@@ -320,7 +320,7 @@ const collectSkills = async (
     sourceRoot: string,
     scope: "global" | "project",
     project?: WorkspaceDirectoryRecord
-  ): void => {
+  ): Promise<void> => {
     for (const sourceDir of await collectSkillDirectories(sourceRoot)) {
       const key = resolve(sourceDir);
       if (sourcePaths.has(key)) {

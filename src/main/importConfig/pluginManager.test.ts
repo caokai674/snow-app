@@ -435,7 +435,10 @@ describe("Plugin source recovery", () => {
       desiredState: "disabled",
       importedAt: "2026-08-04T00:00:00.000Z",
       updatedAt: "2026-08-04T00:00:00.000Z",
-      components: definition!.input.components,
+      components: definition!.input.components.map((component) => ({
+        ...component,
+        pluginId: definition!.input.pluginId,
+      })),
     };
     const stateChanges: string[] = [];
     const native = {
