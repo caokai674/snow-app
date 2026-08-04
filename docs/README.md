@@ -21,6 +21,9 @@
 | [2-使用指南/8-第三方配置导入](zh-CN/2-使用指南/8-第三方配置导入.md) | [2-guides/8-third-party-configuration-import](en/2-guides/8-third-party-configuration-import.md) | 第三方配置导入 / Import third-party configuration |
 | [3-参考手册/1-settings.json配置参考](zh-CN/3-参考手册/1-settings.json配置参考.md) | [3-reference/1-settings-json-reference](en/3-reference/1-settings-json-reference.md) | settings.json 字段参考 / settings.json reference |
 | [3-参考手册/2-内置工具参考](zh-CN/3-参考手册/2-内置工具参考.md) | [3-reference/2-builtin-tools-reference](en/3-reference/2-builtin-tools-reference.md) | 内置工具参考 / Built-in tools reference |
+| [3-参考手册/4-数据存储位置](zh-CN/3-参考手册/4-数据存储位置.md) | [3-reference/4-data-storage-locations](en/3-reference/4-data-storage-locations.md) | 数据存储位置 / Data storage locations |
+| [4-架构与开发/1-架构总览](zh-CN/4-架构与开发/1-架构总览.md) | [4-architecture-and-development/1-architecture-overview](en/4-architecture-and-development/1-architecture-overview.md) | 架构总览 / Architecture overview |
+| [4-架构与开发/2-开发者指南](zh-CN/4-架构与开发/2-开发者指南.md) | [4-architecture-and-development/2-developer-guide](en/4-architecture-and-development/2-developer-guide.md) | 开发者指南 / Developer guide |
 
 ## 给 AI Agent 的说明
 

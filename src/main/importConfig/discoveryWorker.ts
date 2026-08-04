@@ -27,15 +27,20 @@ export const IMPORT_SCAN_LIMITS = {
 
 let nextRequestId = 1;
 let worker: Worker | undefined;
-const pending = new Map<number, {
-  resolve: (value: string | string[]) => void;
-  reject: (error: Error) => void;
-  timeout: NodeJS.Timeout;
-}>();
+const pending = new Map<
+  number,
+  {
+    resolve: (value: string | string[]) => void;
+    reject: (error: Error) => void;
+    timeout: NodeJS.Timeout;
+  }
+>();
 
 const workerPath = (): string => {
   if (process.env.VITEST) {
-    return fileURLToPath(new URL("./import-discovery-worker.mjs", import.meta.url));
+    return fileURLToPath(
+      new URL("./import-discovery-worker.mjs", import.meta.url)
+    );
   }
   return join(__dirname, "import-discovery-worker.js");
 };
@@ -62,7 +67,8 @@ const activeWorker = (): Worker => {
     pending.delete(message.id);
     clearTimeout(request.timeout);
     if (message.error) request.reject(new Error(message.error));
-    else if (message.value === undefined) request.reject(new Error("Import discovery worker returned no result"));
+    else if (message.value === undefined)
+      request.reject(new Error("Import discovery worker returned no result"));
     else request.resolve(message.value);
   });
   worker.on("error", (error) => {
@@ -71,20 +77,40 @@ const activeWorker = (): Worker => {
   });
   worker.on("exit", (code) => {
     worker = undefined;
-    if (code !== 0) failPending(new Error(`Import discovery worker exited with code ${code}`));
+    if (code !== 0)
+      failPending(
+        new Error(`Import discovery worker exited with code ${code}`)
+      );
   });
   return worker;
 };
 
-const execute = <T extends string | string[]>(operation: ScanOperation, path?: string, maxDepth?: number): Promise<T> => {
+const execute = <T extends string | string[]>(
+  operation: ScanOperation,
+  path?: string,
+  maxDepth?: number
+): Promise<T> => {
   const id = nextRequestId++;
-  const request: WorkerRequest = { id, operation, ...(path ? { path } : {}), ...(maxDepth ? { maxDepth } : {}) };
+  const request: WorkerRequest = {
+    id,
+    operation,
+    ...(path ? { path } : {}),
+    ...(maxDepth ? { maxDepth } : {}),
+  };
   return new Promise<T>((resolve, reject) => {
     const timeout = setTimeout(() => {
       if (!pending.delete(id)) return;
-      reject(new Error(`Import discovery exceeded the ${IMPORT_SCAN_LIMITS.timeoutMs} ms limit`));
+      reject(
+        new Error(
+          `Import discovery exceeded the ${IMPORT_SCAN_LIMITS.timeoutMs} ms limit`
+        )
+      );
     }, IMPORT_SCAN_LIMITS.timeoutMs + 1_000);
-    pending.set(id, { resolve: resolve as (value: string | string[]) => void, reject, timeout });
+    pending.set(id, {
+      resolve: resolve as (value: string | string[]) => void,
+      reject,
+      timeout,
+    });
     try {
       activeWorker().postMessage(request);
     } catch (error) {
@@ -95,13 +121,17 @@ const execute = <T extends string | string[]>(operation: ScanOperation, path?: s
   });
 };
 
-export const hashImportPathInWorker = (path: string): Promise<string> => execute<string>("hash", path);
+export const hashImportPathInWorker = (path: string): Promise<string> =>
+  execute<string>("hash", path);
 
-export const walkImportFilesInWorker = (path: string, maxDepth: number = IMPORT_SCAN_LIMITS.maxDepth): Promise<string[]> =>
-  execute<string[]>("walk", path, maxDepth);
+export const walkImportFilesInWorker = (
+  path: string,
+  maxDepth: number = IMPORT_SCAN_LIMITS.maxDepth
+): Promise<string[]> => execute<string[]>("walk", path, maxDepth);
 
-export const listImportDirectoriesInWorker = (path: string): Promise<string[]> =>
-  execute<string[]>("directories", path, 1);
+export const listImportDirectoriesInWorker = (
+  path: string
+): Promise<string[]> => execute<string[]>("directories", path, 1);
 
 export const clearImportDiscoveryCache = (): Promise<void> =>
   execute<string>("clear").then(() => undefined);

@@ -167,6 +167,7 @@ export const useConversationManagement = (
                   .map((record) => record.checkpointId)
               )
             );
+            let baselineCheckpointId = checkpointIds[0];
 
             // Resolve the effective modes for this conversation: DB override
             // wins, then the global defaults. Defensive mutual exclusion: a
@@ -202,6 +203,15 @@ export const useConversationManagement = (
                 conversationRecord?.parentConversationId
               );
               const fullHistory = await window.snow.listChatMessages(trimmedId);
+              const firstCheckpointRecord = fullHistory
+                .filter(
+                  (record) => record.role === "user" && record.checkpointId
+                )
+                .sort((left, right) =>
+                  left.createdAt.localeCompare(right.createdAt)
+                )[0];
+              baselineCheckpointId =
+                firstCheckpointRecord?.checkpointId ?? baselineCheckpointId;
               const ownChanges = extractFileChangesFromRecords(fullHistory);
               if (ownChanges.length > 0) {
                 ctx.mergeFileChangeStats(
@@ -276,6 +286,10 @@ export const useConversationManagement = (
                   isSending: false,
                   isAbortRequested: false,
                   runId: 0,
+                  runTokenBase: 0,
+                  runElapsedBaseMs: 0,
+                  iterationTokenCount: 0,
+                  iterationElapsedMs: 0,
                   directoryId: conversationDirId,
                   checkpointIds,
                   childSubAgentIds: new Set(),
@@ -309,6 +323,10 @@ export const useConversationManagement = (
                     streamTokenCount: 0,
                     streamElapsedMs: 0,
                     streamTtftMs: 0,
+                    runTokenCount: 0,
+                    runStreamElapsedMs: 0,
+                    runTtftMs: 0,
+                    baselineCheckpointId,
                     streamStartedAt: 0,
                   },
                 };

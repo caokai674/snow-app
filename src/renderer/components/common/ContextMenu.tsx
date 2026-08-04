@@ -6,6 +6,12 @@ export type ContextMenuItem = {
   label: string;
   icon?: React.ReactNode;
   onClick: () => void;
+  /** 置灰禁用（如对已删除文件执行打开操作）。 */
+  disabled?: boolean;
+  /** 危险操作样式（红色文字，如放弃修改）。 */
+  danger?: boolean;
+  /** 为 true 时在该项之前插入分隔线。 */
+  separator?: boolean;
 };
 
 type ContextMenuProps = {
@@ -74,16 +80,23 @@ export function ContextMenu({
   const left = Math.min(x, window.innerWidth - MENU_MIN_WIDTH - 8);
 
   const renderItem = (item: ContextMenuItem): React.JSX.Element => (
-    <button
-      key={item.id}
-      type="button"
-      className="context-menu-item"
-      role="menuitem"
-      onClick={item.onClick}
-    >
-      {item.icon}
-      <span>{item.label}</span>
-    </button>
+    <div key={item.id}>
+      {item.separator && (
+        <div className="context-menu-separator" role="separator" />
+      )}
+      <button
+        type="button"
+        className={`context-menu-item${item.disabled ? " disabled" : ""}${
+          item.danger ? " danger" : ""
+        }`}
+        role="menuitem"
+        disabled={item.disabled}
+        onClick={item.onClick}
+      >
+        {item.icon}
+        <span>{item.label}</span>
+      </button>
+    </div>
   );
 
   return createPortal(

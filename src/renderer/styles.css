@@ -247,6 +247,13 @@ input {
   gap: 8px;
   padding: 0 12px;
   overflow: visible;
+  min-width: 0;
+}
+
+/* 右侧圆角卡片整体脱离窗口 drag 区域：卡片空白处（项目标签与按钮的
+   间隙）右键也要弹出业务菜单，drag 区域会拦截 contextmenu 事件。 */
+.top-bar-right {
+  -webkit-app-region: no-drag;
 }
 
 .top-bar-right-actions {
@@ -255,6 +262,24 @@ input {
   gap: 4px;
   flex-shrink: 0;
   overflow: visible;
+}
+
+/* 窄窗口 TopBar 紧凑模式：按优先级隐藏次要元素，避免标题/项目标签
+   被过度压缩截断。窗口断点为近似值（实际可用宽度还受侧栏/右面板影响）。 */
+@media (max-width: 920px) {
+  .header-subtitle {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .top-bar-branch-label {
+    display: none;
+  }
+  .top-bar-main {
+    gap: 6px;
+    padding: 0 10px;
+  }
 }
 
 .top-bar-plus-menu {
@@ -6842,6 +6867,11 @@ input {
   color: var(--accent-blue-text);
 }
 
+.file-changes-kind.is-delete {
+  background: var(--accent-red-bg);
+  color: var(--accent-red-text);
+}
+
 .file-changes-agent {
   display: inline-flex;
   align-items: center;
@@ -9733,6 +9763,38 @@ input {
   );
 }
 
+.tool-call-bash-detached-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--accent-blue-text, #4a9eff);
+  background: color-mix(
+    in srgb,
+    var(--accent-blue-text, #4a9eff) 14%,
+    transparent
+  );
+}
+
+.tool-call-bash-logpath {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-secondary) 8%, transparent);
+  word-break: break-all;
+}
+
 .tool-call-bash-countdown {
   display: inline-flex;
   align-items: center;
@@ -12292,22 +12354,88 @@ input {
   display: flex;
   align-items: center;
   justify-content: center;
+  min-width: 0;
   padding: 0 2px;
   margin-bottom: 2px;
+  /* 容器查询基准：以输入区可用宽度判定，极窄时隐藏次要指标。
+     不能放在 .stream-metrics 自身（inline-flex + size containment
+     会让宽度坍缩为 padding，导致所有指标被误隐藏）。 */
+  container-type: inline-size;
 }
 
 .stream-metrics {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 3px 12px;
-  border-radius: var(--radius-sm);
+  gap: 8px;
+  max-width: 100%;
+  padding: 4px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
   background: var(--surface-island);
+  overflow-x: auto;
+  scrollbar-width: none;
   font-size: 11px;
   font-weight: 500;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
+}
+
+.stream-metrics::-webkit-scrollbar {
+  display: none;
+}
+
+.stream-metrics-work-summary,
+.stream-metrics-task-progress,
+.stream-metrics-file-progress {
+  display: inline-flex;
+  align-items: center;
+}
+
+.stream-metrics-work-summary {
+  gap: 6px;
+}
+
+.stream-metrics-task-progress {
+  gap: 5px;
+}
+
+.stream-metrics-work-icon {
+  flex-shrink: 0;
+  color: var(--accent-blue);
+  fill: color-mix(in srgb, var(--accent-blue) 12%, transparent);
+}
+
+.stream-metrics-work-dot {
+  color: var(--text-tertiary);
+}
+
+.stream-metrics-file-progress {
+  gap: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.stream-metrics-file-progress:hover {
+  color: var(--text-primary);
+}
+
+.stream-metrics-file-progress:focus-visible {
+  outline: 1px solid var(--accent-blue);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+.stream-metrics-additions {
+  color: var(--accent-green-text);
+}
+
+.stream-metrics-deletions {
+  color: var(--accent-red-text);
 }
 
 .stream-metrics-metric {
@@ -12359,6 +12487,41 @@ input {
   height: 10px;
   background: var(--border-color);
   flex-shrink: 0;
+}
+
+/* 极窄容器分级隐藏次要指标（tok/s → TTFT → 运行时长），保留步骤/文件/
+   tokens 等核心信息，避免胶囊条被截断成横向滚动。分隔线跟随其后的指标
+   一起隐藏，防止孤立竖线。Electron 37 (Chromium 130+) 支持 @container。 */
+@container (max-width: 560px) {
+  .stream-metrics-sep:has(+ .stream-metrics-tps) {
+    display: none;
+  }
+  .stream-metrics-tps {
+    display: none;
+  }
+}
+
+@container (max-width: 460px) {
+  .stream-metrics-sep:has(+ .stream-metrics-ttft) {
+    display: none;
+  }
+  .stream-metrics-ttft {
+    display: none;
+  }
+}
+
+@container (max-width: 360px) {
+  .stream-metrics-sep:has(+ .stream-metrics-elapsed) {
+    display: none;
+  }
+  .stream-metrics-elapsed {
+    display: none;
+  }
+  /* 任务进度再放不下时并入文件进度：隐藏任务步数与其后的分隔点。 */
+  .stream-metrics-task-progress,
+  .stream-metrics-work-dot {
+    display: none;
+  }
 }
 
 .stream-metrics-pause-btn {
@@ -16477,6 +16640,9 @@ input {
   white-space: nowrap;
   overflow: hidden;
   max-width: 200px;
+  /* 标签自带右键业务菜单，必须脱离 top-bar 的 drag 区域；
+     否则 Windows 上右键会弹出窗口系统菜单且 contextmenu 事件不触发。 */
+  -webkit-app-region: no-drag;
 }
 
 .top-bar-branch-label > span {
@@ -16613,6 +16779,9 @@ input {
   justify-content: space-between;
   gap: 8px;
   padding: 8px 12px;
+  /* 面板极窄时分支选择器与操作按钮换行排布，避免溢出裁切。 */
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 
 .git-control-actions {
@@ -20005,6 +20174,36 @@ input {
   color: var(--text-primary);
 }
 
+.context-menu-item.disabled,
+.context-menu-item:disabled {
+  color: var(--text-muted);
+  cursor: default;
+  opacity: 0.55;
+}
+
+.context-menu-item.disabled:hover,
+.context-menu-item:disabled:hover {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.context-menu-item.danger {
+  color: var(--danger-color, #e5534b);
+}
+
+.context-menu-item.danger:hover {
+  background: color-mix(
+    in srgb,
+    var(--danger-color, #e5534b) 14%,
+    transparent
+  );
+  color: var(--danger-color, #e5534b);
+}
+
+.context-menu-item.danger svg {
+  color: var(--danger-color, #e5534b);
+}
+
 .context-menu-item svg {
   flex-shrink: 0;
   color: var(--text-muted);
@@ -21041,6 +21240,32 @@ body.ctrl-held [data-path] {
   min-height: 0;
   overflow-y: scroll;
   background: var(--bg-primary);
+}
+
+/* Markdown 文件渲染预览（复用 .ai-message 的 markdown 排版样式）。
+   容器自身滚动；覆盖 ai-message 的消息内边距，适配阅读器布局。 */
+.file-viewer-markdown {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px 32px;
+  background: var(--bg-primary);
+  font-size: 13.5px;
+  line-height: 1.75;
+  word-break: break-word;
+}
+
+.file-viewer-markdown > :first-child {
+  margin-top: 0;
+}
+
+.file-viewer-markdown a {
+  color: var(--accent-color, #4f8cff);
+  text-decoration: none;
+}
+
+.file-viewer-markdown a:hover {
+  text-decoration: underline;
 }
 
 .file-viewer-code {

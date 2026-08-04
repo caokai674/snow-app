@@ -138,7 +138,7 @@ export type FileChangeRecord = {
   /** The filePath argument passed to the filesystem tool (as the model
    *  supplied it, e.g. relative to the workspace root). */
   filePath: string;
-  kind: "create" | "edit";
+  kind: "create" | "edit" | "delete";
   /** Whether the change was made by the main agent loop or by a sub-agent
    *  running inside this conversation. */
   agent: "main" | "sub";
@@ -192,6 +192,14 @@ export type ConversationSessionState = {
   /** Time to first token in milliseconds. 0 until the first content
    *  or thinking delta arrives, then frozen for the iteration. */
   streamTtftMs: number;
+  /** Cumulative streamed tokens across every model iteration in the active run. */
+  runTokenCount: number;
+  /** Sum of the complete stream elapsed time reported by every iteration. */
+  runStreamElapsedMs: number;
+  /** TTFT of the first model iteration in the active run. */
+  runTtftMs: number;
+  /** First checkpoint in the conversation, used as the cumulative diff baseline. */
+  baselineCheckpointId?: string;
   /** Wall-clock timestamp (Date.now()) captured once when an agent loop
    *  starts, used by StreamMetrics to drive an accumulating elapsed timer
    *  that survives conversation switches between parallel streaming
@@ -211,7 +219,7 @@ export type ConversationSessionRef = {
   streamPromise: Promise<unknown> | null;
   /**
    * The in-flight `generateConversationSummary` promise. Resolved after the
-   * Rust backend finishes `update_conversation_summary`. Rollback awaits this
+   * backend finishes `update_conversation_summary`. Rollback awaits this
    * before issuing delete/truncate to avoid concurrent write-transaction races.
    */
   summaryPromise: Promise<unknown> | null;
@@ -226,6 +234,12 @@ export type ConversationSessionRef = {
    * execution).
    */
   runId: number;
+  /** Completed-iteration totals used to accumulate live run metrics. */
+  runTokenBase: number;
+  runElapsedBaseMs: number;
+  /** Latest values reported by the current model iteration. */
+  iterationTokenCount: number;
+  iterationElapsedMs: number;
   directoryId?: string;
   checkpointIds: string[];
   /** Conversation ids of sub-agent sessions spawned by this conversation.
@@ -527,6 +541,14 @@ export type UseChatConversationResult = {
   streamElapsedMs: number;
   /** Time to first token in milliseconds. */
   streamTtftMs: number;
+  /** Cumulative token count across all model iterations in the active run. */
+  runTokenCount: number;
+  /** Complete stream elapsed time accumulated across all model iterations. */
+  runStreamElapsedMs: number;
+  /** TTFT captured from the first model iteration in the active run. */
+  runTtftMs: number;
+  /** First checkpoint in the active conversation. */
+  baselineCheckpointId: string | undefined;
   /** Wall-clock timestamp (Date.now()) captured once when an agent loop
    *  starts. Drives the accumulating elapsed timer in StreamMetrics so it
    *  survives conversation switches between parallel streaming sessions. */

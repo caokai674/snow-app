@@ -1,5 +1,7 @@
 import {
+  Copy,
   Database,
+  FolderOpen,
   GitBranch,
   Globe,
   Maximize2,
@@ -332,11 +334,14 @@ export const TopBar = ({
   // 代码库功能已开启且当前项目嵌入完毕后，才在 Plus 菜单中提供“代码库”项。
   const canOpenCodebase = effectiveEnabled && codebaseIndexed && activeProjectId;
 
-  // 项目标签右键菜单：与 Plus 菜单一致，快速在当前项目打开终端/浏览器/代码库。
+  // 项目标签右键菜单：快速在当前项目打开终端/浏览器/代码库，
+  // 以及复制路径、在文件管理器中显示（SSH 远程工作区不可用）。
+  const projectPath = activeDirectory?.path ?? "";
+  const isSshProject = activeDirectory?.kind === "ssh" || projectPath.startsWith("ssh://");
   const branchContextMenuItems: ContextMenuItem[] = [
     {
       id: "terminal",
-      label: "终端",
+      label: t("topBar.plusMenu.terminal", { defaultValue: "Terminal" }),
       icon: <Terminal size={13} strokeWidth={1.8} />,
       onClick: () => {
         setBranchContextMenu(null);
@@ -345,7 +350,7 @@ export const TopBar = ({
     },
     {
       id: "browser",
-      label: "浏览器",
+      label: t("topBar.plusMenu.browser", { defaultValue: "Browser" }),
       icon: <Globe size={13} strokeWidth={1.8} />,
       onClick: () => {
         setBranchContextMenu(null);
@@ -368,11 +373,48 @@ export const TopBar = ({
           },
         ]
       : []),
+    {
+      id: "copy-path",
+      separator: true,
+      label: t("topBar.copyProjectPath", {
+        defaultValue: "Copy Project Path",
+      }),
+      icon: <Copy size={13} strokeWidth={1.8} />,
+      disabled: !projectPath || isSshProject,
+      onClick: () => {
+        setBranchContextMenu(null);
+        void window.snow.writeClipboardText(projectPath).catch(() => {
+          // 剪贴板写入失败时静默忽略。
+        });
+      },
+    },
+    {
+      id: "reveal",
+      label: t("topBar.revealInExplorer", {
+        defaultValue: "Show in Explorer",
+      }),
+      icon: <FolderOpen size={13} strokeWidth={1.8} />,
+      disabled: !projectPath || isSshProject,
+      onClick: () => {
+        setBranchContextMenu(null);
+        void window.snow.showItemInFolder(projectPath).catch(() => {
+          // 打开文件管理器失败时静默忽略。
+        });
+      },
+    },
   ];
 
   const plusMenuItems = [
-    { id: "terminal", label: "终端", icon: Terminal },
-    { id: "browser", label: "浏览器", icon: Globe },
+    {
+      id: "terminal",
+      label: t("topBar.plusMenu.terminal", { defaultValue: "Terminal" }),
+      icon: Terminal,
+    },
+    {
+      id: "browser",
+      label: t("topBar.plusMenu.browser", { defaultValue: "Browser" }),
+      icon: Globe,
+    },
     ...(canOpenCodebase
       ? [{ id: "codebase", label: t("topBar.plusMenu.codebase"), icon: Database }]
       : []),
@@ -455,19 +497,21 @@ export const TopBar = ({
         />
       </div>
 
-      <div className="top-bar-right">
+      <div
+        className="top-bar-right"
+        onContextMenu={(event) => {
+          // 右侧圆角卡片（项目标签 + 新建/面板/全屏按钮）任意位置右键：
+          // 提供针对当前项目的快捷操作。容器已整体脱离窗口 drag 区域，
+          // 否则卡片空白处（标签与按钮的间隙）右键不会触发 contextmenu。
+          event.preventDefault();
+          setBranchContextMenu({ x: event.clientX, y: event.clientY });
+        }}
+      >
         <div className="top-bar-branch-info">
           {activeDirectory && (
             <span
               className="top-bar-branch-label"
               title={activeDirectory.name}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                setBranchContextMenu({
-                  x: event.clientX,
-                  y: event.clientY,
-                });
-              }}
             >
               <GitBranch size={13} strokeWidth={1.8} />
               <span>{activeDirectory.name}</span>

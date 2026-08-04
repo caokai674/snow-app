@@ -656,7 +656,7 @@
 :root[data-theme-preset="google"]
   :is(.api-settings-action-btn, .api-settings-form-btn, .confirm-dialog-btn,
     .btn-commit, .project-codebase-embed-btn, .model-manual-btn.primary,
-    .git-commit-btn.primary) {
+    .git-commit-btn.primary, .scheduled-tasks-create-btn) {
   min-height: 36px;
   border-radius: 18px;
   padding: 8px 16px;
@@ -669,8 +669,8 @@
     .model-manual-btn.primary, .project-codebase-embed-btn.primary,
     .tool-call-user-question-submit, .tool-call-plan-approval-approve,
     .project-sensitive-command-save, .personalization-save-btn,
-    .branch-create-submit-btn, .git-commit-btn.primary,
-    .mcp-editor-mode-btn.active) {
+    .branch-create-submit-btn, .git-commit-btn, .git-commit-btn.primary,
+    .memo-new-btn, .scheduled-tasks-create-btn, .mcp-editor-mode-btn.active) {
   border-color: var(--google-blue);
   background: var(--google-blue);
   color: var(--google-on-primary);
@@ -682,7 +682,8 @@
     .model-manual-btn.primary, .project-codebase-embed-btn.primary,
     .tool-call-user-question-submit, .tool-call-plan-approval-approve,
     .project-sensitive-command-save, .personalization-save-btn,
-    .branch-create-submit-btn, .git-commit-btn.primary,
+    .branch-create-submit-btn, .git-commit-btn, .git-commit-btn.primary,
+    .memo-new-btn, .scheduled-tasks-create-btn,
     .mcp-editor-mode-btn.active):hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--google-blue) 88%, #000000);
   background: color-mix(in srgb, var(--google-blue) 88%, #000000);

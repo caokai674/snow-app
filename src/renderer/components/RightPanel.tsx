@@ -800,6 +800,7 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
             activeDirectory={activeDirectory}
             onOpenInTab={handleOpenDiffTab}
             onOpenFile={handleOpenFileFromGit}
+            onOpenTerminal={(cwd) => handleOpenTerminalTab(cwd)}
           />
         );
       }
@@ -815,6 +816,14 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
               onTitleChange={(title) =>
                 handleTerminalTitleChange(tab.id, title)
               }
+              onOpenLink={(url) => handleOpenBrowserTab(url)}
+              // 用户显式 exit（exitCode 0）后延迟自动关闭 tab（对齐 VS Code
+              // 终端行为）；异常退出（非 0）保留现场供排查。
+              onProcessExit={(exitCode) => {
+                if (exitCode === 0) {
+                  window.setTimeout(() => handleCloseTab(tab.id), 1200);
+                }
+              }}
             />
           ) : tab.type === "browser" ? (
             <BrowserPanelContent
@@ -846,6 +855,7 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
                 isSsh={(tab.data as FileViewerTabData).isSsh}
                 sshSessionId={(tab.data as FileViewerTabData).sshSessionId}
                 focusLine={(tab.data as FileViewerTabData).focusLine}
+                onOpenTerminal={(cwd) => handleOpenTerminalTab(cwd)}
                 onDirtyChange={(dirty) =>
                   setDirtyTabs((prev) => {
                     const next = new Set(prev);

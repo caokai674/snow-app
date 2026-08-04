@@ -18,8 +18,10 @@ import { appendHookExecutionToMessage, runHook } from "./hookOutcome";
 import { extractFileChangeFromTool } from "./fileChangeTracking";
 import {
   PARENT_PLAN_APPROVAL_REQUIRED,
+  beginStreamMetricsIteration,
   createStreamChunkHandler,
   createStreamIdHandler,
+  resetRunStreamMetrics,
 } from "./agentLoopHelpers";
 
 // ---------------------------------------------------------------------------
@@ -202,6 +204,7 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
         parentSessionRef.childSubAgentIds.add(subConvId);
       }
       ctx.updateSessionField(subConvId, "isStreaming", true);
+      resetRunStreamMetrics(ctx, subConvId);
       // Anchor the accumulating timer start for the sub-agent session so
       // its StreamMetrics timer is independent of the parent session.
       ctx.updateSessionField(subConvId, "streamStartedAt", Date.now());
@@ -247,6 +250,7 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
           subAssistantMessage,
         ]);
 
+        beginStreamMetricsIteration(ctx, subConvId);
         const subStreamPromise = window.snow.createResponseStream(
           {
             messages: subMessages,

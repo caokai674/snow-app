@@ -30,7 +30,10 @@ import {
   type ImportCandidateInput,
   type ImportSourceDiscovery,
 } from "./discovery";
-import type { ImportSource, ReadonlyImportResult } from "../../shared/importDiscovery";
+import type {
+  ImportSource,
+  ReadonlyImportResult,
+} from "../../shared/importDiscovery";
 import {
   selectionForInput,
   skillDestination,
@@ -72,14 +75,19 @@ const expandEnvironment = (
   warnings: string,
   warningSink: string[]
 ): string =>
-  value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}/g, (_match, name, _defaultPart, defaultValue) => {
-    const replacement = process.env[name] ?? defaultValue;
-    if (replacement === undefined) {
-      warningSink.push(`${warnings} references missing environment variable ${name}`);
-      return "";
+  value.replace(
+    /\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}/g,
+    (_match, name, _defaultPart, defaultValue) => {
+      const replacement = process.env[name] ?? defaultValue;
+      if (replacement === undefined) {
+        warningSink.push(
+          `${warnings} references missing environment variable ${name}`
+        );
+        return "";
+      }
+      return replacement;
     }
-    return replacement;
-  });
+  );
 
 const expandStringRecord = (
   record: Record<string, string>,
@@ -107,19 +115,27 @@ const toMcpServer = (
   }
   const type = nonEmptyString(raw.type) ?? "stdio";
   if (type === "ws") {
-    warnings.push(`Skipping Claude Code WebSocket MCP server ${name}: Snow App supports stdio and HTTP only`);
+    warnings.push(
+      `Skipping Claude Code WebSocket MCP server ${name}: Snow App supports stdio and HTTP only`
+    );
     return null;
   }
   if (type === "sse") {
-    warnings.push(`Skipping Claude Code SSE MCP server ${name}: Snow App supports streamable HTTP only`);
+    warnings.push(
+      `Skipping Claude Code SSE MCP server ${name}: Snow App supports streamable HTTP only`
+    );
     return null;
   }
   if (type !== "stdio" && type !== "http" && type !== "streamable-http") {
-    warnings.push(`Skipping Claude Code MCP server ${name}: unsupported transport ${type}`);
+    warnings.push(
+      `Skipping Claude Code MCP server ${name}: unsupported transport ${type}`
+    );
     return null;
   }
   if (nonEmptyString(raw.headersHelper)) {
-    warnings.push(`Claude Code MCP server ${name} uses headersHelper, which Snow App cannot import`);
+    warnings.push(
+      `Claude Code MCP server ${name} uses headersHelper, which Snow App cannot import`
+    );
   }
   const transportType = type === "stdio" ? "stdio" : "http";
   const input = createMcpInput({
@@ -128,17 +144,39 @@ const toMcpServer = (
     source: SOURCE,
     sortOrder,
     transportType,
-    url: transportType === "http" && typeof raw.url === "string"
-      ? expandEnvironment(raw.url, `Claude Code MCP server ${name} URL`, warnings)
-      : "",
-    command: transportType === "stdio" && typeof raw.command === "string"
-      ? expandEnvironment(raw.command, `Claude Code MCP server ${name} command`, warnings)
-      : "",
+    url:
+      transportType === "http" && typeof raw.url === "string"
+        ? expandEnvironment(
+            raw.url,
+            `Claude Code MCP server ${name} URL`,
+            warnings
+          )
+        : "",
+    command:
+      transportType === "stdio" && typeof raw.command === "string"
+        ? expandEnvironment(
+            raw.command,
+            `Claude Code MCP server ${name} command`,
+            warnings
+          )
+        : "",
     args: asStringArray(raw.args).map((argument) =>
-      expandEnvironment(argument, `Claude Code MCP server ${name} argument`, warnings)
+      expandEnvironment(
+        argument,
+        `Claude Code MCP server ${name} argument`,
+        warnings
+      )
     ),
-    env: expandStringRecord(asStringRecord(raw.env), `Claude Code MCP server ${name} environment`, warnings),
-    headers: expandStringRecord(asStringRecord(raw.headers), `Claude Code MCP server ${name} header`, warnings),
+    env: expandStringRecord(
+      asStringRecord(raw.env),
+      `Claude Code MCP server ${name} environment`,
+      warnings
+    ),
+    headers: expandStringRecord(
+      asStringRecord(raw.headers),
+      `Claude Code MCP server ${name} header`,
+      warnings
+    ),
     enabled: raw.enabled,
     timeoutMs: typeof raw.timeout === "number" ? raw.timeout : undefined,
   });
@@ -152,8 +190,16 @@ const collectClaudeJsonSources = (
   if (!claudeJson) {
     return [];
   }
-  const sources: ConfigSource[] = [{ scope: "global", path: join(homedir(), ".claude.json"), values: claudeJson }];
-  const configuredProjects = isRecord(claudeJson.projects) ? claudeJson.projects : {};
+  const sources: ConfigSource[] = [
+    {
+      scope: "global",
+      path: join(homedir(), ".claude.json"),
+      values: claudeJson,
+    },
+  ];
+  const configuredProjects = isRecord(claudeJson.projects)
+    ? claudeJson.projects
+    : {};
   for (const project of projects.filter((item) => item.kind === "local")) {
     const config = Object.entries(configuredProjects).find(([path]) =>
       projectPathMatches(resolve(path), resolve(project.path))
@@ -181,19 +227,33 @@ const collectProjectSources = (
       const path = join(project.path, ".mcp.json");
       const values = readJson(path, warnings);
       return values
-        ? [{ scope: "project" as const, path, values, projectId: project.directoryId, projectRoot: project.path }]
+        ? [
+            {
+              scope: "project" as const,
+              path,
+              values,
+              projectId: project.directoryId,
+              projectRoot: project.path,
+            },
+          ]
         : [];
     });
 
 const collectMcpServers = (
   sources: ConfigSource[],
   warnings: string[]
-): { servers: ImportedMcp[]; globalFound: boolean; projectIds: Set<string> } => {
+): {
+  servers: ImportedMcp[];
+  globalFound: boolean;
+  projectIds: Set<string>;
+} => {
   const servers = new Map<string, ImportedMcp>();
   let globalFound = false;
   const projectIds = new Set<string>();
   for (const source of sources) {
-    const declared = isRecord(source.values.mcpServers) ? source.values.mcpServers : null;
+    const declared = isRecord(source.values.mcpServers)
+      ? source.values.mcpServers
+      : null;
     if (!declared) {
       continue;
     }
@@ -203,9 +263,10 @@ const collectMcpServers = (
       projectIds.add(source.projectId);
     }
     for (const [index, [name, raw]] of Object.entries(declared).entries()) {
-      const id = source.scope === "global"
-        ? `${SOURCE}:global:${name}`
-        : `${SOURCE}:project:${source.projectId}:${name}`;
+      const id =
+        source.scope === "global"
+          ? `${SOURCE}:global:${name}`
+          : `${SOURCE}:project:${source.projectId}:${name}`;
       const server = toMcpServer(
         name,
         raw,
@@ -250,7 +311,10 @@ const collectPrompts = async (
   claudeHome: string,
   projects: WorkspaceDirectoryRecord[],
   warnings: string[]
-): Promise<{ prompts: SystemPromptItemInput[]; instructionPaths: string[] }> => {
+): Promise<{
+  prompts: SystemPromptItemInput[];
+  instructionPaths: string[];
+}> => {
   const prompts = new Map<string, SystemPromptItemInput>();
   const instructionPaths: string[] = [];
   const addFile = (
@@ -268,12 +332,33 @@ const collectPrompts = async (
     }
   };
 
-  addFile(`${SOURCE}:global:claude-md`, "Claude Code CLAUDE.md", join(claudeHome, "CLAUDE.md"), "global");
-  for (const path of await walkFiles(join(claudeHome, "rules"), (file) => file.endsWith(".md"))) {
-    addFile(`${SOURCE}:global:rule:${safeSegment(path)}`, "Claude Code rule", path, "global");
+  addFile(
+    `${SOURCE}:global:claude-md`,
+    "Claude Code CLAUDE.md",
+    join(claudeHome, "CLAUDE.md"),
+    "global"
+  );
+  for (const path of await walkFiles(join(claudeHome, "rules"), (file) =>
+    file.endsWith(".md")
+  )) {
+    addFile(
+      `${SOURCE}:global:rule:${safeSegment(path)}`,
+      "Claude Code rule",
+      path,
+      "global"
+    );
   }
-  for (const path of await walkFiles(join(claudeHome, "commands"), (file) => file.endsWith(".md"))) {
-    addFile(`${SOURCE}:global:command:${safeSegment(path)}`, "Claude Code command", path, "global", undefined, false);
+  for (const path of await walkFiles(join(claudeHome, "commands"), (file) =>
+    file.endsWith(".md")
+  )) {
+    addFile(
+      `${SOURCE}:global:command:${safeSegment(path)}`,
+      "Claude Code command",
+      path,
+      "global",
+      undefined,
+      false
+    );
   }
 
   for (const project of projects.filter((item) => item.kind === "local")) {
@@ -295,9 +380,13 @@ const collectPrompts = async (
       ["rule", join(project.path, ".claude", "rules")],
       ["command", join(project.path, ".claude", "commands")],
     ] as const) {
-      for (const path of await walkFiles(root, (file) => file.endsWith(".md"))) {
+      for (const path of await walkFiles(root, (file) =>
+        file.endsWith(".md")
+      )) {
         addFile(
-          `${SOURCE}:project:${project.directoryId}:${kind}:${safeSegment(path)}`,
+          `${SOURCE}:project:${project.directoryId}:${kind}:${safeSegment(
+            path
+          )}`,
           `Claude Code ${kind}`,
           path,
           "project",
@@ -330,7 +419,9 @@ const collectSkills = async (
       skills.push({
         sourceDir,
         scope,
-        ...(project ? { projectId: project.directoryId, projectRoot: project.path } : {}),
+        ...(project
+          ? { projectId: project.directoryId, projectRoot: project.path }
+          : {}),
       });
     }
   };
@@ -357,8 +448,16 @@ const buildContext = async (native: NativeBridge): Promise<ImportContext> => {
     collectSkills(claudeHome, projects),
   ]);
   const configPaths = [
-    { label: "User configuration", path: claudeJsonPath, found: existsSync(claudeJsonPath) },
-    { label: "User settings", path: join(claudeHome, "settings.json"), found: existsSync(join(claudeHome, "settings.json")) },
+    {
+      label: "User configuration",
+      path: claudeJsonPath,
+      found: existsSync(claudeJsonPath),
+    },
+    {
+      label: "User settings",
+      path: join(claudeHome, "settings.json"),
+      found: existsSync(join(claudeHome, "settings.json")),
+    },
   ];
   const source: ImportSource = {
     provider: SOURCE,
@@ -370,7 +469,8 @@ const buildContext = async (native: NativeBridge): Promise<ImportContext> => {
       path,
       found: true,
     })),
-    projectConfigCount: sources.filter((source) => source.scope === "project").length,
+    projectConfigCount: sources.filter((source) => source.scope === "project")
+      .length,
     warnings,
   };
   if (!source.sourceFound) {
@@ -388,16 +488,18 @@ export const discoverClaudeCodeImport = async (
   native: NativeBridge
 ): Promise<ImportSourceDiscovery> => {
   const context = await buildContext(native);
-  const skillCandidates = await Promise.all(context.skills.map(async (skill) => ({
-    type: "skill" as const,
-    provider: SOURCE,
-    scope: skill.scope,
-    originPath: skill.sourceDir,
-    logicalId: skillLogicalId(skill.sourceDir),
-    contentHash: await hashImportPath(skill.sourceDir),
-    ...(skill.projectId ? { projectId: skill.projectId } : {}),
-    ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
-  })));
+  const skillCandidates = await Promise.all(
+    context.skills.map(async (skill) => ({
+      type: "skill" as const,
+      provider: SOURCE,
+      scope: skill.scope,
+      originPath: skill.sourceDir,
+      logicalId: skillLogicalId(skill.sourceDir),
+      contentHash: await hashImportPath(skill.sourceDir),
+      ...(skill.projectId ? { projectId: skill.projectId } : {}),
+      ...(skill.projectRoot ? { projectRoot: skill.projectRoot } : {}),
+    }))
+  );
   const candidates: ImportCandidateInput[] = [
     ...context.mcpServers.map((server) => ({
       type: "mcp" as const,
@@ -416,7 +518,9 @@ export const discoverClaudeCodeImport = async (
       ...(server.projectId ? { projectId: server.projectId } : {}),
     })),
     ...context.prompts.map((prompt) => ({
-      type: prompt.promptId.includes(":command:") ? "command" as const : "prompt" as const,
+      type: prompt.promptId.includes(":command:")
+        ? ("command" as const)
+        : ("prompt" as const),
       provider: SOURCE,
       scope: prompt.scope ?? "global",
       originPath: context.source.sourceHome,
@@ -463,7 +567,9 @@ export const resolveClaudeCodeSelectedImports = async (
     }
   }
   for (const prompt of context.prompts) {
-    const type = prompt.promptId.includes(":command:") ? "command" as const : "prompt" as const;
+    const type = prompt.promptId.includes(":command:")
+      ? ("command" as const)
+      : ("prompt" as const);
     const input: ImportCandidateInput = {
       type,
       provider: SOURCE,
@@ -502,7 +608,12 @@ export const resolveClaudeCodeSelectedImports = async (
         ...(skill.projectId ? { projectId: skill.projectId } : {}),
         skill: {
           sourceDir: skill.sourceDir,
-          destinationDir: skillDestination(SOURCE, skill.sourceDir, skill.scope, skill.projectRoot),
+          destinationDir: skillDestination(
+            SOURCE,
+            skill.sourceDir,
+            skill.scope,
+            skill.projectRoot
+          ),
         },
       });
     }
@@ -518,6 +629,6 @@ export const previewClaudeCodeImport = async (
 export const importClaudeCode = async (
   native: NativeBridge
 ): Promise<ReadonlyImportResult> => ({
-  ...await previewClaudeCodeImport(native),
+  ...(await previewClaudeCodeImport(native)),
   applied: false,
 });

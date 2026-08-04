@@ -250,8 +250,8 @@
     .confirm-dialog-btn.confirm, .tool-call-user-question-submit,
     .tool-call-plan-approval-approve, .project-sensitive-command-save,
     .personalization-save-btn,
-    .branch-create-submit-btn, .git-commit-btn.primary,
-    .mcp-editor-mode-btn.active) {
+    .branch-create-submit-btn, .git-commit-btn, .git-commit-btn.primary,
+    .memo-new-btn, .scheduled-tasks-create-btn, .mcp-editor-mode-btn.active) {
   border-color: var(--accent-orange);
   background: var(--accent-orange);
   color: #fffaf5;
@@ -263,7 +263,8 @@
     .confirm-dialog-btn.confirm, .tool-call-user-question-submit,
     .tool-call-plan-approval-approve, .project-sensitive-command-save,
     .personalization-save-btn,
-    .branch-create-submit-btn, .git-commit-btn.primary,
+    .branch-create-submit-btn, .git-commit-btn, .git-commit-btn.primary,
+    .memo-new-btn, .scheduled-tasks-create-btn,
     .mcp-editor-mode-btn.active):hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent-orange) 88%, var(--text-primary));
 }

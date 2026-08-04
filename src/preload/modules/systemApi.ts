@@ -762,6 +762,13 @@ export const windowApi = {
   stopWindowDrag: (): Promise<void> => ipcRenderer.invoke("window:stop-drag"),
   writeImageToClipboard: (dataUrl: string): Promise<void> =>
     ipcRenderer.invoke("clipboard:write-image", dataUrl),
+  readClipboardText: (): Promise<string> =>
+    ipcRenderer.invoke("clipboard:read-text"),
+  writeClipboardText: (text: string): Promise<void> =>
+    ipcRenderer.invoke("clipboard:write-text", text),
+  /** 在系统文件管理器中显示指定路径（文件高亮选中，目录直接打开）。 */
+  showItemInFolder: (path: string): Promise<void> =>
+    ipcRenderer.invoke("shell:show-item-in-folder", path),
   clearBrowserCache: (): Promise<void> =>
     ipcRenderer.invoke("browser:clear-cache"),
   clearBrowserCookies: (): Promise<void> =>

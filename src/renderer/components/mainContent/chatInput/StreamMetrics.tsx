@@ -1,9 +1,21 @@
-import { ArrowDown, Clock, Gauge, Pause, Play, Timer } from "lucide-react";
+import {
+  ArrowDown,
+  Circle,
+  Clock,
+  Gauge,
+  Pause,
+  Play,
+  Timer,
+} from "lucide-react";
 import { memo, useEffect, useState } from "react";
+import { useI18n } from "../../../i18n";
 
 export type StreamMetricsProps = {
+  /** Cumulative streamed tokens across every model iteration in the run. */
   tokenCount: number;
+  /** Complete stream elapsed time accumulated across all run iterations. */
   elapsedMs: number;
+  /** TTFT captured from the run's first model iteration. */
   ttftMs: number;
   /** Wall-clock timestamp (Date.now()) captured once when an agent loop
    *  starts, sourced from the active conversation session state. Drives the
@@ -12,6 +24,16 @@ export type StreamMetricsProps = {
   startedAt: number;
   /** Whether the agent loop is currently paused. */
   isPaused: boolean;
+  /** One-based index of the active top-level TODO step. */
+  taskCurrent: number;
+  /** Total number of top-level TODO steps. */
+  taskTotal: number;
+  /** Number of unique files changed in the active conversation. */
+  changedFileCount: number;
+  additions: number;
+  deletions: number;
+  /** Open the detailed file-changes panel. */
+  onOpenFileChanges: () => void;
   /** Pause the agent loop (only valid while streaming and not already paused). */
   onPause: () => void;
   /** Resume a paused agent loop. */
@@ -22,7 +44,7 @@ const formatTokenCount = (count: number): string =>
   count >= 1000 ? `${(count / 1000).toFixed(1)}k` : String(count);
 
 const formatDuration = (ms: number): string => {
-  const seconds = Math.round(ms / 1000);
+  const seconds = Math.floor(ms / 1000);
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
@@ -47,15 +69,15 @@ const formatTokPerSec = (tokens: number, elapsedMs: number): string => {
 
 /**
  * Fixed streaming metrics bar displayed above the input box while the AI
- * is generating a response. Shows token count, elapsed time, TTFT, and
- * tokens/sec in real time.
+ * is generating a response. Shows run-level token count, first-iteration
+ * TTFT, cumulative stream speed, and wall-clock elapsed time.
  *
  * The elapsed timer is driven by `startedAt` — a wall-clock timestamp the
  * agent loop captures once when it begins and resets to 0 when it ends.
- * This keeps the timer independent of the backend's per-iteration
- * `elapsedMs` (which resets on every createResponseStream call) and lets
- * each parallel streaming conversation carry its own anchor, so switching
- * between them no longer resets the timer.
+ * This is intentionally independent of `elapsedMs`, which contains the sum of
+ * complete per-iteration stream durations used to calculate the run's tok/s.
+ * Each parallel streaming conversation carries its own timer anchor, so
+ * switching between them does not reset the displayed wall-clock duration.
  *
  * The pause/resume button is rendered on the left edge of the bar. It
  * allows the user to pause the agent loop before the next iteration
@@ -69,9 +91,16 @@ export const StreamMetrics = memo(
     ttftMs,
     startedAt,
     isPaused,
+    taskCurrent,
+    taskTotal,
+    changedFileCount,
+    additions,
+    deletions,
+    onOpenFileChanges,
     onPause,
     onResume,
   }: StreamMetricsProps): React.JSX.Element => {
+    const { t } = useI18n();
     const hasTtft = typeof ttftMs === "number" && ttftMs > 0;
     const isActive = typeof startedAt === "number" && startedAt > 0;
 
@@ -102,6 +131,8 @@ export const StreamMetrics = memo(
         ? formatTokPerSec(tokenCount, elapsedMs)
         : "--";
     const hasTps = tps !== "--";
+    const hasWorkSummary =
+      taskTotal > 0 || changedFileCount > 0 || additions > 0 || deletions > 0;
 
     return (
       <span className="stream-metrics">
@@ -110,8 +141,16 @@ export const StreamMetrics = memo(
           className={`stream-metrics-pause-btn${
             isPaused ? " is-paused" : ""
           }`}
-          aria-label={isPaused ? "Resume" : "Pause"}
-          title={isPaused ? "Resume" : "Pause"}
+          aria-label={
+            isPaused
+              ? t("chat.streamMetrics.resume")
+              : t("chat.streamMetrics.pause")
+          }
+          title={
+            isPaused
+              ? t("chat.streamMetrics.resume")
+              : t("chat.streamMetrics.pause")
+          }
           onClick={isPaused ? onResume : onPause}
         >
           {isPaused ? (
@@ -121,6 +160,45 @@ export const StreamMetrics = memo(
           )}
         </button>
         <span className="stream-metrics-sep" />
+        {hasWorkSummary ? (
+          <>
+            <span className="stream-metrics-work-summary">
+              {taskTotal > 0 ? (
+                <span className="stream-metrics-task-progress">
+                  <Circle
+                    aria-hidden="true"
+                    size={11}
+                    className="stream-metrics-work-icon"
+                  />
+                  <span>
+                    {t("chat.streamMetrics.step", {
+                      values: { current: taskCurrent, total: taskTotal },
+                    })}
+                  </span>
+                </span>
+              ) : null}
+              {taskTotal > 0 ? (
+                <span className="stream-metrics-work-dot">·</span>
+              ) : null}
+              <button
+                type="button"
+                className="stream-metrics-file-progress"
+                aria-label={t("chat.fileChanges.toggle")}
+                title={t("chat.fileChanges.toggle")}
+                onClick={onOpenFileChanges}
+              >
+                <span>
+                  {t("chat.streamMetrics.filesChanged", {
+                    values: { count: changedFileCount },
+                  })}
+                </span>
+                <span className="stream-metrics-additions">+{additions}</span>
+                <span className="stream-metrics-deletions">-{deletions}</span>
+              </button>
+            </span>
+            <span className="stream-metrics-sep" />
+          </>
+        ) : null}
         <span
           className={`stream-metrics-metric stream-metrics-elapsed${
             isActive ? " is-active" : ""
