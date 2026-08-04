@@ -1,26 +1,37 @@
 import {
   CircleCheck,
   CirclePause,
+  Download,
   FileWarning,
+  Globe2,
   Loader2,
+  Plus,
   Play,
   RefreshCw,
   Square,
   ShieldCheck,
+  Store,
   Trash2,
   TriangleAlert,
   Unplug,
   Wrench,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
-import type { PluginComponentRecord, PluginRecord, PluginRuntimePermission } from "../../../preload";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type {
+  PluginComponentRecord,
+  PluginMarketplaceCatalog,
+  PluginMarketplacePlugin,
+  PluginRecord,
+  PluginRuntimePermission,
+} from "../../../preload";
 import { useI18n } from "../../i18n";
 import { AutoDismissNotice } from "../AutoDismissNotice";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 
 type PluginsSettingsPanelProps = {
   onClose?: () => void;
+  embedded?: boolean;
 };
 
 const componentLabel = (component: PluginComponentRecord): string =>
@@ -43,9 +54,17 @@ const runtimePermissionLabel = (permission: PluginRuntimePermission): string =>
       ? "Network"
       : "Child process";
 
-export function PluginsSettingsPanel({ onClose }: PluginsSettingsPanelProps): React.JSX.Element {
+export function PluginsSettingsPanel({ onClose, embedded = false }: PluginsSettingsPanelProps): React.JSX.Element {
   const { t } = useI18n();
   const [plugins, setPlugins] = useState<PluginRecord[]>([]);
+  const [marketplaces, setMarketplaces] = useState<PluginMarketplaceCatalog[]>([]);
+  const [selectedMarketplaceId, setSelectedMarketplaceId] = useState("");
+  const [marketplaceSource, setMarketplaceSource] = useState("");
+  const [showMarketplaceForm, setShowMarketplaceForm] = useState(false);
+  const [isAddingMarketplace, setIsAddingMarketplace] = useState(false);
+  const [busyMarketplaceId, setBusyMarketplaceId] = useState("");
+  const [installingPluginKey, setInstallingPluginKey] = useState("");
+  const [pendingMarketplaceRemoval, setPendingMarketplaceRemoval] = useState<PluginMarketplaceCatalog | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [busyPluginId, setBusyPluginId] = useState("");
   const [expandedPluginId, setExpandedPluginId] = useState("");
@@ -68,9 +87,25 @@ export function PluginsSettingsPanel({ onClose }: PluginsSettingsPanelProps): Re
     }
   }, [t]);
 
+  const loadMarketplaces = useCallback(async (): Promise<void> => {
+    try {
+      const next = await window.snow.listPluginMarketplaces();
+      setMarketplaces(next);
+      setSelectedMarketplaceId((current) => current && next.some((item) => item.marketplaceId === current)
+        ? current
+        : next[0]?.marketplaceId ?? "");
+    } catch (loadError) {
+      setMarketplaces([]);
+      setError(loadError instanceof Error ? loadError.message : t("settings.pluginsMarketplaceLoadError", {
+        defaultValue: "Marketplace could not be loaded",
+      }));
+    }
+  }, [t]);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadMarketplaces();
+  }, [load, loadMarketplaces]);
 
   useEffect(() => {
     const hasActiveRuntime = plugins.some((plugin) => {
@@ -194,12 +229,96 @@ export function PluginsSettingsPanel({ onClose }: PluginsSettingsPanelProps): Re
     }
   };
 
+  const addMarketplace = async (): Promise<void> => {
+    const source = marketplaceSource.trim();
+    if (!source) return;
+    setIsAddingMarketplace(true);
+    setError("");
+    setStatus("");
+    try {
+      const next = await window.snow.addPluginMarketplace(source);
+      setMarketplaces(next);
+      setSelectedMarketplaceId(next[0]?.marketplaceId ?? "");
+      setMarketplaceSource("");
+      setShowMarketplaceForm(false);
+      setStatus(t("settings.pluginsMarketplaceAddSuccess", { defaultValue: "Marketplace added." }));
+    } catch (addError) {
+      setError(addError instanceof Error ? addError.message : t("settings.pluginsMarketplaceAddError", {
+        defaultValue: "Failed to add marketplace",
+      }));
+    } finally {
+      setIsAddingMarketplace(false);
+    }
+  };
+
+  const refreshMarketplace = async (marketplace: PluginMarketplaceCatalog): Promise<void> => {
+    setBusyMarketplaceId(marketplace.marketplaceId);
+    setError("");
+    setStatus("");
+    try {
+      const next = await window.snow.updatePluginMarketplace(marketplace.marketplaceId);
+      setMarketplaces(next);
+      setStatus(t("settings.pluginsMarketplaceUpdateSuccess", { defaultValue: "Marketplace refreshed." }));
+    } catch (refreshError) {
+      setError(refreshError instanceof Error ? refreshError.message : t("settings.pluginsMarketplaceUpdateError", {
+        defaultValue: "Failed to refresh marketplace",
+      }));
+    } finally {
+      setBusyMarketplaceId("");
+    }
+  };
+
+  const removeMarketplace = async (): Promise<void> => {
+    const marketplace = pendingMarketplaceRemoval;
+    if (!marketplace) return;
+    setPendingMarketplaceRemoval(null);
+    setBusyMarketplaceId(marketplace.marketplaceId);
+    setError("");
+    setStatus("");
+    try {
+      await window.snow.removePluginMarketplace(marketplace.marketplaceId);
+      const next = marketplaces.filter((item) => item.marketplaceId !== marketplace.marketplaceId);
+      setMarketplaces(next);
+      setSelectedMarketplaceId(next[0]?.marketplaceId ?? "");
+      setStatus(t("settings.pluginsMarketplaceRemoveSuccess", { defaultValue: "Marketplace removed." }));
+    } catch (removeError) {
+      setError(removeError instanceof Error ? removeError.message : t("settings.pluginsMarketplaceRemoveError", {
+        defaultValue: "Failed to remove marketplace",
+      }));
+    } finally {
+      setBusyMarketplaceId("");
+    }
+  };
+
+  const installMarketplacePlugin = async (marketplace: PluginMarketplaceCatalog, plugin: PluginMarketplacePlugin): Promise<void> => {
+    const key = `${marketplace.marketplaceId}:${plugin.pluginName}`;
+    setInstallingPluginKey(key);
+    setError("");
+    setStatus("");
+    try {
+      await window.snow.installPluginFromMarketplace(marketplace.marketplaceId, plugin.pluginName);
+      await Promise.all([load(), loadMarketplaces()]);
+      setStatus(t("settings.pluginsMarketplaceInstallSuccess", { defaultValue: "Plugin installed." }));
+    } catch (installError) {
+      setError(installError instanceof Error ? installError.message : t("settings.pluginsMarketplaceInstallError", {
+        defaultValue: "Failed to install Plugin",
+      }));
+    } finally {
+      setInstallingPluginKey("");
+    }
+  };
+
   const enabledCount = plugins.filter((plugin) => plugin.state === "enabled").length;
   const brokenCount = plugins.filter((plugin) => plugin.state === "broken").length;
+  const selectedMarketplace = marketplaces.find((item) => item.marketplaceId === selectedMarketplaceId) ?? null;
+  const catalogPlugins = useMemo(() => selectedMarketplace?.plugins ?? [], [selectedMarketplace]);
 
   return (
-    <div className="api-settings-page plugins-settings-page" role="region">
-      <div className="api-settings-page-header">
+    <div
+      className={embedded ? "plugins-settings-embedded" : "api-settings-page plugins-settings-page"}
+      role="region"
+    >
+      <div className={`api-settings-page-header ${embedded ? "plugins-settings-embedded-header" : ""}`}>
         <div className="api-settings-title-group">
           <strong>{t("settings.pluginsSettings", { defaultValue: "Plugins" })}</strong>
           <span className="settings-item-description">
@@ -239,6 +358,132 @@ export function PluginsSettingsPanel({ onClose }: PluginsSettingsPanelProps): Re
 
       <AutoDismissNotice message={status} tone="success" onDismiss={() => setStatus("")} />
       <AutoDismissNotice message={error} tone="error" onDismiss={() => setError("")} />
+
+      <section className="api-settings-form-section plugins-marketplaces-section" aria-label={t("settings.pluginsMarketplaces", { defaultValue: "Plugin marketplaces" })}>
+        <div className="api-settings-form-section-header">
+          <div className="plugins-marketplaces-title">
+            <strong className="api-settings-form-section-title">
+              {t("settings.pluginsMarketplaces", { defaultValue: "Plugin marketplaces" })}
+            </strong>
+            <span className="settings-item-description">
+              {t("settings.pluginsMarketplacesInfo", { defaultValue: "Add a local or remote marketplace, then install Plugins from its catalog." })}
+            </span>
+          </div>
+          <button
+            className="api-settings-form-btn secondary plugins-marketplace-add-button"
+            type="button"
+            onClick={() => setShowMarketplaceForm((current) => !current)}
+            disabled={isAddingMarketplace || Boolean(busyMarketplaceId)}
+          >
+            <Plus size={14} />
+            <span>{t("settings.pluginsMarketplaceAdd", { defaultValue: "Add marketplace" })}</span>
+          </button>
+        </div>
+        {showMarketplaceForm ? (
+          <div className="plugins-marketplace-add-form">
+            <label className="api-settings-field">
+              <span>{t("settings.pluginsMarketplaceSourceLabel", { defaultValue: "Marketplace source" })}</span>
+              <input
+                autoFocus
+                value={marketplaceSource}
+                onChange={(event) => setMarketplaceSource(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void addMarketplace();
+                  }
+                }}
+                placeholder={t("settings.pluginsMarketplaceSourcePlaceholder", { defaultValue: "./my-marketplace, owner/repo, or https://example.com/marketplace.json" })}
+                disabled={isAddingMarketplace}
+              />
+            </label>
+            <div className="api-settings-form-actions">
+              <button className="api-settings-form-btn secondary" type="button" onClick={() => setShowMarketplaceForm(false)} disabled={isAddingMarketplace}>
+                <span>{t("settings.pluginsMarketplaceAddCancel", { defaultValue: "Cancel" })}</span>
+              </button>
+              <button className="api-settings-form-btn primary" type="button" onClick={() => void addMarketplace()} disabled={isAddingMarketplace || !marketplaceSource.trim()}>
+                {isAddingMarketplace ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}
+                <span>{t(isAddingMarketplace ? "settings.pluginsMarketplaceAdding" : "settings.pluginsMarketplaceAddConfirm", { defaultValue: isAddingMarketplace ? "Adding marketplace..." : "Add marketplace" })}</span>
+              </button>
+            </div>
+            <small className="plugins-marketplace-trust-note">
+              <ShieldCheck size={13} />
+              {t("settings.pluginsMarketplaceTrustNote", { defaultValue: "Only install Plugins from sources you trust. Snow reads declarative components and does not run install scripts." })}
+            </small>
+          </div>
+        ) : null}
+        {marketplaces.length === 0 ? (
+          <div className="settings-empty-state">{t("settings.pluginsMarketplaceEmpty", { defaultValue: "No marketplaces added." })}</div>
+        ) : (
+          <div className="plugins-marketplace-list">
+            {marketplaces.map((marketplace) => {
+              const selected = marketplace.marketplaceId === selectedMarketplaceId;
+              const busy = busyMarketplaceId === marketplace.marketplaceId;
+              return (
+                <article className={`plugins-marketplace-item ${selected ? "selected" : ""}`} key={marketplace.marketplaceId}>
+                  <button className="plugins-marketplace-select" type="button" onClick={() => setSelectedMarketplaceId(marketplace.marketplaceId)} aria-pressed={selected}>
+                    <Store size={15} />
+                    <span className="plugins-marketplace-item-copy">
+                      <strong>{marketplace.displayName || marketplace.name}</strong>
+                      <small>{marketplace.name} · {t(`settings.pluginsMarketplaceSourceType.${marketplace.sourceType}`, { defaultValue: marketplace.sourceType })}</small>
+                    </span>
+                    <span className="plugins-marketplace-count">{marketplace.plugins.length}</span>
+                  </button>
+                  <div className="plugins-marketplace-item-actions">
+                    <button className="icon-btn ghost" type="button" onClick={() => void refreshMarketplace(marketplace)} disabled={busy || Boolean(busyMarketplaceId) || isAddingMarketplace} aria-label={t("settings.pluginsMarketplaceUpdate", { defaultValue: "Refresh marketplace" })} title={t("settings.pluginsMarketplaceUpdate", { defaultValue: "Refresh marketplace" })}>
+                      {busy ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+                    </button>
+                    <button className="icon-btn ghost danger" type="button" onClick={() => setPendingMarketplaceRemoval(marketplace)} disabled={busy || Boolean(busyMarketplaceId) || isAddingMarketplace} aria-label={t("settings.pluginsMarketplaceRemove", { defaultValue: "Remove marketplace" })} title={t("settings.pluginsMarketplaceRemove", { defaultValue: "Remove marketplace" })}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {selectedMarketplace ? (
+        <section className="api-settings-form-section plugins-marketplace-catalog" aria-label={t("settings.pluginsMarketplaceCatalog", { defaultValue: "Available Plugins" })}>
+          <div className="api-settings-form-section-header">
+            <div className="plugins-marketplaces-title">
+              <strong className="api-settings-form-section-title">{selectedMarketplace.displayName || selectedMarketplace.name}</strong>
+              <span className="settings-item-description">{selectedMarketplace.description || selectedMarketplace.sourcePath}</span>
+            </div>
+            <Globe2 size={15} className="plugins-marketplace-catalog-icon" />
+          </div>
+          {selectedMarketplace.loadError ? <div className="plugins-marketplace-load-error"><TriangleAlert size={14} />{selectedMarketplace.loadError}</div> : null}
+          {catalogPlugins.length === 0 ? (
+            <div className="settings-empty-state">{t("settings.pluginsMarketplaceCatalogEmpty", { defaultValue: "This marketplace has no installable Plugins." })}</div>
+          ) : (
+            <div className="plugins-marketplace-plugin-list">
+              {catalogPlugins.map((plugin) => {
+                const key = `${selectedMarketplace.marketplaceId}:${plugin.pluginName}`;
+                const installing = installingPluginKey === key;
+                return (
+                  <article className={`plugins-marketplace-plugin ${plugin.supported ? "" : "unsupported"}`} key={plugin.pluginName}>
+                    <div className="plugins-marketplace-plugin-copy">
+                      <strong>{plugin.displayName}</strong>
+                      <small>{plugin.pluginName}{plugin.version ? ` · ${plugin.version}` : ""}{plugin.category ? ` · ${plugin.category}` : ""}</small>
+                      {plugin.description ? <p>{plugin.description}</p> : null}
+                      {plugin.unsupportedReason ? <small className="plugins-marketplace-plugin-error">{plugin.unsupportedReason}</small> : null}
+                    </div>
+                    {plugin.supported ? (
+                      <button className="api-settings-form-btn secondary plugins-marketplace-install-button" type="button" onClick={() => void installMarketplacePlugin(selectedMarketplace, plugin)} disabled={installing || Boolean(installingPluginKey) || Boolean(busyMarketplaceId)}>
+                        {installing ? <Loader2 size={14} className="spin" /> : plugin.installedPluginId ? <RefreshCw size={14} /> : <Download size={14} />}
+                        <span>{t(installing ? "settings.pluginsMarketplaceInstalling" : plugin.installedPluginId ? "settings.pluginsUpdate" : "settings.pluginsMarketplaceInstall", { defaultValue: installing ? "Installing..." : plugin.installedPluginId ? "Update Plugin" : "Install Plugin" })}</span>
+                      </button>
+                    ) : (
+                      <span className="plugins-marketplace-unsupported">{t("settings.pluginsMarketplaceUnsupported", { defaultValue: "Unsupported" })}</span>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      ) : null}
 
       <section className="api-settings-form-section plugins-settings-list" aria-label={t("settings.pluginsList", { defaultValue: "Plugin list" })}>
         {plugins.length === 0 && !isLoading ? (
@@ -350,6 +595,17 @@ export function PluginsSettingsPanel({ onClose }: PluginsSettingsPanelProps): Re
         onConfirm={() => void startRuntime()}
         onCancel={() => setPendingRuntimeStart(null)}
         variant="warning"
+      />
+
+      <ConfirmDialog
+        open={Boolean(pendingMarketplaceRemoval)}
+        title={t("settings.pluginsMarketplaceRemove", { defaultValue: "Remove marketplace" })}
+        message={t("settings.pluginsMarketplaceRemoveConfirm", { defaultValue: "Remove this marketplace and its Snow cache? Installed Plugins are kept." })}
+        confirmLabel={t("settings.pluginsMarketplaceRemove", { defaultValue: "Remove marketplace" })}
+        cancelLabel={t("common.cancel", { defaultValue: "Cancel" })}
+        onConfirm={() => void removeMarketplace()}
+        onCancel={() => setPendingMarketplaceRemoval(null)}
+        variant="danger"
       />
 
       <ConfirmDialog

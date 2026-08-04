@@ -29,11 +29,16 @@ import { discoverAllImportCandidates } from "../../importConfig/unifiedDiscovery
 import { ensureLegacyImportResourceMigration } from "../../importConfig/legacyImportMigration";
 import {
   commitPluginImports,
+  addPluginMarketplace,
   ensureLegacyCodexPluginMigration,
+  installPluginFromMarketplace,
+  listPluginMarketplaces,
   refreshManagedPlugins,
+  removePluginMarketplace,
   removeManagedPlugin,
   selectedPluginImports,
   setManagedPluginEnabled,
+  updatePluginMarketplace,
   updateManagedPlugin,
 } from "../../importConfig/pluginManager";
 import { PluginRuntimeManager } from "../../plugins/pluginRuntimeManager";
@@ -187,6 +192,27 @@ export const registerImportConfigHandlers = (native: NativeBridge, pluginRuntime
     const id = pluginIdFrom(pluginId);
     await pluginRuntime.stop(await getPlugin(id));
     await removeManagedPlugin(native, id);
+  });
+  ipcMain.handle("plugins:marketplaces:list", async () => {
+    await ensureLegacyCodexPluginMigration(native);
+    return listPluginMarketplaces(native);
+  });
+  ipcMain.handle("plugins:marketplaces:add", async (_event, source: unknown) => {
+    if (typeof source !== "string" || !source.trim()) throw new Error("Marketplace source is required");
+    return addPluginMarketplace(native, source);
+  });
+  ipcMain.handle("plugins:marketplaces:update", async (_event, marketplaceId: unknown) => {
+    if (typeof marketplaceId !== "string" || !marketplaceId.trim()) throw new Error("Marketplace ID is required");
+    return updatePluginMarketplace(native, marketplaceId);
+  });
+  ipcMain.handle("plugins:marketplaces:remove", async (_event, marketplaceId: unknown) => {
+    if (typeof marketplaceId !== "string" || !marketplaceId.trim()) throw new Error("Marketplace ID is required");
+    return removePluginMarketplace(native, marketplaceId);
+  });
+  ipcMain.handle("plugins:marketplaces:install", async (_event, marketplaceId: unknown, pluginName: unknown) => {
+    if (typeof marketplaceId !== "string" || !marketplaceId.trim()) throw new Error("Marketplace ID is required");
+    if (typeof pluginName !== "string" || !pluginName.trim()) throw new Error("Plugin name is required");
+    await installPluginFromMarketplace(native, marketplaceId, pluginName);
   });
   ipcMain.handle("import-config:release-managed-resource", async (_event, value: unknown) => {
     const input = parseReleaseInput(value);

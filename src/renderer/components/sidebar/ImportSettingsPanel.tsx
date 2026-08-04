@@ -23,6 +23,7 @@ import type {
 } from "../../../preload";
 import { useI18n } from "../../i18n";
 import { AutoDismissNotice } from "../AutoDismissNotice";
+import { PluginsSettingsPanel } from "./PluginsSettingsPanel";
 
 type ImportSettingsPanelProps = {
   onClose?: () => void;
@@ -409,6 +410,13 @@ export function ImportSettingsPanel({ onClose }: ImportSettingsPanelProps): Reac
           ) : null}
         </>
       ) : null}
+
+      <section
+        className="import-settings-plugins"
+        aria-label={t("settings.pluginsSettings", { defaultValue: "Plugins" })}
+      >
+        <PluginsSettingsPanel embedded />
+      </section>
     </div>
   );
 }

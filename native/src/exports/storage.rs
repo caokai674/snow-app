@@ -8,7 +8,7 @@ use crate::storage::{
     CustomHeaderSchemeInput, CustomHeaderSchemeRecord, HookConfigInput, HookConfigRecord,
     ImportResourceInput, ImportResourceRecord, ImportResourceRelease, ImportResourceReleaseInput,
     McpServerConfigInput, McpServerConfigRecord, ProjectMcpServerConfigRecord,
-    PluginInput, PluginRecord,
+    PluginInput, PluginMarketplaceInput, PluginMarketplaceRecord, PluginRecord,
     ProjectSensitiveCommandConfigInput, ProjectSensitiveCommandConfigRecord,
     SensitiveCommandConfigInput, SensitiveCommandConfigRecord, SensitiveCommandMatchResult,
     SubAgentConfigInput, SubAgentConfigRecord, SystemPromptItemInput, SystemPromptItemRecord,
@@ -820,6 +820,27 @@ pub async fn set_plugin_state(plugin_id: String, state: String) -> napi::Result<
 #[napi]
 pub async fn delete_plugin(plugin_id: String) -> napi::Result<()> {
     tokio::task::spawn_blocking(move || crate::storage::delete_plugin(plugin_id))
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn list_plugin_marketplaces() -> napi::Result<Vec<PluginMarketplaceRecord>> {
+    tokio::task::spawn_blocking(crate::storage::list_plugin_marketplaces)
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn upsert_plugin_marketplace(item: PluginMarketplaceInput) -> napi::Result<()> {
+    tokio::task::spawn_blocking(move || crate::storage::upsert_plugin_marketplace(item))
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn delete_plugin_marketplace(marketplace_id: String) -> napi::Result<()> {
+    tokio::task::spawn_blocking(move || crate::storage::delete_plugin_marketplace(marketplace_id))
         .await
         .map_err(map_spawn_error)?
 }

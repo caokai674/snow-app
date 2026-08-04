@@ -2,6 +2,43 @@ import type { ImportProvider, ImportScope } from "./importDiscovery";
 
 export type PluginState = "enabled" | "disabled" | "update-available" | "broken";
 
+export type PluginMarketplaceSourceType = "local" | "github" | "git" | "url";
+
+export type PluginMarketplaceInput = {
+  marketplaceId: string;
+  name: string;
+  displayName: string;
+  description: string;
+  sourceType: PluginMarketplaceSourceType;
+  sourcePath: string;
+  refName?: string;
+  cachePath?: string;
+  manifestPath: string;
+  contentHash: string;
+};
+
+export type PluginMarketplaceRecord = PluginMarketplaceInput & {
+  addedAt: string;
+  updatedAt: string;
+};
+
+export type PluginMarketplacePlugin = {
+  pluginName: string;
+  displayName: string;
+  description: string;
+  version: string;
+  category: string;
+  tags: string[];
+  supported: boolean;
+  unsupportedReason?: string;
+  installedPluginId?: string;
+};
+
+export type PluginMarketplaceCatalog = PluginMarketplaceRecord & {
+  plugins: PluginMarketplacePlugin[];
+  loadError?: string;
+};
+
 export type PluginRuntimePermission = "storage" | "network" | "child-process";
 
 export type PluginRuntimeDeclaration = {

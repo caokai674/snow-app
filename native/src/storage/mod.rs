@@ -333,6 +333,36 @@ pub struct PluginRecord {
 }
 
 #[napi(object)]
+pub struct PluginMarketplaceInput {
+    pub marketplace_id: String,
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub source_type: String,
+    pub source_path: String,
+    pub ref_name: Option<String>,
+    pub cache_path: Option<String>,
+    pub manifest_path: String,
+    pub content_hash: String,
+}
+
+#[napi(object)]
+pub struct PluginMarketplaceRecord {
+    pub marketplace_id: String,
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub source_type: String,
+    pub source_path: String,
+    pub ref_name: Option<String>,
+    pub cache_path: Option<String>,
+    pub manifest_path: String,
+    pub content_hash: String,
+    pub added_at: String,
+    pub updated_at: String,
+}
+
+#[napi(object)]
 pub struct SubAgentConfigInput {
     pub agent_id: String,
     pub name: String,
@@ -1124,6 +1154,21 @@ pub fn set_plugin_state(plugin_id: String, state: String) -> Result<()> {
 pub fn delete_plugin(plugin_id: String) -> Result<()> {
     let database_path = ensure_database_file()?;
     services::plugins::delete_plugin(&database_path, &plugin_id)
+}
+
+pub fn list_plugin_marketplaces() -> Result<Vec<PluginMarketplaceRecord>> {
+    let database_path = ensure_database_file()?;
+    services::plugin_marketplaces::list_plugin_marketplaces(&database_path)
+}
+
+pub fn upsert_plugin_marketplace(item: PluginMarketplaceInput) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    services::plugin_marketplaces::upsert_plugin_marketplace(&database_path, &item)
+}
+
+pub fn delete_plugin_marketplace(marketplace_id: String) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    services::plugin_marketplaces::delete_plugin_marketplace(&database_path, &marketplace_id)
 }
 pub fn list_sub_agent_configs() -> Result<Vec<SubAgentConfigRecord>> {
     let database_path = ensure_database_file()?;

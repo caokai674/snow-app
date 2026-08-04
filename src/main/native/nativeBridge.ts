@@ -341,6 +341,18 @@ export const loadNativeBridge = (): NativeBridge => {
         Promise.reject(
           new Error("Rust native bridge is required to delete plugins")
         ),
+      listPluginMarketplaces: () =>
+        Promise.reject(
+          new Error("Rust native bridge is required to list plugin marketplaces")
+        ),
+      upsertPluginMarketplace: () =>
+        Promise.reject(
+          new Error("Rust native bridge is required to write plugin marketplaces")
+        ),
+      deletePluginMarketplace: () =>
+        Promise.reject(
+          new Error("Rust native bridge is required to delete plugin marketplaces")
+        ),
       listHookConfigs: () =>
         Promise.reject(
           new Error("Rust native bridge is required to list hook configs")

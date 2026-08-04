@@ -5,9 +5,11 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
+import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { mkdtempSync } from "node:fs";
 import type { ImportCommitItemResult, ImportProvider, ImportScope } from "../../shared/importDiscovery";
 import type { ImportResourceInput } from "../../shared/importResources";
@@ -15,6 +17,10 @@ import type {
   PluginComponentInput,
   PluginComponentRecord,
   PluginInput,
+  PluginMarketplaceCatalog,
+  PluginMarketplacePlugin,
+  PluginMarketplaceRecord,
+  PluginMarketplaceSourceType,
   PluginRecord,
   PluginRuntimeDeclaration,
   PluginRuntimePermission,
@@ -61,6 +67,8 @@ const PLUGIN_MCP_SOURCE = "snow-plugin";
 const PLUGIN_SKILL_ROOT = "plugins";
 const DEFAULT_RUNTIME_TIMEOUT_MS = 30_000;
 const MAX_RUNTIME_TIMEOUT_MS = 300_000;
+const MARKETPLACE_FETCH_TIMEOUT_MS = 30_000;
+const MARKETPLACE_MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 const runtimePermissions = new Set<PluginRuntimePermission>([
   "storage",
   "network",
@@ -69,6 +77,11 @@ const runtimePermissions = new Set<PluginRuntimePermission>([
 
 const safeSegment = (value: string): string =>
   value.trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\.\.+/g, ".") || "plugin";
+
+const isWithinDirectory = (path: string, root: string): boolean => {
+  const relativePath = relative(resolve(root), resolve(path));
+  return relativePath === "" || (!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath));
+};
 
 const readJson = (path: string, warnings: string[]): Record<string, unknown> | null => {
   try {
@@ -405,6 +418,7 @@ const discoverManifestPlugins = async (native: NativeBridge): Promise<PluginImpo
     join(codexHome, "plugins"),
     join(homedir(), ".agents", "plugins"),
     join(homedir(), "plugins"),
+    marketplacePluginStorageRoot(),
     ...projects.filter((item) => item.kind === "local").flatMap((item) => [
       join(item.path, ".agents", "plugins"),
       join(item.path, "plugins"),
@@ -415,6 +429,7 @@ const discoverManifestPlugins = async (native: NativeBridge): Promise<PluginImpo
     join(claudeHome, "plugins", "cache"),
     join(claudeHome, "plugins", "marketplaces"),
     join(claudeHome, "plugins"),
+    marketplacePluginStorageRoot(),
     ...projects.filter((item) => item.kind === "local").map((item) => join(item.path, ".claude", "plugins")),
   ];
   const definitions = [
@@ -512,6 +527,541 @@ export const selectedPluginImports = async (
 ): Promise<PluginImportDefinition[]> => {
   const definitions = await discoverPluginImports(native);
   return definitions.filter((definition) => Boolean(selectionForInput(definition.candidate, selected)));
+};
+
+type MarketplacePluginEntry = {
+  name: string;
+  displayName: string;
+  description: string;
+  version: string;
+  category: string;
+  tags: string[];
+  source: unknown;
+  defaultEnabled: boolean;
+  unavailableReason?: string;
+};
+
+type MarketplaceManifest = {
+  name: string;
+  displayName: string;
+  description: string;
+  pluginRoot?: string;
+  plugins: MarketplacePluginEntry[];
+};
+
+type MarketplaceSource = {
+  type: PluginMarketplaceSourceType;
+  path: string;
+  refName?: string;
+};
+
+type MaterializedMarketplace = {
+  source: MarketplaceSource;
+  manifestPath: string;
+  marketplaceRoot: string;
+  cachePath?: string;
+  contentHash: string;
+  manifest: MarketplaceManifest;
+};
+
+type ResolvedMarketplacePluginSource =
+  | { type: "local"; path: string }
+  | { type: "git"; url: string; refName?: string; sha?: string; subdirectory?: string };
+
+const marketplaceStorageRoot = (): string => join(homedir(), ".snow", "plugin-marketplaces");
+
+const marketplacePluginStorageRoot = (): string => join(homedir(), ".snow", "plugins", "marketplaces");
+
+const marketplaceCacheRoot = (name: string): string =>
+  join(marketplaceStorageRoot(), safeSegment(name));
+
+const marketplacePluginCacheRoot = (marketplaceName: string, pluginName: string): string =>
+  join(marketplacePluginStorageRoot(), safeSegment(marketplaceName), safeSegment(pluginName));
+
+const marketplaceIdFor = (name: string): string => `marketplace:${safeSegment(name)}`;
+
+const runGit = async (args: string[], cwd?: string): Promise<void> => new Promise((resolvePromise, reject) => {
+  execFile(
+    "git",
+    ["-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never", "-c", "core.hooksPath=/dev/null", ...args],
+    { cwd, maxBuffer: MARKETPLACE_MAX_MANIFEST_BYTES, timeout: MARKETPLACE_FETCH_TIMEOUT_MS, windowsHide: true },
+    (error, _stdout, stderr) => {
+      if (error) {
+        reject(new Error(`Git operation failed: ${stderr.trim() || error.message}`));
+        return;
+      }
+      resolvePromise();
+    }
+  );
+});
+
+const parseMarketplaceManifest = (path: string): MarketplaceManifest => {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(`Unable to parse marketplace manifest ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!isRecord(raw)) throw new Error("Marketplace manifest must be a JSON object");
+  const name = nonEmptyString(raw.name);
+  if (!name) throw new Error("Marketplace manifest requires a name");
+  if (!Array.isArray(raw.plugins)) throw new Error("Marketplace manifest requires a plugins array");
+  const interfaceMetadata = isRecord(raw.interface) ? raw.interface : {};
+  const metadata = isRecord(raw.metadata) ? raw.metadata : {};
+  const plugins = raw.plugins.flatMap((item): MarketplacePluginEntry[] => {
+    if (!isRecord(item)) return [];
+    const pluginName = nonEmptyString(item.name);
+    if (!pluginName || item.source === undefined) return [];
+    const policy = isRecord(item.policy) ? item.policy : {};
+    const installation = nonEmptyString(policy.installation);
+    return [{
+      name: pluginName,
+      displayName: nonEmptyString(item.displayName) ?? pluginName,
+      description: nonEmptyString(item.description) ?? "",
+      version: nonEmptyString(item.version) ?? "",
+      category: nonEmptyString(item.category) ?? "",
+      tags: asStringArray(item.tags ?? item.keywords),
+      source: item.source,
+      defaultEnabled: item.defaultEnabled !== false,
+      ...(installation === "NOT_AVAILABLE" ? { unavailableReason: "This Plugin is not available for installation." } : {}),
+    }];
+  });
+  return {
+    name,
+    displayName: nonEmptyString(interfaceMetadata.displayName) ?? nonEmptyString(raw.displayName) ?? name,
+    description: nonEmptyString(raw.description) ?? nonEmptyString(metadata.description) ?? "",
+    ...(nonEmptyString(metadata.pluginRoot) ? { pluginRoot: nonEmptyString(metadata.pluginRoot) as string } : {}),
+    plugins,
+  };
+};
+
+const marketplaceRootForManifest = (manifestPath: string): string => {
+  const manifestDirectory = dirname(manifestPath);
+  const metadataDirectory = basename(manifestDirectory);
+  if (metadataDirectory === "plugins" && basename(dirname(manifestDirectory)) === ".agents") {
+    // Codex keeps marketplace metadata in `.agents/plugins`, but sources are repo-root relative.
+    return dirname(dirname(manifestDirectory));
+  }
+  return metadataDirectory === ".claude-plugin" || metadataDirectory === ".codex-plugin"
+    ? dirname(manifestDirectory)
+    : manifestDirectory;
+};
+
+const findMarketplaceManifest = (path: string): string => {
+  const resolved = resolve(path);
+  const candidates = [
+    resolved,
+    join(resolved, ".claude-plugin", "marketplace.json"),
+    join(resolved, ".codex-plugin", "marketplace.json"),
+    join(resolved, ".agents", "plugins", "marketplace.json"),
+    join(resolved, "marketplace.json"),
+  ];
+  const manifestPath = candidates.find((candidate) => existsSync(candidate) && basename(candidate) === "marketplace.json");
+  if (!manifestPath) {
+    throw new Error("Marketplace manifest not found. Expected marketplace.json, .agents/plugins/marketplace.json, or .claude-plugin/marketplace.json.");
+  }
+  return manifestPath;
+};
+
+const splitGitSource = (source: string): { url: string; refName?: string } => {
+  const hash = source.lastIndexOf("#");
+  if (hash <= 0) return { url: source };
+  const url = source.slice(0, hash);
+  const refName = source.slice(hash + 1).trim();
+  return refName ? { url, refName } : { url };
+};
+
+const parseMarketplaceSource = (source: string): MarketplaceSource => {
+  const input = source.trim();
+  if (!input) throw new Error("Marketplace source is required");
+  const localPath = resolve(input.startsWith("~/") ? join(homedir(), input.slice(2)) : input);
+  if (existsSync(localPath) || input.startsWith(".") || input.startsWith("/") || input.startsWith("~")) {
+    if (!existsSync(localPath)) throw new Error(`Marketplace path does not exist: ${input}`);
+    return { type: "local", path: localPath };
+  }
+  const github = input.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:@([^\s/]+))?$/);
+  if (github) {
+    return {
+      type: "github",
+      path: `${github[1]}/${github[2]}`,
+      ...(github[3] ? { refName: github[3] } : {}),
+    };
+  }
+  if (input.startsWith("git@") || input.startsWith("ssh://")) {
+    const { url, refName } = splitGitSource(input);
+    return { type: "git", path: url, ...(refName ? { refName } : {}) };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(input);
+  } catch {
+    throw new Error("Marketplace source must be a local path, GitHub owner/repo, Git URL, or HTTPS marketplace.json URL");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error("Only HTTPS remote marketplace sources are supported");
+  }
+  if (parsed.pathname.endsWith(".git")) {
+    const { url, refName } = splitGitSource(input);
+    return { type: "git", path: url, ...(refName ? { refName } : {}) };
+  }
+  if (!parsed.pathname.endsWith(".json")) {
+    throw new Error("Remote marketplace URLs must point directly to marketplace.json; use a .git URL for repositories");
+  }
+  return { type: "url", path: input };
+};
+
+const promoteDirectory = (stagedDirectory: string, targetDirectory: string): void => {
+  mkdirSync(dirname(targetDirectory), { recursive: true });
+  const backup = `${targetDirectory}.previous-${Date.now()}`;
+  if (existsSync(targetDirectory)) renameSync(targetDirectory, backup);
+  try {
+    renameSync(stagedDirectory, targetDirectory);
+  } catch (error) {
+    if (existsSync(backup)) renameSync(backup, targetDirectory);
+    throw error;
+  }
+  rmSync(backup, { recursive: true, force: true });
+};
+
+const promoteFile = (stagedFile: string, targetFile: string): void => {
+  mkdirSync(dirname(targetFile), { recursive: true });
+  const backup = `${targetFile}.previous-${Date.now()}`;
+  if (existsSync(targetFile)) renameSync(targetFile, backup);
+  try {
+    renameSync(stagedFile, targetFile);
+  } catch (error) {
+    if (existsSync(backup)) renameSync(backup, targetFile);
+    throw error;
+  }
+  rmSync(backup, { force: true });
+};
+
+const materializeGitMarketplace = async (source: MarketplaceSource): Promise<MaterializedMarketplace> => {
+  mkdirSync(marketplaceStorageRoot(), { recursive: true });
+  const stage = mkdtempSync(join(marketplaceStorageRoot(), ".marketplace-"));
+  const repository = join(stage, "repository");
+  try {
+    const url = source.type === "github" ? `https://github.com/${source.path}.git` : source.path;
+    const args = ["clone", "--depth", "1", "--no-tags"];
+    if (source.refName) args.push("--branch", source.refName);
+    args.push(url, repository);
+    await runGit(args);
+    const manifestPath = findMarketplaceManifest(repository);
+    const manifest = parseMarketplaceManifest(manifestPath);
+    const cacheRoot = marketplaceCacheRoot(manifest.name);
+    const target = join(cacheRoot, "source");
+    promoteDirectory(repository, target);
+    const cachedManifestPath = join(target, relative(repository, manifestPath));
+    return {
+      source,
+      manifestPath: cachedManifestPath,
+      marketplaceRoot: marketplaceRootForManifest(cachedManifestPath),
+      cachePath: cacheRoot,
+      contentHash: hashImportPath(target),
+      manifest,
+    };
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+};
+
+const materializeUrlMarketplace = async (source: MarketplaceSource): Promise<MaterializedMarketplace> => {
+  const response = await fetch(source.path, { signal: AbortSignal.timeout(MARKETPLACE_FETCH_TIMEOUT_MS) });
+  if (!response.ok) throw new Error(`Marketplace request failed: ${response.status} ${response.statusText}`);
+  const content = await response.text();
+  if (content.length > MARKETPLACE_MAX_MANIFEST_BYTES) throw new Error("Marketplace manifest exceeds the 2 MB limit");
+  mkdirSync(marketplaceStorageRoot(), { recursive: true });
+  const stage = mkdtempSync(join(marketplaceStorageRoot(), ".marketplace-"));
+  try {
+    const stagedManifest = join(stage, "marketplace.json");
+    writeFileSync(stagedManifest, content, "utf8");
+    const manifest = parseMarketplaceManifest(stagedManifest);
+    const cacheRoot = marketplaceCacheRoot(manifest.name);
+    const target = join(cacheRoot, "marketplace.json");
+    promoteFile(stagedManifest, target);
+    return {
+      source,
+      manifestPath: target,
+      marketplaceRoot: marketplaceRootForManifest(target),
+      cachePath: cacheRoot,
+      contentHash: hashImportPath(target),
+      manifest,
+    };
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+};
+
+const materializeMarketplace = async (source: MarketplaceSource): Promise<MaterializedMarketplace> => {
+  if (source.type === "local") {
+    const manifestPath = findMarketplaceManifest(source.path);
+    return {
+      source,
+      manifestPath,
+      marketplaceRoot: marketplaceRootForManifest(manifestPath),
+      contentHash: hashImportPath(manifestPath),
+      manifest: parseMarketplaceManifest(manifestPath),
+    };
+  }
+  return source.type === "url" ? materializeUrlMarketplace(source) : materializeGitMarketplace(source);
+};
+
+const sourceFromMarketplaceRecord = (marketplace: PluginMarketplaceRecord): MarketplaceSource => ({
+  type: marketplace.sourceType,
+  path: marketplace.sourcePath,
+  ...(marketplace.refName ? { refName: marketplace.refName } : {}),
+});
+
+const loadMarketplaceManifest = (marketplace: PluginMarketplaceRecord): { manifest: MarketplaceManifest; root: string } => {
+  if (!existsSync(marketplace.manifestPath)) {
+    throw new Error("Marketplace source is no longer available. Refresh it or remove it from Snow.");
+  }
+  return {
+    manifest: parseMarketplaceManifest(marketplace.manifestPath),
+    root: marketplaceRootForManifest(marketplace.manifestPath),
+  };
+};
+
+const resolveMarketplacePluginSource = (
+  entry: MarketplacePluginEntry,
+  marketplace: MarketplaceManifest,
+  marketplaceRoot: string
+): ResolvedMarketplacePluginSource => {
+  const resolveLocalSource = (path: string): ResolvedMarketplacePluginSource => {
+    const base = marketplace.pluginRoot ? resolve(marketplaceRoot, marketplace.pluginRoot) : marketplaceRoot;
+    const target = resolve(base, path);
+    if (!isWithinDirectory(target, marketplaceRoot)) {
+      throw new Error("Marketplace Plugin source must stay within the marketplace directory");
+    }
+    if (!existsSync(target)) throw new Error(`Plugin source does not exist: ${path}`);
+    return { type: "local", path: target };
+  };
+  if (typeof entry.source === "string") {
+    if (!entry.source.startsWith(".")) throw new Error("String Plugin sources must be relative paths");
+    return resolveLocalSource(entry.source);
+  }
+  if (!isRecord(entry.source)) throw new Error("Plugin source must be a path or supported source descriptor");
+  const sourceType = nonEmptyString(entry.source.source);
+  if (sourceType === "local") {
+    const path = nonEmptyString(entry.source.path);
+    if (!path) throw new Error("Local Plugin sources require a path");
+    return resolveLocalSource(path);
+  }
+  const refName = nonEmptyString(entry.source.ref);
+  const sha = nonEmptyString(entry.source.sha);
+  if (sourceType === "github") {
+    const repository = nonEmptyString(entry.source.repo);
+    if (!repository) throw new Error("GitHub Plugin sources require a repository");
+    return { type: "git", url: `https://github.com/${repository}.git`, ...(refName ? { refName } : {}), ...(sha ? { sha } : {}) };
+  }
+  if (sourceType === "url") {
+    const url = nonEmptyString(entry.source.url);
+    if (!url) throw new Error("Git Plugin sources require a URL");
+    return { type: "git", url, ...(refName ? { refName } : {}), ...(sha ? { sha } : {}) };
+  }
+  if (sourceType === "git-subdir") {
+    const url = nonEmptyString(entry.source.url);
+    const path = nonEmptyString(entry.source.path);
+    if (!url || !path) throw new Error("git-subdir Plugin sources require a URL and path");
+    return { type: "git", url, ...(refName ? { refName } : {}), ...(sha ? { sha } : {}), subdirectory: path };
+  }
+  throw new Error(`Plugin source type ${sourceType ?? "unknown"} is not supported`);
+};
+
+const marketplaceEntryCatalog = (
+  entry: MarketplacePluginEntry,
+  marketplace: PluginMarketplaceRecord,
+  manifest: MarketplaceManifest,
+  root: string,
+  installedPlugins: PluginRecord[]
+): PluginMarketplacePlugin => {
+  const installedPluginId = installedPlugins.find((plugin) =>
+    resolve(plugin.sourcePath) === resolve(marketplacePluginCacheRoot(marketplace.name, entry.name))
+  )?.pluginId;
+  try {
+    if (entry.unavailableReason) throw new Error(entry.unavailableReason);
+    resolveMarketplacePluginSource(entry, manifest, root);
+    return {
+      pluginName: entry.name,
+      displayName: entry.displayName,
+      description: entry.description,
+      version: entry.version,
+      category: entry.category,
+      tags: entry.tags,
+      supported: true,
+      ...(installedPluginId ? { installedPluginId } : {}),
+    };
+  } catch (error) {
+    return {
+      pluginName: entry.name,
+      displayName: entry.displayName,
+      description: entry.description,
+      version: entry.version,
+      category: entry.category,
+      tags: entry.tags,
+      supported: false,
+      unsupportedReason: error instanceof Error ? error.message : String(error),
+      ...(installedPluginId ? { installedPluginId } : {}),
+    };
+  }
+};
+
+export const listPluginMarketplaces = async (native: NativeBridge): Promise<PluginMarketplaceCatalog[]> => {
+  const [marketplaces, plugins] = await Promise.all([native.listPluginMarketplaces(), native.listPlugins()]);
+  return marketplaces.map((marketplace) => {
+    try {
+      const { manifest, root } = loadMarketplaceManifest(marketplace);
+      return {
+        ...marketplace,
+        displayName: manifest.displayName,
+        description: manifest.description,
+        plugins: manifest.plugins.map((entry) => marketplaceEntryCatalog(entry, marketplace, manifest, root, plugins)),
+      };
+    } catch (error) {
+      return {
+        ...marketplace,
+        plugins: [],
+        loadError: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+};
+
+export const addPluginMarketplace = async (
+  native: NativeBridge,
+  sourceInput: string
+): Promise<PluginMarketplaceCatalog[]> => {
+  const materialized = await materializeMarketplace(parseMarketplaceSource(sourceInput));
+  await native.upsertPluginMarketplace({
+    marketplaceId: marketplaceIdFor(materialized.manifest.name),
+    name: materialized.manifest.name,
+    displayName: materialized.manifest.displayName,
+    description: materialized.manifest.description,
+    sourceType: materialized.source.type,
+    sourcePath: materialized.source.path,
+    ...(materialized.source.refName ? { refName: materialized.source.refName } : {}),
+    ...(materialized.cachePath ? { cachePath: materialized.cachePath } : {}),
+    manifestPath: materialized.manifestPath,
+    contentHash: materialized.contentHash,
+  });
+  return listPluginMarketplaces(native);
+};
+
+export const updatePluginMarketplace = async (
+  native: NativeBridge,
+  marketplaceId: string
+): Promise<PluginMarketplaceCatalog[]> => {
+  const marketplace = (await native.listPluginMarketplaces()).find((item) => item.marketplaceId === marketplaceId);
+  if (!marketplace) throw new Error("Plugin marketplace not found");
+  const materialized = await materializeMarketplace(sourceFromMarketplaceRecord(marketplace));
+  if (materialized.manifest.name !== marketplace.name) {
+    throw new Error("Marketplace name changed. Remove the old marketplace before adding this source again.");
+  }
+  await native.upsertPluginMarketplace({
+    marketplaceId: marketplace.marketplaceId,
+    name: marketplace.name,
+    displayName: materialized.manifest.displayName,
+    description: materialized.manifest.description,
+    sourceType: materialized.source.type,
+    sourcePath: materialized.source.path,
+    ...(materialized.source.refName ? { refName: materialized.source.refName } : {}),
+    ...(materialized.cachePath ? { cachePath: materialized.cachePath } : {}),
+    manifestPath: materialized.manifestPath,
+    contentHash: materialized.contentHash,
+  });
+  return listPluginMarketplaces(native);
+};
+
+export const removePluginMarketplace = async (native: NativeBridge, marketplaceId: string): Promise<void> => {
+  const marketplace = (await native.listPluginMarketplaces()).find((item) => item.marketplaceId === marketplaceId);
+  if (!marketplace) throw new Error("Plugin marketplace not found");
+  await native.deletePluginMarketplace(marketplaceId);
+  if (marketplace.cachePath && isWithinDirectory(marketplace.cachePath, marketplaceStorageRoot())) {
+    rmSync(marketplace.cachePath, { recursive: true, force: true });
+  }
+};
+
+const cloneMarketplacePlugin = async (
+  source: Extract<ResolvedMarketplacePluginSource, { type: "git" }>
+): Promise<{ sourcePath: string; cleanupPath: string }> => {
+  const stage = mkdtempSync(join(tmpdir(), "snow-marketplace-plugin-"));
+  const repository = join(stage, "repository");
+  try {
+    const args = ["clone", "--depth", "1", "--no-tags"];
+    if (source.refName) args.push("--branch", source.refName);
+    args.push(source.url, repository);
+    await runGit(args);
+    if (source.sha) {
+      await runGit(["fetch", "--depth", "1", "origin", source.sha], repository);
+      await runGit(["checkout", "--detach", source.sha], repository);
+    }
+    const sourcePath = source.subdirectory ? resolve(repository, source.subdirectory) : repository;
+    if (!isWithinDirectory(sourcePath, repository) || !existsSync(sourcePath)) {
+      throw new Error("Plugin source subdirectory does not exist in the cloned repository");
+    }
+    return { sourcePath, cleanupPath: stage };
+  } catch (error) {
+    rmSync(stage, { recursive: true, force: true });
+    throw error;
+  }
+};
+
+const copyMarketplacePlugin = (sourcePath: string, marketplaceName: string, pluginName: string): string => {
+  const target = marketplacePluginCacheRoot(marketplaceName, pluginName);
+  mkdirSync(dirname(target), { recursive: true });
+  const stage = mkdtempSync(join(dirname(target), ".plugin-"));
+  const stagedPlugin = join(stage, "plugin");
+  try {
+    cpSync(sourcePath, stagedPlugin, { recursive: true, force: true });
+    promoteDirectory(stagedPlugin, target);
+    return target;
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+};
+
+const findPluginManifest = (root: string): { provider: "codex" | "claude-code"; manifestPath: string } => {
+  const codexManifest = join(root, ".codex-plugin", "plugin.json");
+  if (existsSync(codexManifest)) return { provider: "codex", manifestPath: codexManifest };
+  const claudeManifest = join(root, ".claude-plugin", "plugin.json");
+  if (existsSync(claudeManifest)) return { provider: "claude-code", manifestPath: claudeManifest };
+  throw new Error("Plugin package must contain .codex-plugin/plugin.json or .claude-plugin/plugin.json");
+};
+
+export const installPluginFromMarketplace = async (
+  native: NativeBridge,
+  marketplaceId: string,
+  pluginName: string
+): Promise<void> => {
+  const marketplace = (await native.listPluginMarketplaces()).find((item) => item.marketplaceId === marketplaceId);
+  if (!marketplace) throw new Error("Plugin marketplace not found");
+  const { manifest, root } = loadMarketplaceManifest(marketplace);
+  const entry = manifest.plugins.find((item) => item.name === pluginName);
+  if (!entry) throw new Error("Plugin is not available in this marketplace");
+  if (entry.unavailableReason) throw new Error(entry.unavailableReason);
+  const source = resolveMarketplacePluginSource(entry, manifest, root);
+  const remoteSource = source.type === "git" ? await cloneMarketplacePlugin(source) : null;
+  try {
+    const sourcePath = source.type === "local" ? source.path : remoteSource?.sourcePath;
+    if (!sourcePath) throw new Error("Unable to resolve Plugin source");
+    const cachedPluginRoot = copyMarketplacePlugin(sourcePath, marketplace.name, entry.name);
+    const { provider, manifestPath } = findPluginManifest(cachedPluginRoot);
+    const warnings: string[] = [];
+    const definition = pluginDefinitionFromManifest(provider, manifestPath, { scope: "global" }, warnings);
+    if (!definition) throw new Error(warnings[0] ?? "Unable to parse Plugin manifest");
+    const existing = (await native.listPlugins()).find((plugin) => plugin.pluginId === definition.input.pluginId);
+    definition.input.state = existing?.state === "disabled" || (!existing && !entry.defaultEnabled) ? "disabled" : "enabled";
+    for (const runtime of definition.runtime) {
+      if (runtime.mcpInput) runtime.mcpInput.enabled = definition.input.state === "enabled";
+      if (runtime.promptInput) runtime.promptInput.isActive = definition.input.state === "enabled";
+    }
+    const result = await commitPluginImports(native, [definition]);
+    if (result.itemResults.some((item) => item.status === "skipped")) {
+      throw new Error(result.warnings[0] ?? "Plugin installation failed");
+    }
+  } finally {
+    if (remoteSource) rmSync(remoteSource.cleanupPath, { recursive: true, force: true });
+  }
 };
 
 const pluginResourceFor = (

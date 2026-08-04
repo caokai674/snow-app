@@ -279,6 +279,21 @@ CREATE INDEX IF NOT EXISTS idx_api_configs_active
          CREATE INDEX IF NOT EXISTS idx_plugins_provider_source
            ON plugins(provider, source_path);
 
+         CREATE TABLE IF NOT EXISTS plugin_marketplaces (
+           marketplace_id TEXT PRIMARY KEY NOT NULL,
+           name TEXT NOT NULL UNIQUE,
+           display_name TEXT NOT NULL,
+           description TEXT NOT NULL DEFAULT '',
+           source_type TEXT NOT NULL,
+           source_path TEXT NOT NULL,
+           ref_name TEXT,
+           cache_path TEXT,
+           manifest_path TEXT NOT NULL,
+           content_hash TEXT NOT NULL,
+           added_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+           updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+         );
+
          CREATE TABLE IF NOT EXISTS plugin_components (
            component_id TEXT PRIMARY KEY NOT NULL,
            plugin_id TEXT NOT NULL,
@@ -487,7 +502,7 @@ CREATE INDEX IF NOT EXISTS idx_api_configs_active
     migrate_chat_conversations_api_profile(connection)?;
     migrate_plugins_runtime(connection)?;
 
-    connection.pragma_update(None, "user_version", 23)?;
+    connection.pragma_update(None, "user_version", 24)?;
 
     Ok(())
 }
