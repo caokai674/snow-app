@@ -49,7 +49,7 @@ export function ChatsSection({
 }: ChatsSectionProps): React.JSX.Element {
   const { t } = useI18n();
   const {
-    conversationVersion,
+    conversationListVersion,
     upsertedConversation,
     subAgentSessionEvents,
     refreshConversations,
@@ -73,6 +73,13 @@ export function ChatsSection({
     useState<Set<string>>(() => new Set());
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const sectionListRef = useRef<HTMLDivElement | null>(null);
+  // 始终持有最新 conversations，供子代理加载 effect 读取。
+  // effect 仅以会话 id 集合为依赖：upsert/重排（id 不变）不会重查子代理。
+  const conversationsRef = useRef<ChatConversationRecord[]>([]);
+  conversationsRef.current = conversations;
+  const conversationIdsKey = conversations
+    .map((conv) => conv.conversationId)
+    .join("\u0000");
 
   const directoryId = activeDirectory?.directoryId ?? "";
   const hasMore = conversations.length < total;
@@ -123,7 +130,7 @@ export function ChatsSection({
     return () => {
       cancelled = true;
     };
-  }, [directoryId, t, conversationVersion]);
+  }, [directoryId, t, conversationListVersion]);
 
   useEffect(() => {
     if (!upsertedConversation) {
@@ -145,6 +152,12 @@ export function ChatsSection({
       );
 
       if (existingIndex >= 0) {
+        // 记录内容未变化时保持原引用，避免无意义的替换与重排序
+        // （AI 响应结束后的冗余 upsert 不会触发列表重渲染）
+        const existing = prev[existingIndex];
+        if (JSON.stringify(existing) === JSON.stringify(conv)) {
+          return prev;
+        }
         const updated = prev.map((item) =>
           item.conversationId === conv.conversationId ? conv : item
         );
@@ -329,7 +342,8 @@ export function ChatsSection({
   const timeGroups = groupConversationsByTime(conversations);
 
   useEffect(() => {
-    if (conversations.length === 0) {
+    const current = conversationsRef.current;
+    if (current.length === 0) {
       setSubAgentMap({});
       return;
     }
@@ -338,7 +352,7 @@ export function ChatsSection({
 
     const loadSubAgents = async (): Promise<void> => {
       const entries = await Promise.all(
-        conversations.map(async (conv) => {
+        current.map(async (conv) => {
           try {
             const subAgents = await window.snow.listSubAgentConversations(
               conv.conversationId
@@ -369,7 +383,7 @@ export function ChatsSection({
     return () => {
       cancelled = true;
     };
-  }, [conversations]);
+  }, [conversationIdsKey]);
 
   useEffect(() => {
     const events = Object.values(subAgentSessionEvents);

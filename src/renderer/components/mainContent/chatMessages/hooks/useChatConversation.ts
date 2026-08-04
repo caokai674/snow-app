@@ -30,6 +30,9 @@ export const useChatConversation = (
     string | undefined
   >(undefined);
   const [conversationVersion, setConversationVersion] = useState(0);
+  // 侧边栏列表刷新信号：与 conversationVersion 分离，AI 响应迭代只 bump
+  // conversationVersion（UserMessageRail 用），列表仅靠增量 upsert 同步。
+  const [conversationListVersion, setConversationListVersion] = useState(0);
   const [upsertedConversation, setUpsertedConversation] =
     useState<ConversationContextValue["upsertedConversation"]>(null);
   const [subAgentSessionEvents, setSubAgentSessionEvents] = useState<
@@ -259,6 +262,7 @@ export const useChatConversation = (
     sessions,
     activeConversationId,
     conversationVersion,
+    conversationListVersion,
     upsertedConversation,
     subAgentSessionEvents,
     fileChangeStats,
@@ -310,6 +314,7 @@ export const useChatConversation = (
     setSessions,
     setActiveConversationId,
     setConversationVersion,
+    setConversationListVersion,
     setUpsertedConversation,
     setSubAgentSessionEvent,
     setStreamingConversationIds,
@@ -473,6 +478,7 @@ export const useChatConversation = (
     messages: activeSession?.messages ?? [],
     summary: activeSession?.summary ?? "",
     conversationVersion,
+    conversationListVersion,
     upsertedConversation,
     subAgentSessionEvents,
     fileChangeStats,

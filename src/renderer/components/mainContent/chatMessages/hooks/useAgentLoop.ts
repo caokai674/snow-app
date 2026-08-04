@@ -68,6 +68,14 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
       const sessionKey =
         ctx.activeConversationIdRef.current ?? PENDING_SESSION_KEY;
       const existingRef = ctx.sessionsRefData.current.get(sessionKey);
+      // A sub-agent conversation becomes read-only as soon as its run ends.
+      // The input box is hidden in the UI; this guard closes the remaining
+      // programmatic paths (a last-moment send racing the status event, or a
+      // finishing parent loop flushing its pending queue while the user is
+      // viewing the terminated sub-agent conversation).
+      if (existingRef?.subAgentTerminated) {
+        return;
+      }
       if (existingRef?.isSending) {
         const queue = ctx.pendingQueueRef.current.get(sessionKey) ?? [];
         queue.push({ text: trimmed, options });
@@ -1123,6 +1131,25 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
             // previous run cannot accidentally unblock a future iteration.
             ctx.pauseControllerRef.current.delete(finalSessionKey);
             ctx.removeStreamingId(finalSessionKey);
+
+            // AI 流程完全结束后，增量同步侧边栏列表中该会话的最新记录
+            // （更新时间/消息数/预览等）。只 upsert 单条，不触发列表全量重拉
+            // —— 每次响应迭代的 conversationVersion bump 仅用于消息区。
+            if (finalSessionKey !== PENDING_SESSION_KEY) {
+              void window.snow
+                .getChatConversation(finalSessionKey)
+                .then((conv) => {
+                  if (conv) {
+                    ctx.setUpsertedConversation({
+                      record: conv,
+                      timestamp: Date.now(),
+                    });
+                  }
+                })
+                .catch(() => {
+                  // Upsert failure should not block cleanup
+                });
+            }
           }
 
           // Flush pending messages queued while this session was busy.

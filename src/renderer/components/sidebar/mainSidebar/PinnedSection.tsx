@@ -21,7 +21,7 @@ export function PinnedSection({
 }: PinnedSectionProps): React.JSX.Element {
   const { t } = useI18n();
   const {
-    conversationVersion,
+    conversationListVersion,
     upsertedConversation,
     refreshConversations,
     updateConversationSummary,
@@ -72,7 +72,7 @@ export function PinnedSection({
     return () => {
       cancelled = true;
     };
-  }, [directoryId, conversationVersion]);
+  }, [directoryId, conversationListVersion]);
 
   useEffect(() => {
     if (!upsertedConversation) {
@@ -95,6 +95,10 @@ export function PinnedSection({
           return prev.filter(
             (item) => item.conversationId !== conv.conversationId
           );
+        }
+        // 记录内容未变化时保持原引用，避免无意义替换触发重渲染
+        if (JSON.stringify(existing) === JSON.stringify(conv)) {
+          return prev;
         }
         // Otherwise update in place
         return prev.map((item) =>

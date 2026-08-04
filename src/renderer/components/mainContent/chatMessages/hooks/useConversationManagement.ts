@@ -11,7 +11,7 @@ import {
   buildConversationMessages,
   deleteCheckpoints,
   directoryIdToPath,
-  killRunningBashExecutions,
+  killRunningToolExecutions,
 } from "../utils/conversationHelpers";
 import { extractFileChangesFromRecords } from "./fileChangeTracking";
 import {
@@ -217,6 +217,13 @@ export const useConversationManagement = (
             // never clobbered by an older one. Later selections of the same
             // conversation then render instantly from the cache.
             if (!ctx.sessionsRef.current[trimmedId]) {
+              // A sub-agent conversation whose persisted run status is
+              // terminal is read-only from the moment it is opened: the
+              // input box stays hidden and sends are rejected.
+              const isTerminatedSubAgent =
+                conversationRecord?.conversationType === "sub_agent" &&
+                conversationRecord.subAgentStatus !== "" &&
+                conversationRecord.subAgentStatus !== "running";
               ctx.sessionsRefData.current.set(trimmedId, {
                 streamId: null,
                 streamPromise: null,
@@ -229,6 +236,7 @@ export const useConversationManagement = (
                 childSubAgentIds: new Set(),
                 planMode: false,
                 goalMode: false,
+                subAgentTerminated: isTerminatedSubAgent || undefined,
               });
               ctx.setSessions((prev) => {
                 if (prev[trimmedId]) return prev;
@@ -523,7 +531,7 @@ export const useConversationManagement = (
     );
     // Kill every in-flight bash subprocess of this session so the OS
     // process does not keep running until its timeout.
-    killRunningBashExecutions(
+    killRunningToolExecutions(
       ctx.sessionsRef.current?.[key]?.messages ?? []
     );
     ctx.updateSessionField(key, "isStreaming", false);
@@ -560,7 +568,7 @@ export const useConversationManagement = (
       // session key) so its agent loop cannot stay blocked awaiting a
       // decision that will never arrive.
       rejectToolAuthorizations(subKey);
-      killRunningBashExecutions(
+      killRunningToolExecutions(
         ctx.sessionsRef.current?.[subKey]?.messages ?? []
       );
 
@@ -614,7 +622,7 @@ export const useConversationManagement = (
 
       rejectToolAuthorizations(conversationId);
       rejectPendingUserQuestions(conversationId);
-      killRunningBashExecutions(
+      killRunningToolExecutions(
         ctx.sessionsRef.current?.[conversationId]?.messages ?? []
       );
       if (ref?.streamId) {
@@ -676,23 +684,47 @@ export const useConversationManagement = (
       if (queue.length === 0) {
         ctx.pendingQueueRef.current.delete(sessionKey);
       }
-      ctx.setActivePendingMessages(queue.map((item) => item.text));
 
       if (!removed) {
+        ctx.setActivePendingMessages(queue.map((item) => item.text));
         return;
       }
+
+      // A sub-agent conversation stops accepting messages once its run ends
+      // (the abort above finishes it), so the message must not start a new
+      // loop there. Carry it to the parent conversation's pending queue —
+      // the parent loop resumes right after the interrupted sub-agent tool
+      // call and picks it up at its next iteration boundary — and follow
+      // the user to the parent view so the queued message stays visible.
+      const subAgentEvent = ctx.subAgentSessionEvents[sessionKey];
+      if (subAgentEvent?.parentConversationId) {
+        const parentId = subAgentEvent.parentConversationId;
+        const parentQueue = ctx.pendingQueueRef.current.get(parentId) ?? [];
+        parentQueue.push({
+          text: removed.text,
+          options: removed.options ?? {},
+        });
+        ctx.pendingQueueRef.current.set(parentId, parentQueue);
+        ctx.setActivePendingMessages(parentQueue.map((item) => item.text));
+        void handleSelectConversation(parentId);
+        return;
+      }
+
+      ctx.setActivePendingMessages(queue.map((item) => item.text));
 
       // Dispatch the pending message as a fresh send. handleSendMessage
       // will create a new agent loop because handleAbort already reset
       // isSending on the session ref.
       ctx.handleSendMessageRef.current(removed.text, removed.options ?? {});
     },
-    [handleAbort, ctx]
+    [handleAbort, handleSelectConversation, ctx]
   );
 
   const refreshConversations = useCallback((): void => {
-    ctx.setConversationVersion((version) => version + 1);
-  }, []);
+    // 仅触发侧边栏列表全量重拉（置顶/取消置顶/重命名/删除后使用）。
+    // 与 conversationVersion（消息持久化信号）解耦，避免 AI 响应刷新列表。
+    ctx.setConversationListVersion((version) => version + 1);
+  }, [ctx]);
 
   const handleForkConversation = useCallback(
     async (conversationId: string, upToResponseId: string): Promise<void> => {
