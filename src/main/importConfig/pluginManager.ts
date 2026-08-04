@@ -41,6 +41,7 @@ import {
   type ImportCandidateInput,
 } from "./discovery";
 import { selectionForInput, type SelectedImportCandidate } from "./selectedImport";
+import { prepareDirectoryCommit, type DirectoryCommit } from "./directoryCommit";
 import { asStringArray, asStringRecord, collectSkillDirectories, nonEmptyString, walkFiles } from "./utils";
 
 type PluginRuntimeComponent = {
@@ -1110,26 +1111,13 @@ const promptRecordToInput = (record: SystemPromptItemRecord, isActive: boolean):
   sortOrder: record.sortOrder,
 });
 
-const copyPluginSkill = (source: string, target: string, stagingRoot: string): { target: string; backup?: string } => {
+const copyPluginSkill = (source: string, target: string): DirectoryCommit => {
   if (!existsSync(source)) {
     throw new Error(`Plugin Skill source no longer exists: ${source}`);
   }
-  mkdirSync(dirname(target), { recursive: true });
-  const staging = join(stagingRoot, `skill-${hashImportValue(target).slice(0, 12)}`);
-  cpSync(source, staging, { recursive: true, force: false });
-  if (!existsSync(target)) {
-    renameSync(staging, target);
-    return { target };
-  }
-  const backup = join(stagingRoot, `backup-${hashImportValue(target).slice(0, 12)}`);
-  renameSync(target, backup);
-  try {
-    renameSync(staging, target);
-    return { target, backup };
-  } catch (error) {
-    renameSync(backup, target);
-    throw error;
-  }
+  const transaction = prepareDirectoryCommit(source, target);
+  transaction.commit();
+  return transaction;
 };
 
 export const commitPluginImports = async (
@@ -1139,10 +1127,9 @@ export const commitPluginImports = async (
   const itemResults: ImportCommitItemResult[] = [];
   const warnings: string[] = [];
   for (const definition of definitions) {
-    const stagingRoot = mkdtempSync(join(tmpdir(), "snow-plugin-"));
     const appliedMcp: Array<{ projectId?: string; previous?: McpServerConfigRecord | ProjectMcpServerConfigRecord; input: McpServerConfigInput }> = [];
     const appliedPrompts: Array<{ previous?: SystemPromptItemRecord; input: SystemPromptItemInput }> = [];
-    const copiedSkills: Array<{ target: string; backup?: string }> = [];
+    const copiedSkills: DirectoryCommit[] = [];
     try {
       const globalMcp = await native.listMcpServerConfigs();
       const projectMcp = definition.input.scope === "project" && definition.input.projectId
@@ -1166,7 +1153,7 @@ export const commitPluginImports = async (
           await native.upsertSystemPrompt(runtime.promptInput);
           appliedPrompts.push({ previous, input: runtime.promptInput });
         } else if (runtime.skillSourceDir) {
-          copiedSkills.push(copyPluginSkill(runtime.skillSourceDir, runtime.component.targetPath, stagingRoot));
+          copiedSkills.push(copyPluginSkill(runtime.skillSourceDir, runtime.component.targetPath));
           await native.setSkillEnabled(definition.input.projectId, runtime.component.targetId, definition.input.state === "enabled");
         }
       }
@@ -1197,13 +1184,20 @@ export const commitPluginImports = async (
         else await native.deleteSystemPrompt(applied.input.promptId);
       }
       for (const skill of copiedSkills.reverse()) {
-        rmSync(skill.target, { recursive: true, force: true });
-        if (skill.backup) renameSync(skill.backup, skill.target);
+        try {
+          skill.rollback();
+        } catch (rollbackError) {
+          warnings.push(
+            `Plugin Skill rollback was incomplete: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+          );
+        }
       }
       warnings.push(`Unable to import Plugin ${definition.input.name}: ${error instanceof Error ? error.message : String(error)}`);
       itemResults.push({ type: "plugin", logicalId: definition.input.pluginId, candidateId: definition.input.pluginId, status: "skipped", message: warnings.at(-1) });
     } finally {
-      rmSync(stagingRoot, { recursive: true, force: true });
+      for (const skill of copiedSkills) {
+        skill.cleanup();
+      }
     }
   }
   return { itemResults, warnings };

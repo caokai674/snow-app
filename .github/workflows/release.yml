@@ -70,6 +70,9 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Run tests
+        run: npm test
+
       - name: Build TypeScript + Vite + Rust native
         env:
           NATIVE_BUILD_ARCH: ${{ matrix.arch }}

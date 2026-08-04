@@ -330,129 +330,149 @@ export function ImportSettingsPanel({ onClose }: ImportSettingsPanelProps): Reac
       </div>
 
       {activeTab === "plugins" ? (
-        <div id="third-party-panel-plugins" role="tabpanel" aria-labelledby="third-party-tab-plugins">
+        <div
+          id="third-party-panel-plugins"
+          className="third-party-settings-panel third-party-settings-panel-plugins"
+          role="tabpanel"
+          aria-labelledby="third-party-tab-plugins"
+        >
           <PluginsSettingsPanel embedded />
         </div>
       ) : (
-      <div id="third-party-panel-import" className="import-settings-source-panel" role="tabpanel" aria-labelledby="third-party-tab-import">
-      <div className="import-settings-tabs" role="tablist" aria-label={t("settings.importSourceTabs", { defaultValue: "Import source" })}>
-        {(["codex", "claude-code", "opencode"] as const).map((provider) => (
-          <button
-            key={provider}
-            className={`import-settings-tab ${provider === activeSource ? "active" : ""}`}
-            type="button"
-            role="tab"
-            aria-selected={provider === activeSource}
-            onClick={() => setActiveSource(provider)}
-          >
-            {sourceLabels[provider]}
-          </button>
-        ))}
-      </div>
-
-      <div className="api-settings-actions import-settings-actions">
-        <button className="api-settings-action-btn" onClick={() => void loadDiscovery()} type="button" disabled={isLoading || isCommitting}>
-          {isLoading ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}
-          <span>{t("settings.importRefresh", { defaultValue: "Refresh discovery" })}</span>
-        </button>
-        <button className="api-settings-action-btn primary" onClick={() => void commit()} type="button" disabled={selectedCount === 0 || isCommitting || isLoading}>
-          {isCommitting ? <Loader2 size={15} className="spin" /> : <CheckCircle2 size={15} />}
-          <span>{t("settings.importCommit", { defaultValue: "Import selected" })} ({selectedCount})</span>
-        </button>
-      </div>
-
-      <AutoDismissNotice message={error} tone="error" onDismiss={() => setError("")} />
-
-      {lastResult ? (
-        <section className="import-settings-result" aria-live="polite">
-          <CheckCircle2 size={15} aria-hidden="true" />
-          <span>
-            {t("settings.importCommitSummary", {
-              defaultValue: "Imported {{imported}}, unchanged {{unchanged}}, skipped {{skipped}}, unsupported {{unsupported}}.",
-              values: lastResult.summary,
-            })}
-          </span>
-        </section>
-      ) : null}
-
-      {discovery ? (
-        <>
-          <div className="api-settings-summary-grid import-settings-summary-grid">
-            {summaryItems.map(({ icon: Icon, label, value, detail }) => (
-              <div className="api-settings-summary-card" key={label}>
-                <Icon size={15} strokeWidth={1.8} />
-                <span>{label}</span>
-                <strong className="import-settings-summary-value">{value}</strong>
-                <small>{detail}</small>
+        <div
+          id="third-party-panel-import"
+          className="third-party-settings-panel third-party-settings-panel-import"
+          role="tabpanel"
+          aria-labelledby="third-party-tab-import"
+        >
+          <div className="import-settings-source-panel">
+            <div className="import-settings-scroll">
+              <div className="import-settings-tabs" role="tablist" aria-label={t("settings.importSourceTabs", { defaultValue: "Import source" })}>
+                {(["codex", "claude-code", "opencode"] as const).map((provider) => (
+                  <button
+                    key={provider}
+                    className={`import-settings-tab ${provider === activeSource ? "active" : ""}`}
+                    type="button"
+                    role="tab"
+                    aria-selected={provider === activeSource}
+                    onClick={() => setActiveSource(provider)}
+                  >
+                    {sourceLabels[provider]}
+                  </button>
+                ))}
               </div>
-            ))}
-          </div>
 
-          <section className="api-settings-form-section import-settings-candidates">
-            <div className="api-settings-form-section-header">
-              <strong className="api-settings-form-section-title">{t("settings.importCandidates", { defaultValue: "Candidates" })}</strong>
-              <span className="settings-item-description">
+              <div className="api-settings-actions import-settings-actions import-settings-toolbar">
+                <button className="api-settings-action-btn" onClick={() => void loadDiscovery()} type="button" disabled={isLoading || isCommitting}>
+                  {isLoading ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}
+                  <span>{t("settings.importRefresh", { defaultValue: "Refresh discovery" })}</span>
+                </button>
+              </div>
+
+              <AutoDismissNotice message={error} tone="error" onDismiss={() => setError("")} />
+
+              {lastResult ? (
+                <section className="import-settings-result" aria-live="polite">
+                  <CheckCircle2 size={15} aria-hidden="true" />
+                  <span>
+                    {t("settings.importCommitSummary", {
+                      defaultValue: "Imported {{imported}}, unchanged {{unchanged}}, skipped {{skipped}}, unsupported {{unsupported}}.",
+                      values: lastResult.summary,
+                    })}
+                  </span>
+                </section>
+              ) : null}
+
+              {discovery ? (
+                <>
+                  <div className="api-settings-summary-grid import-settings-summary-grid">
+                    {summaryItems.map(({ icon: Icon, label, value, detail }) => (
+                      <div className="api-settings-summary-card" key={label}>
+                        <Icon size={15} strokeWidth={1.8} />
+                        <span>{label}</span>
+                        <strong className="import-settings-summary-value">{value}</strong>
+                        <small>{detail}</small>
+                      </div>
+                    ))}
+                  </div>
+
+                  <section className="api-settings-form-section import-settings-candidates">
+                    <div className="api-settings-form-section-header">
+                      <strong className="api-settings-form-section-title">{t("settings.importCandidates", { defaultValue: "Candidates" })}</strong>
+                      <span className="settings-item-description">
+                        {t("settings.importSelectedCount", { defaultValue: "{{count}} selected", values: { count: selectedCount } })}
+                      </span>
+                    </div>
+                    {visibleCandidates.length > 0 ? (
+                      <div className="import-candidate-list">
+                        {visibleCandidates.map((candidate) => (
+                          <CandidateRow
+                            key={candidate.candidateId}
+                            candidate={candidate}
+                            checked={selectedIds.has(candidate.candidateId)}
+                            onToggle={toggleCandidate}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="settings-empty-state">{t("settings.importNoCandidates", { defaultValue: "No import candidates found." })}</div>
+                    )}
+                  </section>
+
+                  <section className="api-settings-form-section import-settings-source">
+                    <div className="api-settings-form-section-header">
+                      <strong className="api-settings-form-section-title">{t("settings.importSourceFiles", { defaultValue: "Source files" })}</strong>
+                      <span className={source?.sourceFound ? "import-settings-found" : "import-settings-missing"}>
+                        {source?.sourceFound ? <CheckCircle2 size={13} aria-hidden="true" /> : null}
+                        {source?.sourceFound
+                          ? t("settings.importSourceFound", { defaultValue: "Source found" })
+                          : t("settings.importSourceMissing", { defaultValue: "Source not found" })}
+                      </span>
+                    </div>
+                    <div className="import-settings-path-list">
+                      <div className="import-settings-path-row">
+                        <FolderOpen size={14} aria-hidden="true" />
+                        <span>{t("settings.importSourceDirectory", { defaultValue: "Source directory" })}</span>
+                        <code title={source?.sourceHome}>{source?.sourceHome ?? "-"}</code>
+                      </div>
+                      {source?.configPaths.map((path) => (
+                        <div className="import-settings-path-row" key={path.path}>
+                          <FileCode2 size={14} aria-hidden="true" />
+                          <span>{path.label}</span>
+                          <code title={path.path}>{path.path}</code>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  {source && source.warnings.length > 0 ? (
+                    <section className="api-settings-form-section import-settings-warnings">
+                      <strong className="api-settings-form-section-title">{t("settings.importWarnings", { defaultValue: "Warnings" })}</strong>
+                      <ul>
+                        {source.warnings.map((warning, index) => (
+                          <li key={`${warning}-${index}`}>
+                            <AlertTriangle size={14} aria-hidden="true" />
+                            <span>{warning}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+
+            <div className="import-settings-footer">
+              <span className="import-settings-footer-selection settings-item-description">
                 {t("settings.importSelectedCount", { defaultValue: "{{count}} selected", values: { count: selectedCount } })}
               </span>
+              <button className="api-settings-action-btn primary" onClick={() => void commit()} type="button" disabled={selectedCount === 0 || isCommitting || isLoading}>
+                {isCommitting ? <Loader2 size={15} className="spin" /> : <CheckCircle2 size={15} />}
+                <span>{t("settings.importCommit", { defaultValue: "Import selected" })} ({selectedCount})</span>
+              </button>
             </div>
-            {visibleCandidates.length > 0 ? (
-              <div className="import-candidate-list">
-                {visibleCandidates.map((candidate) => (
-                  <CandidateRow
-                    key={candidate.candidateId}
-                    candidate={candidate}
-                    checked={selectedIds.has(candidate.candidateId)}
-                    onToggle={toggleCandidate}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="settings-empty-state">{t("settings.importNoCandidates", { defaultValue: "No import candidates found." })}</div>
-            )}
-          </section>
-
-          <section className="api-settings-form-section import-settings-source">
-            <div className="api-settings-form-section-header">
-              <strong className="api-settings-form-section-title">{t("settings.importSourceFiles", { defaultValue: "Source files" })}</strong>
-              <span className={source?.sourceFound ? "import-settings-found" : "import-settings-missing"}>
-                {source?.sourceFound ? <CheckCircle2 size={13} aria-hidden="true" /> : null}
-                {source?.sourceFound
-                  ? t("settings.importSourceFound", { defaultValue: "Source found" })
-                  : t("settings.importSourceMissing", { defaultValue: "Source not found" })}
-              </span>
-            </div>
-            <div className="import-settings-path-list">
-              <div className="import-settings-path-row">
-                <FolderOpen size={14} aria-hidden="true" />
-                <span>{t("settings.importSourceDirectory", { defaultValue: "Source directory" })}</span>
-                <code title={source?.sourceHome}>{source?.sourceHome ?? "-"}</code>
-              </div>
-              {source?.configPaths.map((path) => (
-                <div className="import-settings-path-row" key={path.path}>
-                  <FileCode2 size={14} aria-hidden="true" />
-                  <span>{path.label}</span>
-                  <code title={path.path}>{path.path}</code>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          {source && source.warnings.length > 0 ? (
-            <section className="api-settings-form-section import-settings-warnings">
-              <strong className="api-settings-form-section-title">{t("settings.importWarnings", { defaultValue: "Warnings" })}</strong>
-              <ul>
-                {source.warnings.map((warning, index) => (
-                  <li key={`${warning}-${index}`}>
-                    <AlertTriangle size={14} aria-hidden="true" />
-                    <span>{warning}</span>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
-        </>
-      ) : null}
-      </div>
+          </div>
+        </div>
       )}
     </div>
   );

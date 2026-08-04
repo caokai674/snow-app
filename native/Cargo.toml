@@ -4,6 +4,10 @@ version = "0.1.15"
 edition = "2021"
 license = "MIT"
 
+[features]
+default = []
+native-test = ["napi/dyn-symbols"]
+
 [lib]
 crate-type = ["cdylib"]
 

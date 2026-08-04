@@ -25,6 +25,7 @@
     "postinstall": "node scripts/patch-spectre.cjs && node scripts/ensure-conpty-dll.cjs",
     "check": "npm run check:ts && cargo check --manifest-path native/Cargo.toml",
     "check:ts": "tsc --noEmit",
+    "test": "vitest run && cargo test --manifest-path native/Cargo.toml --features native-test",
     "preview": "electron-vite preview"
   },
   "dependencies": {
@@ -65,7 +66,8 @@
     "electron": "^37.10.3",
     "electron-builder": "^26.0.12",
     "electron-vite": "^4.0.0",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.7"
   },
   "build": {
     "appId": "com.snow.app",

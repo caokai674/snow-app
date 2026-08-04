@@ -1,13 +1,6 @@
-import {
-  cpSync,
-  existsSync,
-  mkdtempSync,
-  mkdirSync,
-  renameSync,
-  rmSync,
-} from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 import type {
   ImportCandidate,
   ImportCommitItemResult,
@@ -28,6 +21,7 @@ import {
   normalizeLogicalId,
   type ImportCandidateInput,
 } from "./discovery";
+import { prepareDirectoryCommit, type DirectoryCommit } from "./directoryCommit";
 
 export type SelectedImportCandidate = ImportCandidate;
 
@@ -293,11 +287,9 @@ export const commitSelectedImport = async (
   const appliedMutations: Mutation[] = [];
   const stagedSkills: Array<{
     action: ResolvedImportAction;
-    stagingPath: string;
-    destinationPath: string;
+    transaction: DirectoryCommit;
   }> = [];
-  const transactionRoot = mkdtempSync(join(tmpdir(), "snow-import-"));
-  let movedSkills: string[] = [];
+  const committedSkills: DirectoryCommit[] = [];
 
   try {
     for (const action of actionable) {
@@ -347,12 +339,12 @@ export const commitSelectedImport = async (
           }
           continue;
         }
-        const stagingPath = join(transactionRoot, String(stagedSkills.length));
-        cpSync(action.skill.sourceDir, stagingPath, { recursive: true, force: false });
         stagedSkills.push({
           action,
-          stagingPath,
-          destinationPath: action.skill.destinationDir,
+          transaction: prepareDirectoryCommit(
+            action.skill.sourceDir,
+            action.skill.destinationDir
+          ),
         });
       } else {
         results.set(action.candidate.candidateId, resultFor(
@@ -386,9 +378,8 @@ export const commitSelectedImport = async (
     }
 
     for (const staged of stagedSkills) {
-      mkdirSync(dirname(staged.destinationPath), { recursive: true });
-      renameSync(staged.stagingPath, staged.destinationPath);
-      movedSkills.push(staged.destinationPath);
+      staged.transaction.commit({ replaceExisting: false });
+      committedSkills.push(staged.transaction);
       results.set(staged.action.candidate.candidateId, resultFor(staged.action, "imported"));
     }
 
@@ -403,8 +394,15 @@ export const commitSelectedImport = async (
       await native.upsertImportResources(resources);
     }
   } catch (error) {
-    for (const path of movedSkills) {
-      rmSync(path, { recursive: true, force: true });
+    for (const transaction of [...committedSkills].reverse()) {
+      try {
+        transaction.rollback();
+      } catch (rollbackError) {
+        warnings.push(
+          "Skill rollback was incomplete: " +
+            (rollbackError instanceof Error ? rollbackError.message : String(rollbackError))
+        );
+      }
     }
     try {
       await rollbackMutations(native, appliedMutations);
@@ -419,7 +417,9 @@ export const commitSelectedImport = async (
         (error instanceof Error ? error.message : String(error))
     );
   } finally {
-    rmSync(transactionRoot, { recursive: true, force: true });
+    for (const staged of stagedSkills) {
+      staged.transaction.cleanup();
+    }
   }
 
   for (const action of actionable) {
