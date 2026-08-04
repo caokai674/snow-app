@@ -85,8 +85,8 @@ export const SETTINGS_ITEMS: SettingsItem[] = [
   {
     id: "import-config",
     icon: Download,
-    labelKey: "settings.importSettings",
-    defaultLabel: "Import configuration",
+    labelKey: "settings.thirdPartySettings",
+    defaultLabel: "Third-party configuration",
     view: "import-settings",
   },
   {

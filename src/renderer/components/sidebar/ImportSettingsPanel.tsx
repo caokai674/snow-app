@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  Download,
   FileCode2,
   FolderOpen,
   Loader2,
@@ -28,6 +29,8 @@ import { PluginsSettingsPanel } from "./PluginsSettingsPanel";
 type ImportSettingsPanelProps = {
   onClose?: () => void;
 };
+
+type ThirdPartyTab = "import" | "plugins";
 
 type SummaryItem = {
   icon: typeof Plug;
@@ -184,6 +187,7 @@ function CandidateRow({
 
 export function ImportSettingsPanel({ onClose }: ImportSettingsPanelProps): React.JSX.Element {
   const { t } = useI18n();
+  const [activeTab, setActiveTab] = useState<ThirdPartyTab>("import");
   const [activeSource, setActiveSource] = useState<ImportProvider>("codex");
   const [discovery, setDiscovery] = useState<ImportDiscovery | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -210,8 +214,8 @@ export function ImportSettingsPanel({ onClose }: ImportSettingsPanelProps): Reac
   }, [t]);
 
   useEffect(() => {
-    void loadDiscovery();
-  }, [loadDiscovery]);
+    if (activeTab === "import") void loadDiscovery();
+  }, [activeTab, loadDiscovery]);
 
   const visibleCandidates = useMemo(() => {
     if (!discovery) return [];
@@ -272,28 +276,66 @@ export function ImportSettingsPanel({ onClose }: ImportSettingsPanelProps): Reac
     : activeSource === "claude-code"
       ? t("settings.importClaudeCodeDescription", { defaultValue: "MCP, Skills, CLAUDE.md, rules, and commands from Claude Code." })
       : t("settings.importOpenCodeDescription", { defaultValue: "MCP, Skills, instructions, commands, and agents from OpenCode." });
+  const pageDescription = activeTab === "plugins"
+    ? t("settings.pluginsSettingsInfo", {
+      defaultValue: "Install and manage Plugins: enable, disable, update, and uninstall.",
+    })
+    : sourceDescription;
 
   return (
     <div className="api-settings-page import-settings-page" role="region">
       <div className="api-settings-page-header">
         <div className="api-settings-title-group">
-          <strong>{t("settings.importSettings", { defaultValue: "Import configuration" })}</strong>
-          <span className="settings-item-description">{sourceDescription}</span>
+          <strong>{t("settings.thirdPartySettings", { defaultValue: "Third-party configuration" })}</strong>
+          <span className="settings-item-description">{pageDescription}</span>
         </div>
         {onClose ? (
           <button
             className="icon-btn ghost"
             onClick={onClose}
             type="button"
-            aria-label={t("settings.closeImportSettings", { defaultValue: "Close import settings" })}
-            title={t("settings.closeImportSettings", { defaultValue: "Close import settings" })}
+            aria-label={t("settings.closeThirdPartySettings", { defaultValue: "Close third-party configuration" })}
+            title={t("settings.closeThirdPartySettings", { defaultValue: "Close third-party configuration" })}
           >
             <X size={15} strokeWidth={1.8} />
           </button>
         ) : null}
       </div>
 
-      <div className="import-settings-tabs" role="tablist" aria-label={t("settings.importSettings", { defaultValue: "Import configuration" })}>
+      <div className="third-party-settings-tabs" role="tablist" aria-label={t("settings.thirdPartySettings", { defaultValue: "Third-party configuration" })}>
+        <button
+          id="third-party-tab-import"
+          className={`third-party-settings-tab ${activeTab === "import" ? "active" : ""}`}
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "import"}
+          aria-controls="third-party-panel-import"
+          onClick={() => setActiveTab("import")}
+        >
+          <Download size={15} strokeWidth={1.8} />
+          <span>{t("settings.thirdPartyImportTab", { defaultValue: "Import configuration" })}</span>
+        </button>
+        <button
+          id="third-party-tab-plugins"
+          className={`third-party-settings-tab ${activeTab === "plugins" ? "active" : ""}`}
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "plugins"}
+          aria-controls="third-party-panel-plugins"
+          onClick={() => setActiveTab("plugins")}
+        >
+          <Puzzle size={15} strokeWidth={1.8} />
+          <span>{t("settings.thirdPartyPluginsTab", { defaultValue: "Manage Plugins" })}</span>
+        </button>
+      </div>
+
+      {activeTab === "plugins" ? (
+        <div id="third-party-panel-plugins" role="tabpanel" aria-labelledby="third-party-tab-plugins">
+          <PluginsSettingsPanel embedded />
+        </div>
+      ) : (
+      <div id="third-party-panel-import" className="import-settings-source-panel" role="tabpanel" aria-labelledby="third-party-tab-import">
+      <div className="import-settings-tabs" role="tablist" aria-label={t("settings.importSourceTabs", { defaultValue: "Import source" })}>
         {(["codex", "claude-code", "opencode"] as const).map((provider) => (
           <button
             key={provider}
@@ -410,13 +452,8 @@ export function ImportSettingsPanel({ onClose }: ImportSettingsPanelProps): Reac
           ) : null}
         </>
       ) : null}
-
-      <section
-        className="import-settings-plugins"
-        aria-label={t("settings.pluginsSettings", { defaultValue: "Plugins" })}
-      >
-        <PluginsSettingsPanel embedded />
-      </section>
+      </div>
+      )}
     </div>
   );
 }

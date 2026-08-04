@@ -359,6 +359,7 @@ export function PluginsSettingsPanel({ onClose, embedded = false }: PluginsSetti
       <AutoDismissNotice message={status} tone="success" onDismiss={() => setStatus("")} />
       <AutoDismissNotice message={error} tone="error" onDismiss={() => setError("")} />
 
+      <div className="plugins-management-columns">
       <section className="api-settings-form-section plugins-marketplaces-section" aria-label={t("settings.pluginsMarketplaces", { defaultValue: "Plugin marketplaces" })}>
         <div className="api-settings-form-section-header">
           <div className="plugins-marketplaces-title">
@@ -486,6 +487,17 @@ export function PluginsSettingsPanel({ onClose, embedded = false }: PluginsSetti
       ) : null}
 
       <section className="api-settings-form-section plugins-settings-list" aria-label={t("settings.pluginsList", { defaultValue: "Plugin list" })}>
+        <div className="api-settings-form-section-header">
+          <div className="plugins-marketplaces-title">
+            <strong className="api-settings-form-section-title">
+              {t("settings.pluginsInstalledSection", { defaultValue: "Installed Plugins" })}
+            </strong>
+            <span className="settings-item-description">
+              {t("settings.pluginsInstalledInfo", { defaultValue: "Enable, disable, update, or uninstall Plugins managed by Snow." })}
+            </span>
+          </div>
+          <span className="plugins-section-count">{plugins.length}</span>
+        </div>
         {plugins.length === 0 && !isLoading ? (
           <div className="settings-empty-state">{t("settings.pluginsEmpty", { defaultValue: "No imported Plugins." })}</div>
         ) : plugins.map((plugin) => {
@@ -581,6 +593,7 @@ export function PluginsSettingsPanel({ onClose, embedded = false }: PluginsSetti
           );
         })}
       </section>
+      </div>
 
       <ConfirmDialog
         open={Boolean(pendingRuntimeStart)}
