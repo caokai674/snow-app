@@ -1427,6 +1427,7 @@ export const en = {
   "settings.themePresetDracula": "Dracula",
   "settings.themePresetTokyoNight": "Tokyo Night",
   "settings.themePresetGithub": "GitHub",
+  "settings.themePresetApple": "Apple",
   "settings.themePresetGoogle": "Google",
   "settings.themePresetGruvbox": "Gruvbox",
   "settings.themeCustomTitle": "Custom theme",

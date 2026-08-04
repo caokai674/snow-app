@@ -1364,6 +1364,7 @@ export const zhTW = {
   "settings.themePresetDracula": "Dracula",
   "settings.themePresetTokyoNight": "Tokyo Night",
   "settings.themePresetGithub": "GitHub",
+  "settings.themePresetApple": "Apple",
   "settings.themePresetGoogle": "Google",
   "settings.themePresetGruvbox": "Gruvbox",
   "settings.themeCustomTitle": "自訂主題",

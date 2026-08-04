@@ -1366,6 +1366,7 @@ export const zhCN = {
   "settings.themePresetDracula": "Dracula",
   "settings.themePresetTokyoNight": "Tokyo Night",
   "settings.themePresetGithub": "GitHub",
+  "settings.themePresetApple": "Apple",
   "settings.themePresetGoogle": "Google",
   "settings.themePresetGruvbox": "Gruvbox",
   "settings.themeCustomTitle": "自定义主题",
