@@ -6,8 +6,49 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: debian12-deb-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-deb:
+  test:
+    name: Test
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Restore Rust compilation cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native -> target
+          shared-key: debian12-x64
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install npm dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Run tests
+        run: npm test
+
+  package-deb:
+    name: Build Debian archive
     # Ubuntu 22.04's glibc 2.35 is compatible with Debian 12's glibc 2.36.
     runs-on: ubuntu-22.04
 
@@ -26,16 +67,27 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
 
+      - name: Restore Rust compilation cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native -> target
+          shared-key: debian12-x64
+
+      - name: Restore Electron packaging cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: debian12-electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Install npm dependencies
-        run: npm ci
-
-      - name: Run tests
-        run: npm test
+        run: npm ci --prefer-offline --no-audit
 
       - name: Build application
         run: npm run build
@@ -44,6 +96,26 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npx electron-builder --linux deb --x64 --publish never
+
+      - name: Upload package candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: snow-app-debian12-deb-candidate
+          path: release/*.deb
+          if-no-files-found: error
+          retention-days: 1
+
+  verify-deb:
+    name: Verify Debian 12 package
+    needs: [test, package-deb]
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download package candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: snow-app-debian12-deb-candidate
+          path: release
 
       - name: Validate package metadata
         shell: bash
