@@ -81,6 +81,12 @@ jobs:
             ~/.cache/electron-builder
           key: debian12-electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
+      - name: Restore Debian 12 image cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/debian-12-slim.tar
+          key: debian12-image-${{ runner.os }}-amd64-v1
+
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
@@ -97,26 +103,6 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npx electron-builder --linux deb --x64 --publish never
 
-      - name: Upload package candidate
-        uses: actions/upload-artifact@v4
-        with:
-          name: snow-app-debian12-deb-candidate
-          path: release/*.deb
-          if-no-files-found: error
-          retention-days: 1
-
-  verify-deb:
-    name: Verify Debian 12 package
-    needs: [test, package-deb]
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Download package candidate
-        uses: actions/download-artifact@v4
-        with:
-          name: snow-app-debian12-deb-candidate
-          path: release
-
       - name: Validate package metadata
         shell: bash
         run: |
@@ -130,21 +116,47 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for attempt in 1 2 3; do
-            if docker pull debian:12-slim; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            sleep "$((attempt * 10))"
-          done
+          image_archive="${RUNNER_TEMP}/debian-12-slim.tar"
+          if [ -f "$image_archive" ]; then
+            docker load --input "$image_archive"
+          else
+            for attempt in 1 2; do
+              if timeout --foreground 90s docker pull debian:12-slim; then
+                break
+              fi
+              if [ "$attempt" -eq 2 ]; then
+                exit 1
+              fi
+              sleep 10
+            done
+            docker save --output "$image_archive" debian:12-slim
+          fi
           docker run --rm --pull=never -v "$PWD/release:/release:ro" debian:12-slim bash -ec '
             apt-get update
             apt-get install -y /release/*.deb
             package_name="$(dpkg-deb -f /release/*.deb Package)"
             dpkg-query -W -f="\${Status}\n" "$package_name" | grep -Fx "install ok installed"
           '
+
+      - name: Upload package candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: snow-app-debian12-deb-candidate
+          path: release/*.deb
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-deb:
+    name: Publish verified Debian package
+    needs: [test, package-deb]
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download package candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: snow-app-debian12-deb-candidate
+          path: release
 
       - name: Upload Debian 12 package
         uses: actions/upload-artifact@v4
