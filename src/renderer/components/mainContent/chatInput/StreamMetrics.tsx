@@ -1,12 +1,4 @@
-import {
-  ArrowDown,
-  Circle,
-  Clock,
-  Gauge,
-  Pause,
-  Play,
-  Timer,
-} from "lucide-react";
+import { ArrowDown, Clock, Gauge, Pause, Play, Timer } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 import { useI18n } from "../../../i18n";
 
@@ -24,16 +16,6 @@ export type StreamMetricsProps = {
   startedAt: number;
   /** Whether the agent loop is currently paused. */
   isPaused: boolean;
-  /** One-based index of the active top-level TODO step. */
-  taskCurrent: number;
-  /** Total number of top-level TODO steps. */
-  taskTotal: number;
-  /** Number of unique files changed in the active conversation. */
-  changedFileCount: number;
-  additions: number;
-  deletions: number;
-  /** Open the detailed file-changes panel. */
-  onOpenFileChanges: () => void;
   /** Pause the agent loop (only valid while streaming and not already paused). */
   onPause: () => void;
   /** Resume a paused agent loop. */
@@ -91,12 +73,6 @@ export const StreamMetrics = memo(
     ttftMs,
     startedAt,
     isPaused,
-    taskCurrent,
-    taskTotal,
-    changedFileCount,
-    additions,
-    deletions,
-    onOpenFileChanges,
     onPause,
     onResume,
   }: StreamMetricsProps): React.JSX.Element => {
@@ -131,16 +107,12 @@ export const StreamMetrics = memo(
         ? formatTokPerSec(tokenCount, elapsedMs)
         : "--";
     const hasTps = tps !== "--";
-    const hasWorkSummary =
-      taskTotal > 0 || changedFileCount > 0 || additions > 0 || deletions > 0;
 
     return (
       <span className="stream-metrics">
         <button
           type="button"
-          className={`stream-metrics-pause-btn${
-            isPaused ? " is-paused" : ""
-          }`}
+          className={`stream-metrics-pause-btn${isPaused ? " is-paused" : ""}`}
           aria-label={
             isPaused
               ? t("chat.streamMetrics.resume")
@@ -160,55 +132,20 @@ export const StreamMetrics = memo(
           )}
         </button>
         <span className="stream-metrics-sep" />
-        {hasWorkSummary ? (
-          <>
-            <span className="stream-metrics-work-summary">
-              {taskTotal > 0 ? (
-                <span className="stream-metrics-task-progress">
-                  <Circle
-                    aria-hidden="true"
-                    size={11}
-                    className="stream-metrics-work-icon"
-                  />
-                  <span>
-                    {t("chat.streamMetrics.step", {
-                      values: { current: taskCurrent, total: taskTotal },
-                    })}
-                  </span>
-                </span>
-              ) : null}
-              {taskTotal > 0 ? (
-                <span className="stream-metrics-work-dot">·</span>
-              ) : null}
-              <button
-                type="button"
-                className="stream-metrics-file-progress"
-                aria-label={t("chat.fileChanges.toggle")}
-                title={t("chat.fileChanges.toggle")}
-                onClick={onOpenFileChanges}
-              >
-                <span>
-                  {t("chat.streamMetrics.filesChanged", {
-                    values: { count: changedFileCount },
-                  })}
-                </span>
-                <span className="stream-metrics-additions">+{additions}</span>
-                <span className="stream-metrics-deletions">-{deletions}</span>
-              </button>
-            </span>
-            <span className="stream-metrics-sep" />
-          </>
-        ) : null}
         <span
           className={`stream-metrics-metric stream-metrics-elapsed${
             isActive ? " is-active" : ""
           }`}
+          title={t("chat.streamMetrics.elapsedTitle")}
         >
           <Timer size={11} className="stream-metrics-icon" />
           <span className="stream-metrics-value">{elapsedDisplay}</span>
         </span>
         <span className="stream-metrics-sep" />
-        <span className="stream-metrics-metric stream-metrics-ttft">
+        <span
+          className="stream-metrics-metric stream-metrics-ttft"
+          title={t("chat.streamMetrics.ttftTitle")}
+        >
           <Clock size={11} className="stream-metrics-icon" />
           <span className="stream-metrics-value">
             {hasTtft ? formatTtft(ttftMs) : "--"}
@@ -219,10 +156,11 @@ export const StreamMetrics = memo(
           className={`stream-metrics-metric stream-metrics-tokens${
             hasTokens ? " is-active" : ""
           }`}
+          title="tokens"
         >
           <ArrowDown size={11} className="stream-metrics-icon" />
           <span className="stream-metrics-value">
-            {formatTokenCount(tokenCount)}
+            {hasTokens ? formatTokenCount(tokenCount) : "--"}
           </span>
           <span className="stream-metrics-label">tokens</span>
         </span>
@@ -231,6 +169,7 @@ export const StreamMetrics = memo(
           className={`stream-metrics-metric stream-metrics-tps${
             hasTps ? " is-active" : ""
           }`}
+          title="tok/s"
         >
           <Gauge size={11} className="stream-metrics-icon" />
           <span className="stream-metrics-value">{tps}</span>

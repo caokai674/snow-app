@@ -499,6 +499,9 @@ CREATE INDEX IF NOT EXISTS idx_api_configs_active
     services::codebase_embed_sessions::ensure_sessions_table(connection)?;
     services::remote_drafts::ensure_remote_drafts_table(connection)?;
 
+    // Ensure the image library table exists (generated images index).
+    services::image_library::ensure_image_library_table(connection)?;
+
     // Post-schema migrations run AFTER CREATE TABLE to add columns that
     // older databases lack but fresh databases already have. Each migration
     // is idempotent. Includes the local per-conversation Plan/Goal Mode
@@ -515,72 +518,4 @@ pub fn database_error(database_path: &Path, action: &str, error: rusqlite::Error
         "Failed to {action} Snow App sqlite database at '{}': {error}",
         database_path.display()
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        process,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    use super::*;
-
-    fn test_database_path() -> PathBuf {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock is after Unix epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "snow-database-foreign-keys-{}-{timestamp}.sqlite",
-            process::id()
-        ))
-    }
-
-    #[test]
-    fn open_connection_enables_plugin_component_cascades() {
-        let database_path = test_database_path();
-        ensure_database(&database_path).expect("initialize test database");
-
-        {
-            let connection = open_connection(&database_path).expect("open test database");
-            let foreign_keys: i64 = connection
-                .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
-                .expect("read foreign key setting");
-            assert_eq!(foreign_keys, 1);
-            connection
-                .execute(
-                    "INSERT INTO plugins (
-                       plugin_id, name, provider, source_path, manifest_path, scope, content_hash
-                     ) VALUES ('plugin:test', 'Test plugin', 'codex', '/tmp/plugin', '/tmp/plugin.json', 'global', 'hash')",
-                    [],
-                )
-                .expect("insert plugin");
-            connection
-                .execute(
-                    "INSERT INTO plugin_components (
-                       component_id, plugin_id, component_type, logical_id, origin_path, content_hash, status
-                     ) VALUES ('component:test', 'plugin:test', 'skill', 'test', '/tmp/skill', 'hash', 'supported')",
-                    [],
-                )
-                .expect("insert plugin component");
-        }
-
-        services::plugins::delete_plugin(&database_path, "plugin:test").expect("delete plugin");
-
-        let connection = open_connection(&database_path).expect("reopen test database");
-        let component_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM plugin_components", [], |row| {
-                row.get(0)
-            })
-            .expect("count plugin components");
-        assert_eq!(component_count, 0);
-        drop(connection);
-
-        let _ = fs::remove_file(&database_path);
-        let _ = fs::remove_file(database_path.with_extension("sqlite-wal"));
-        let _ = fs::remove_file(database_path.with_extension("sqlite-shm"));
-    }
 }

@@ -1165,6 +1165,17 @@ pub async fn list_sub_agent_conversations(
 }
 
 #[napi]
+pub async fn list_sub_agent_conversations_by_parents(
+    parent_conversation_ids: Vec<String>,
+) -> napi::Result<std::collections::HashMap<String, Vec<ChatConversationRecord>>> {
+    tokio::task::spawn_blocking(move || {
+        crate::storage::list_sub_agent_conversations_by_parents(parent_conversation_ids)
+    })
+    .await
+    .map_err(map_spawn_error)?
+}
+
+#[napi]
 pub async fn create_sub_agent_session(
     conversation_id: String,
     parent_conversation_id: String,
@@ -1262,6 +1273,13 @@ pub async fn update_conversation_api_profile(
 #[napi]
 pub async fn delete_conversation(conversation_id: String) -> napi::Result<()> {
     tokio::task::spawn_blocking(move || crate::storage::delete_conversation(conversation_id))
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn delete_conversations(conversation_ids: Vec<String>) -> napi::Result<()> {
+    tokio::task::spawn_blocking(move || crate::storage::delete_conversations(conversation_ids))
         .await
         .map_err(map_spawn_error)?
 }

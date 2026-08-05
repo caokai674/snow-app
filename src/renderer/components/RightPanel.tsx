@@ -51,6 +51,7 @@ import type {
   RightPanelContentProps,
   RightPanelTab,
   TerminalTabData,
+  TerminalOpenOptions,
 } from "./rightPanel/types";
 
 // 非默认 tab 的重组件按需加载，避免 xterm / highlight.js 等重型依赖打入首屏 chunk。
@@ -201,9 +202,16 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
     );
 
     const handleOpenTerminalTab = useCallback(
-      (cwd: string, requestedTabId?: string, ptyId?: string): string => {
+      (
+        cwd: string,
+        requestedTabId?: string,
+        options?: TerminalOpenOptions
+      ): string => {
         const tabId = requestedTabId ?? `terminal-${Date.now()}`;
-        const terminalData: TerminalTabData = { cwd, ptyId };
+        const terminalData: TerminalTabData = {
+          cwd,
+          ...(options ?? {}),
+        };
         setTabs((prev) => [
           ...prev,
           {
@@ -829,7 +837,7 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
       ]
     );
 
-    useTerminalMcpCommandBridge(terminalMcpCallbacks);
+    useTerminalMcpCommandBridge(terminalMcpCallbacks, activeDirectory);
 
     const tabListRef = useRef<HTMLDivElement>(null);
 
@@ -881,6 +889,7 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
               tabId={tab.id}
               cwd={(tab.data as TerminalTabData).cwd}
               ptyId={(tab.data as TerminalTabData).ptyId}
+              shellPath={(tab.data as TerminalTabData).shellPath}
               isActive={activeTabId === tab.id}
               onTitleChange={(title) =>
                 handleTerminalTitleChange(tab.id, title)
@@ -917,7 +926,7 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
                   handleOpenTerminalTab(
                     (tab.data as RemoteJobsTabData).workspacePath,
                     `remote-job-${attachment.jobId}-${Date.now()}`,
-                    attachment.ptyId
+                    { ptyId: attachment.ptyId }
                   )
                 }
               />

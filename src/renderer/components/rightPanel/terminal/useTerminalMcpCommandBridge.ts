@@ -1,5 +1,9 @@
 import { useEffect, useRef } from "react";
-import type { TerminalCommandRequest } from "../../../../preload";
+import type {
+  TerminalCommandRequest,
+  WorkspaceDirectoryRecord,
+} from "../../../../preload";
+import type { TerminalOpenOptions } from "../types";
 import {
   createTerminalTabId,
   executeTerminalMcpCommand,
@@ -16,7 +20,11 @@ export type TerminalTabInfo = {
 };
 
 export type TerminalMcpTabCallbacks = {
-  openTab: (cwd: string, tabId?: string) => string;
+  openTab: (
+    cwd: string,
+    tabId?: string,
+    options?: TerminalOpenOptions
+  ) => string;
   closeTab: (tabId: string) => boolean;
   focusTab: (tabId: string) => boolean;
   listTabs: () => TerminalTabInfo[];
@@ -33,13 +41,13 @@ const resolveTabId = (argsJson: string): string | null => {
 };
 
 export const useTerminalMcpCommandBridge = (
-  callbacks: TerminalMcpTabCallbacks
+  callbacks: TerminalMcpTabCallbacks,
+  activeDirectory?: WorkspaceDirectoryRecord | null
 ): void => {
-  // Hold the latest callbacks in a ref to avoid re-running the effect
-  // when callbacks change (cleanup triggers terminal:renderer-unregister
-  // which would reject all pending terminal commands).
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
+  const activeDirRef = useRef(activeDirectory);
+  activeDirRef.current = activeDirectory;
 
   useEffect(() => {
     return window.snow.registerTerminalCommandHandler(
@@ -49,14 +57,19 @@ export const useTerminalMcpCommandBridge = (
         switch (request.operation) {
           case "open": {
             const args = parseTerminalMcpCommandArgs(request.argsJson);
-            const cwd =
+            const requestedCwd =
               typeof args.cwd === "string" ? args.cwd.trim() : "";
             const shellPath =
               typeof args.shellPath === "string"
-                ? args.shellPath.trim()
+                ? args.shellPath.trim() || undefined
                 : undefined;
+            const activeDir = activeDirRef.current;
+            const cwd =
+              requestedCwd ||
+              activeDir?.path ||
+              "";
             const tabId = createTerminalTabId();
-            cb.openTab(cwd, tabId);
+            cb.openTab(cwd, tabId, { shellPath });
             await waitForTerminalTab(tabId);
             return JSON.stringify({
               tabId,

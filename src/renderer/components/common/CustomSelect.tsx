@@ -33,6 +33,12 @@ type CustomSelectProps = {
    * current callers.
    */
   portal?: boolean;
+  /**
+   * Optional custom renderer for each dropdown item (e.g. an icon or a
+   * small diagram next to the label). Falls back to the plain label when
+   * omitted.
+   */
+  renderOption?: (option: CustomSelectOption) => React.ReactNode;
 };
 
 type DropdownRect = {
@@ -47,6 +53,7 @@ export function CustomSelect({
   onChange,
   disabled = false,
   portal = false,
+  renderOption,
 }: CustomSelectProps): React.JSX.Element {
   const [isOpen, setIsOpen] = useState(false);
   const [dropdownRect, setDropdownRect] = useState<DropdownRect | null>(null);
@@ -152,7 +159,7 @@ export function CustomSelect({
           className="custom-select-item"
           onClick={(event) => handleSelect(event, opt.value)}
         >
-          <span>{opt.label}</span>
+          <span>{renderOption ? renderOption(opt) : opt.label}</span>
           {opt.value === value && (
             <Check size={14} className="custom-select-check" />
           )}

@@ -51,7 +51,7 @@ type ConfigSource = {
   projectRoot?: string;
 };
 
-type ImportContext = {
+export type ClaudeCodeImportContext = {
   source: ImportSource;
   mcpServers: ImportedMcp[];
   prompts: SystemPromptItemInput[];
@@ -361,7 +361,32 @@ const collectPrompts = async (
     );
   }
 
-  for (const project of projects.filter((item) => item.kind === "local")) {
+  const localProjects = projects.filter((item) => item.kind === "local");
+  // Walk .claude/rules and .claude/commands for every project in parallel.
+  // Results are consumed in the original per-project order so prompt
+  // sortOrder stays deterministic.
+  const promptWalkTasks: Array<{
+    project: WorkspaceDirectoryRecord;
+    kind: string;
+    root: string;
+  }> = [];
+  for (const project of localProjects) {
+    for (const [kind, root] of [
+      ["rule", join(project.path, ".claude", "rules")],
+      ["command", join(project.path, ".claude", "commands")],
+    ] as const) {
+      promptWalkTasks.push({ project, kind, root });
+    }
+  }
+  const walkedPrompts = await Promise.all(
+    promptWalkTasks.map(async (task) => ({
+      task,
+      paths: existsSync(task.root)
+        ? await walkFiles(task.root, (file) => file.endsWith(".md"))
+        : [],
+    }))
+  );
+  for (const project of localProjects) {
     addFile(
       `${SOURCE}:project:${project.directoryId}:claude-md`,
       `Claude Code CLAUDE.md (${project.directoryId})`,
@@ -376,22 +401,20 @@ const collectPrompts = async (
       "project",
       project.directoryId
     );
-    for (const [kind, root] of [
-      ["rule", join(project.path, ".claude", "rules")],
-      ["command", join(project.path, ".claude", "commands")],
-    ] as const) {
-      for (const path of await walkFiles(root, (file) =>
-        file.endsWith(".md")
-      )) {
+    for (const { task, paths } of walkedPrompts) {
+      if (task.project !== project) {
+        continue;
+      }
+      for (const path of paths) {
         addFile(
-          `${SOURCE}:project:${project.directoryId}:${kind}:${safeSegment(
-            path
-          )}`,
-          `Claude Code ${kind}`,
+          `${SOURCE}:project:${task.project.directoryId}:${
+            task.kind
+          }:${safeSegment(path)}`,
+          `Claude Code ${task.kind}`,
           path,
           "project",
-          project.directoryId,
-          kind !== "command"
+          task.project.directoryId,
+          task.kind !== "command"
         );
       }
     }
@@ -405,12 +428,33 @@ const collectSkills = async (
 ): Promise<DiscoveredSkill[]> => {
   const skills: DiscoveredSkill[] = [];
   const sourcePaths = new Set<string>();
-  const addRoot = async (
-    sourceRoot: string,
-    scope: "global" | "project",
-    project?: WorkspaceDirectoryRecord
-  ): Promise<void> => {
-    for (const sourceDir of await collectSkillDirectories(sourceRoot)) {
+  // Walk all skills roots in parallel; skip roots that do not exist so we
+  // avoid a worker round-trip for every project without a .claude/skills
+  // folder. Task order matches the previous sequential loop, so discovery
+  // order (and sortOrder in later phases) is unchanged.
+  const localProjects = projects.filter((item) => item.kind === "local");
+  const tasks: Array<{
+    sourceRoot: string;
+    scope: "global" | "project";
+    project?: WorkspaceDirectoryRecord;
+  }> = [
+    { sourceRoot: join(claudeHome, "skills"), scope: "global" },
+    ...localProjects.map((project) => ({
+      sourceRoot: join(project.path, ".claude", "skills"),
+      scope: "project" as const,
+      project,
+    })),
+  ];
+  const results = await Promise.all(
+    tasks.map(async (task) => ({
+      task,
+      skillDirs: existsSync(task.sourceRoot)
+        ? await collectSkillDirectories(task.sourceRoot)
+        : [],
+    }))
+  );
+  for (const { task, skillDirs } of results) {
+    for (const sourceDir of skillDirs) {
       const key = resolve(sourceDir);
       if (sourcePaths.has(key)) {
         continue;
@@ -418,21 +462,22 @@ const collectSkills = async (
       sourcePaths.add(key);
       skills.push({
         sourceDir,
-        scope,
-        ...(project
-          ? { projectId: project.directoryId, projectRoot: project.path }
+        scope: task.scope,
+        ...(task.project
+          ? {
+              projectId: task.project.directoryId,
+              projectRoot: task.project.path,
+            }
           : {}),
       });
     }
-  };
-  await addRoot(join(claudeHome, "skills"), "global");
-  for (const project of projects.filter((item) => item.kind === "local")) {
-    await addRoot(join(project.path, ".claude", "skills"), "project", project);
   }
   return skills;
 };
 
-const buildContext = async (native: NativeBridge): Promise<ImportContext> => {
+export const buildClaudeCodeContext = async (
+  native: NativeBridge
+): Promise<ClaudeCodeImportContext> => {
   const claudeHome = getClaudeHome();
   const claudeJsonPath = join(homedir(), ".claude.json");
   const warnings: string[] = [];
@@ -484,10 +529,9 @@ const buildContext = async (native: NativeBridge): Promise<ImportContext> => {
   };
 };
 
-export const discoverClaudeCodeImport = async (
-  native: NativeBridge
+export const discoverClaudeCodeImportFromContext = async (
+  context: ClaudeCodeImportContext
 ): Promise<ImportSourceDiscovery> => {
-  const context = await buildContext(native);
   const skillCandidates = await Promise.all(
     context.skills.map(async (skill) => ({
       type: "skill" as const,
@@ -533,18 +577,26 @@ export const discoverClaudeCodeImport = async (
   return { source: context.source, candidates };
 };
 
+export const discoverClaudeCodeImport = async (
+  native: NativeBridge
+): Promise<ImportSourceDiscovery> =>
+  discoverClaudeCodeImportFromContext(await buildClaudeCodeContext(native));
+
 export const resolveClaudeCodeSelectedImports = async (
   native: NativeBridge,
-  selected: SelectedImportCandidate[]
+  selected: SelectedImportCandidate[],
+  // Reuse a previously built context (e.g. from discoverAllImportContexts)
+  // to avoid re-scanning every Claude Code directory twice per commit.
+  context?: ClaudeCodeImportContext
 ): Promise<{ actions: ResolvedImportAction[]; warnings: string[] }> => {
-  const context = await buildContext(native);
+  const ctx = context ?? (await buildClaudeCodeContext(native));
   const actions: ResolvedImportAction[] = [];
-  for (const server of context.mcpServers) {
+  for (const server of ctx.mcpServers) {
     const input: ImportCandidateInput = {
       type: "mcp",
       provider: SOURCE,
       scope: server.scope,
-      originPath: context.source.sourceHome,
+      originPath: ctx.source.sourceHome,
       logicalId: server.input.name,
       contentHash: hashImportValue({
         transportType: server.input.transportType,
@@ -566,7 +618,7 @@ export const resolveClaudeCodeSelectedImports = async (
       });
     }
   }
-  for (const prompt of context.prompts) {
+  for (const prompt of ctx.prompts) {
     const type = prompt.promptId.includes(":command:")
       ? ("command" as const)
       : ("prompt" as const);
@@ -574,7 +626,7 @@ export const resolveClaudeCodeSelectedImports = async (
       type,
       provider: SOURCE,
       scope: prompt.scope ?? "global",
-      originPath: context.source.sourceHome,
+      originPath: ctx.source.sourceHome,
       logicalId: prompt.promptId,
       contentHash: hashImportValue(prompt.content),
       ...(prompt.projectId ? { projectId: prompt.projectId } : {}),
@@ -589,7 +641,7 @@ export const resolveClaudeCodeSelectedImports = async (
       });
     }
   }
-  for (const skill of context.skills) {
+  for (const skill of ctx.skills) {
     const input: ImportCandidateInput = {
       type: "skill",
       provider: SOURCE,
@@ -618,7 +670,7 @@ export const resolveClaudeCodeSelectedImports = async (
       });
     }
   }
-  return { actions, warnings: context.source.warnings };
+  return { actions, warnings: ctx.source.warnings };
 };
 
 export const previewClaudeCodeImport = async (

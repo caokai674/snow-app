@@ -1,7 +1,7 @@
 # Architecture Overview
 
 > For developers: Snow App's overall architecture, layer responsibilities, communication chains, and key mechanisms.
-> See also: [Data Storage Locations](4-data-storage-locations.md), [Developer Guide](2-developer-guide.md).
+> See also: [Data Storage Locations](../3-reference/4-data-storage-locations.md), [Developer Guide](2-developer-guide.md).
 
 ## 1. Tech Stack
 

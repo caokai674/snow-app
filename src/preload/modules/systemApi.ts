@@ -661,9 +661,15 @@ export const systemApi = {
     ipcRenderer.invoke("checkpoint:list-changes", checkpointId, workDir),
   listCheckpointDiffs: (
     checkpointId: string,
-    workDir: string
+    workDir: string,
+    includeAll?: boolean
   ): Promise<CheckpointFileDiff[]> =>
-    ipcRenderer.invoke("checkpoint:list-diffs", checkpointId, workDir),
+    ipcRenderer.invoke(
+      "checkpoint:list-diffs",
+      checkpointId,
+      workDir,
+      includeAll ?? false
+    ),
   writeLog: (level: string, entry: unknown): Promise<void> =>
     ipcRenderer.invoke("debug:write-log", level, entry),
   sum: (a: number, b: number): Promise<number> =>

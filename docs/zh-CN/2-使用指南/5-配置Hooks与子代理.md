@@ -161,3 +161,40 @@ config-delete scope=subAgents key=agent_db_migrator projectId=<projectId>
 > 注意：`toolsJson` 中的工具名必须是当前项目已启用的 MCP 工具或内置工具
 > 全名（`{server_id}-{tool_name}`）。`configProfile` 必须是已存在的
 > API 配置档名，为空表示跟随全局生效配置。
+
+## 3. AI / 命令行配置引导（config 工具）
+
+AI Agent 通过内置 `config` 工具配置时的规则速查（与 `config-list` 响应中
+返回的 `guidance` 引导一致）：
+
+### 3.1 子代理规则与常见坑
+
+| 规则 | 说明 |
+| --- | --- |
+| `toolsJson` 显式工具名列表 **必须传 `projectId`** | 选择具体工具的子代理必然是**项目级**；全局子代理只能用 `"*"`（全部工具）或空列表 |
+| 工具名必须项目可用 | `toolsJson` 中的每个工具名必须是该项目已启用的内置/MCP 工具全名，否则写入被拒 |
+| `configProfile` 留空 | 表示跟随全局生效配置；填已存在的 API 配置档名可指定独立模型 |
+| `systemPrompt` 完全自包含 | 子代理独立运行、**无会话历史**——使命、原则、工具用法、输出格式都要写全 |
+| 项目级优先 | 激活时项目级子代理优先于同名全局子代理；未命中回退全局 |
+| 内置保护 | `agent_general` 不可修改、不可删除 |
+
+**获取 `projectId`**：即项目工作区目录的 `directoryId`，可在
+`~/.snow/projects/index.json` 中按项目路径（`knownPaths`）查到；
+也可让用户在 **设置 → 子代理设置 → 项目** 范围界面中选择项目后查看。
+
+### 3.2 Hooks 规则速查
+
+| 规则 | 说明 |
+| --- | --- |
+| `hookType` 白名单 | `onUserMessage` / `beforeToolCall` / `toolConfirmation` / `afterToolCall` / `onSubAgentComplete` / `beforeSubAgentStart` / `beforeCompress` / `onSessionStart` / `onStop` |
+| `matcher` 通配符 | 工具类 hook 可用 glob 限定（如 `bash-*` 只拦 bash 工具） |
+| `command` 退出码 | `0`=通过（stdout 注入 `[Hook Context]`）；`1`=软警告（stdout 为 `{"decision":{"message":"..."}}` 时触发用户决策 UI）；`2+`=阻断流程 |
+| action 适用性 | `prompt` 仅 `onSubAgentComplete`/`onStop`；`context` 仅 `onSessionStart`/`onUserMessage`/`beforeSubAgentStart` |
+| 项目级覆盖 | 传 `projectId` 的项目级 hook 覆盖同类型全局 hook |
+
+### 3.3 配置流程建议
+
+1. 先 `config-list scope=<域>` 查看现状与响应中的 `guidance` 引导；
+2. 按上文「配置方式 B」的示例构造 `config-set` 请求；
+3. 写入后 `config-get` 回读确认；
+4. 涉及项目级配置时先确认 `projectId`（见 3.1）。

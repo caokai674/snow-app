@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../../../i18n";
 import type { TokenUsage } from "../../../../preload";
 
@@ -67,6 +67,17 @@ export const TokenUsageRing = ({
       cacheLength,
     };
   }, [tokenUsage, maxContextTokens]);
+
+  // 组件在 isLoading / !segments 分支会提前 return，导致绑定
+  // onMouseEnter/Leave 的交互 wrapper 被卸载，mouseleave 事件丢失，
+  // showTooltip 被卡在 true。当数据恢复后组件重新挂载交互分支时，
+  // tooltip 会在鼠标未悬停的情况下莫名弹出。这里在进入非交互分支前
+  // 重置状态，避免悬挂的 true 值。
+  useEffect(() => {
+    if (isLoading || !segments) {
+      setShowTooltip(false);
+    }
+  }, [isLoading, segments]);
 
   // API 配置加载期间 maxContextTokens 尚未就绪，此时用 total 作为分母
   // 会算出 ratio=1 的虚假满状态。渲染空环占位保持布局稳定，等配置

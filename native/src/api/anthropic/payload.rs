@@ -292,8 +292,6 @@ pub(super) fn build_anthropic_payload(
         "stream": true,
     });
 
-    payload["temperature"] = json!(0.7);
-
     // Build the `system` field.
     // the field exclusively (each prompt as an independent text block, with
     // cache_control on the last block). Otherwise the built-in system
@@ -323,8 +321,11 @@ pub(super) fn build_anthropic_payload(
     // Add metadata.user_id for tracking and caching (matches snow-cli behavior).
     payload["metadata"] = json!({ "user_id": get_persistent_user_id() });
 
-    if let Some(thinking) = build_anthropic_thinking(&api_config.config_json) {
+    if let Some((thinking, effort)) = build_anthropic_thinking(&api_config.config_json) {
         payload["thinking"] = thinking;
+        if let Some(effort) = effort {
+            payload["output_config"] = json!({ "effort": effort });
+        }
     }
 
     if let Some(tools) = tools {
@@ -403,7 +404,7 @@ fn normalize_anthropic_role(role: &str) -> &str {
     }
 }
 
-pub(crate) fn build_anthropic_thinking(config_json: &str) -> Option<Value> {
+pub(crate) fn build_anthropic_thinking(config_json: &str) -> Option<(Value, Option<String>)> {
     let parsed = serde_json::from_str::<Value>(config_json).ok()?;
     let thinking = parsed.get("snowcfg")?.get("thinking")?.as_object()?;
     let enabled = thinking
@@ -418,8 +419,8 @@ pub(crate) fn build_anthropic_thinking(config_json: &str) -> Option<Value> {
         .get("effort")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "none")?;
-    let _ = effort;
+        .filter(|value| !value.is_empty() && *value != "none")
+        .map(|value| value.to_string());
 
-    Some(json!({ "type": "adaptive" }))
+    Some((json!({ "type": "adaptive" }), effort))
 }

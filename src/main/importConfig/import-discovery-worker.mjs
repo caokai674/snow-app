@@ -8,7 +8,7 @@ const MAX_FILES = 5_000;
 const MAX_BYTES = 64 * 1024 * 1024;
 const MAX_DEPTH = 20;
 const TIMEOUT_MS = 10_000;
-const CACHE_TTL_MS = 2_000;
+const CACHE_TTL_MS = 30_000;
 const MAX_CACHE_ENTRIES = 128;
 const cache = new Map();
 
@@ -21,7 +21,11 @@ const canonicalPath = (path) => {
   }
 };
 
-const limitError = (message) => new Error(`Import scan limit reached: ${message}`);
+// Raised internally to stop a scan that exceeded the time budget while
+// keeping the files collected so far. The scan limits are protective
+// guards, not fatal conditions: a directory tree deeper or larger than the
+// limit must never break the whole import discovery flow.
+const SCAN_STOP = Symbol("scan-stop");
 
 const scan = (root, maxDepth) => {
   const startedAt = Date.now();
@@ -37,25 +41,24 @@ const scan = (root, maxDepth) => {
   });
   const checkTime = () => {
     if (Date.now() - startedAt > TIMEOUT_MS) {
-      throw limitError(`more than ${TIMEOUT_MS} ms`);
+      throw SCAN_STOP;
     }
   };
   const addFile = (filePath, metadata) => {
+    if (fileCount >= MAX_FILES || byteCount + metadata.size > MAX_BYTES) {
+      // Skip files beyond the protective limits instead of failing the scan.
+      return;
+    }
     fileCount += 1;
-    if (fileCount > MAX_FILES) {
-      throw limitError(`more than ${MAX_FILES} files`);
-    }
     byteCount += metadata.size;
-    if (byteCount > MAX_BYTES) {
-      throw limitError(`more than ${MAX_BYTES} bytes`);
-    }
     files.push(filePath);
     fingerprints.push(fingerprint(filePath, metadata));
   };
   const visit = (current, depth) => {
     checkTime();
     if (depth > maxDepth) {
-      throw limitError(`more than ${maxDepth} directory levels`);
+      // Skip branches deeper than the limit instead of failing the scan.
+      return;
     }
     let metadata;
     try {
@@ -82,7 +85,11 @@ const scan = (root, maxDepth) => {
       visit(join(current, entry.name), depth + 1);
     }
   };
-  if (existsSync(root)) visit(root, 0);
+  try {
+    if (existsSync(root)) visit(root, 0);
+  } catch (error) {
+    if (error !== SCAN_STOP) throw error;
+  }
   return { files, fingerprints };
 };
 
@@ -130,10 +137,10 @@ const topLevelDirectories = (root) => {
   if (!existsSync(root)) return { value: [], fingerprints: [] };
   const rootMetadata = lstatSync(root);
   const entries = readdirSync(root, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
-  if (entries.length > MAX_FILES) throw limitError(`more than ${MAX_FILES} entries`);
   return {
     value: entries
       .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+      .slice(0, MAX_FILES)
       .map((entry) => join(root, entry.name)),
     fingerprints: [{
       path: root,

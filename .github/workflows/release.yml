@@ -69,6 +69,14 @@ jobs:
 
       - name: Install npm dependencies
         run: npm ci
+        env:
+          ELECTRON_MIRROR: https://registry.npmmirror.com/-/binary/electron/
+
+      - name: Retry npm install on network failure
+        if: failure()
+        run: npm ci
+        env:
+          ELECTRON_MIRROR: https://registry.npmmirror.com/-/binary/electron/
 
       - name: Run tests
         run: npm test

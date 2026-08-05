@@ -25,9 +25,15 @@ export type DiffTabData = {
   diffLoading: boolean;
 };
 
+export type TerminalOpenOptions = {
+  ptyId?: string;
+  shellPath?: string;
+};
+
 export type TerminalTabData = {
   cwd: string;
   ptyId?: string;
+  shellPath?: string;
 };
 
 export type BrowserTabData = {

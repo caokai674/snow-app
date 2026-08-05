@@ -32,7 +32,7 @@ All business data (conversations, messages, configs, usage, memos, plugins, etc.
 
 | Table | Contents |
 |-------|----------|
-| `system_settings` | Key-value global settings (theme, privacy, shortcuts, plan/goal/yolo modes, request-logging switch, ...) |
+| `system_settings` | Key-value global settings (theme, privacy, shortcuts, plan/goal/yolo modes, request-logging switch, image generation config `imagegen_settings`, ...) |
 | `api_configs` | API key & model profiles |
 | `system_prompts` | System prompt templates |
 | `custom_header_schemes` | Custom request-header schemes |

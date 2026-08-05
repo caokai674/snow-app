@@ -387,7 +387,7 @@ export const writePtyInput = (id: string, data: string): void => {
   if (!session) {
     throw new Error(`PTY session not found: ${id}`);
   }
-  session.pty.write(data);
+  session.pty.write(data.replace(/\r\n/g, "\r").replace(/\n/g, "\r"));
 };
 
 export const resizePty = (id: string, cols: number, rows: number): void => {

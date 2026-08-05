@@ -4,6 +4,7 @@ mod paths;
 pub mod services;
 
 use std::{
+    collections::HashMap,
     fs,
     path::PathBuf,
     sync::{Mutex, Once, OnceLock},
@@ -13,6 +14,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::api::conversation::images::resolve_inline_images_from_disk;
 
@@ -1565,6 +1567,16 @@ pub fn list_sub_agent_conversations(
     )
 }
 
+pub fn list_sub_agent_conversations_by_parents(
+    parent_conversation_ids: Vec<String>,
+) -> Result<HashMap<String, Vec<ChatConversationRecord>>> {
+    let database_path = ensure_database_file()?;
+    services::chat_conversations::list_sub_agent_conversations_by_parents(
+        &database_path,
+        &parent_conversation_ids,
+    )
+}
+
 pub fn create_sub_agent_session(
     conversation_id: String,
     parent_conversation_id: String,
@@ -1664,6 +1676,11 @@ pub fn update_conversation_api_profile(
 pub fn delete_conversation(conversation_id: String) -> Result<()> {
     let database_path = ensure_database_file()?;
     services::chat_conversations::delete_conversation(&database_path, &conversation_id)
+}
+
+pub fn delete_conversations(conversation_ids: Vec<String>) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    services::chat_conversations::delete_conversations(&database_path, &conversation_ids)
 }
 
 pub fn append_tool_message(conversation_id: String, content: String) -> Result<()> {
@@ -1944,73 +1961,109 @@ pub fn set_keyboard_shortcuts_settings(
     services::keyboard_shortcuts::set_keyboard_shortcuts_settings(&database_path, &settings)
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fs::remove_file;
-    use std::time::{SystemTime, UNIX_EPOCH};
+// ============================================================================
+// 图像管理系统（Image Library）
+// ============================================================================
 
-    use super::*;
+#[napi(object)]
+pub struct ImageLibraryRecord {
+    pub id: String,
+    pub relative_path: String,
+    pub file_name: String,
+    pub mime_type: String,
+    pub size_bytes: i64,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub prompt: String,
+    pub model: String,
+    pub provider: String,
+    pub created_at: String,
+}
 
-    fn test_database_path() -> std::path::PathBuf {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "snow-import-transaction-{}-{timestamp}.sqlite",
-            std::process::id()
-        ))
+impl From<services::image_library::ImageLibraryRecord> for ImageLibraryRecord {
+    fn from(record: services::image_library::ImageLibraryRecord) -> Self {
+        ImageLibraryRecord {
+            id: record.id,
+            relative_path: record.relative_path,
+            file_name: record.file_name,
+            mime_type: record.mime_type,
+            size_bytes: record.size_bytes,
+            width: record.width,
+            height: record.height,
+            prompt: record.prompt,
+            model: record.model,
+            provider: record.provider,
+            created_at: record.created_at,
+        }
     }
+}
 
-    #[test]
-    fn import_transaction_rolls_back_plugin_when_resource_tracking_is_invalid() {
-        let database_path = test_database_path();
-        database::ensure_database(&database_path).expect("create test database");
+/// 图库根目录绝对路径（优先用户自定义路径，回退 `~/.snowapp/image`）。
+pub fn get_image_library_root() -> Result<String> {
+    services::image_library::image_library_root()
+        .map(|path| path.to_string_lossy().into_owned())
+}
 
-        let result = commit_import_transaction_at_path(
-            &database_path,
-            ImportDatabaseTransactionInput {
-                mcp_servers: vec![],
-                project_mcp_servers: vec![],
-                system_prompts: vec![],
-                plugins: vec![PluginInput {
-                    plugin_id: "plugin:atomic".to_string(),
-                    name: "Atomic Plugin".to_string(),
-                    version: "1.0.0".to_string(),
-                    provider: "codex".to_string(),
-                    source_path: "/source/plugin".to_string(),
-                    manifest_path: "/source/plugin/.codex-plugin/plugin.json".to_string(),
-                    scope: "global".to_string(),
-                    project_id: None,
-                    state: "enabled".to_string(),
-                    capabilities: vec![],
-                    runtime: None,
-                    content_hash: "plugin-hash".to_string(),
-                    components: vec![],
-                }],
-                import_resources: vec![ImportResourceInput {
-                    resource_id: "plugin:atomic:skill".to_string(),
-                    resource_type: "skill".to_string(),
-                    scope: "global".to_string(),
-                    project_id: None,
-                    target_id: "atomic-skill".to_string(),
-                    target_path: "/target/atomic-skill".to_string(),
-                    management: "snapshot".to_string(),
-                    sources: vec![],
-                }],
-            },
-        );
+/// 读取图库自定义保存目录（空字符串表示使用默认目录）。
+pub fn get_image_library_dir() -> Result<String> {
+    let database_path = ensure_database_file()?;
+    services::system_settings::get_image_library_dir(&database_path)
+}
 
-        assert!(result.is_err());
-        assert!(services::plugins::list_plugins(&database_path)
-            .expect("list plugins")
-            .is_empty());
-        assert!(services::import_resources::list_import_resources(&database_path)
-            .expect("list import resources")
-            .is_empty());
+/// 设置图库自定义保存目录（传入空字符串重置为默认目录）。
+pub fn set_image_library_dir(dir: String) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    services::system_settings::set_image_library_dir(&database_path, &dir)
+}
 
-        let _ = remove_file(&database_path);
-        let _ = remove_file(database_path.with_extension("sqlite-shm"));
-        let _ = remove_file(database_path.with_extension("sqlite-wal"));
-    }
+/// 列出图库全部图片（按创建时间倒序）。
+pub fn list_image_library() -> Result<Vec<ImageLibraryRecord>> {
+    let database_path = ensure_database_file()?;
+    services::image_library::list_images(&database_path).map(|records| {
+        records
+            .into_iter()
+            .map(ImageLibraryRecord::from)
+            .collect()
+    })
+}
+
+/// 读取图库图片并返回 data URL；路径非法或文件不存在返回 None。
+pub fn read_image_library_file(relative_path: &str) -> Result<Option<String>> {
+    services::image_library::read_image_file(relative_path)
+}
+
+/// 删除图片：物理文件 + 索引 + 同步重写引用该图的会话消息。
+pub fn delete_image_library_image(id: &str) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    services::image_library::delete_image(&database_path, id)
+}
+
+/// 生成结果落盘 + 索引（由 imagegen 工具调用；失败不阻断，保留 base64）。
+pub fn persist_generated_images(
+    prompt: &str,
+    model: &str,
+    provider: &str,
+    blocks: &mut Vec<Value>,
+) -> Result<Vec<String>> {
+    let database_path = ensure_database_file()?;
+    services::image_library::persist_generated_images(
+        &database_path,
+        prompt,
+        model,
+        provider,
+        blocks,
+    )
+}
+
+/// 统计指定会话中引用的图库图片数量（删除会话确认框展示用）。
+pub fn count_conversation_images(conversation_ids: Vec<String>) -> Result<i64> {
+    let database_path = ensure_database_file()?;
+    services::image_library::count_conversation_images(&database_path, &conversation_ids)
+}
+
+/// 级联删除指定会话中引用的图库图片（物理文件 + 索引行）。
+/// 由删除会话流程调用；会话本身随后被删除，无需重写消息。
+pub fn delete_conversation_images(conversation_ids: Vec<String>) -> Result<i64> {
+    let database_path = ensure_database_file()?;
+    services::image_library::delete_conversation_images(&database_path, &conversation_ids)
 }

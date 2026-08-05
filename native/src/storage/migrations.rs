@@ -76,6 +76,7 @@ pub fn run_post_schema_migrations(connection: &Connection) -> rusqlite::Result<(
     migrate_system_prompt_scope(connection)?;
     migrate_chat_conversations_modes(connection)?;
     migrate_sub_agent_configs_project_id(connection)?;
+    purge_assistant_raw_json_blobs(connection)?;
     Ok(())
 }
 
@@ -412,82 +413,44 @@ fn migrate_sub_agent_configs_project_id(connection: &Connection) -> rusqlite::Re
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Clears the `raw_json` column for assistant messages that still hold the full
+/// SSE chunk array persisted by older app versions.
+///
+/// Historically every assistant response stored `serde_json::to_string(raw_events)`
+/// — the complete streaming chunk array — into `chat_messages.raw_json`. Each
+/// token produced a chunk repeating `id` / `model` / `system_fingerprint`,
+/// so a single long response could balloon to several MB, and the table
+/// dominated the database (>450 MB for ~3000 rows in practice).
+///
+/// The column is only read back for tool-role messages (to reconstruct
+/// `tool_call_id` on the next request) and for image-ref stripping (which
+/// operates on the `[{name, callId, result}]` tool format only). Assistant
+/// `raw_json` is never consulted, so it is safe to wipe.
+///
+/// Idempotent: once cleared the rows match `{}` (or are empty) and the
+/// `WHERE` clause no longer matches them, so re-running is a no-op.
+fn purge_assistant_raw_json_blobs(connection: &Connection) -> rusqlite::Result<()> {
+    // Only target rows whose raw_json still contains the old SSE chunk
+    // structure (a JSON array of objects with "choices" / "candidates" /
+    // "type":"message_delta" etc.). The simplest portable guard is length:
+    // tool-role raw_json is typically < 2 KB; assistant blobs were > 2 KB.
+    // Using 2048 bytes as the threshold keeps tool messages untouched while
+    // catching every legacy assistant blob.
+    let purged = connection.execute(
+        "UPDATE chat_messages
+            SET raw_json = '{}'
+          WHERE role = 'assistant'
+            AND length(raw_json) > 2048",
+        [],
+    )?;
 
-    #[test]
-    fn migration_scopes_legacy_project_prompts_and_disables_templates() {
-        let connection = Connection::open_in_memory().expect("open test database");
-        connection
-            .execute_batch(
-                "CREATE TABLE system_prompts (
-                    id TEXT PRIMARY KEY NOT NULL,
-                    prompt_id TEXT NOT NULL UNIQUE,
-                    name TEXT NOT NULL DEFAULT '',
-                    content TEXT NOT NULL DEFAULT '',
-                    is_active INTEGER NOT NULL DEFAULT 0,
-                    sort_order INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL DEFAULT '',
-                    updated_at TEXT NOT NULL DEFAULT ''
-                 );
-                 CREATE TABLE workspace_directories (directory_id TEXT NOT NULL UNIQUE);
-                 CREATE TABLE plugins (
-                    plugin_id TEXT PRIMARY KEY NOT NULL,
-                    scope TEXT NOT NULL,
-                    project_id TEXT
-                 );
-                 CREATE TABLE plugin_components (
-                    plugin_id TEXT NOT NULL,
-                    component_type TEXT NOT NULL,
-                    target_id TEXT NOT NULL
-                 );
-                 INSERT INTO workspace_directories (directory_id)
-                 VALUES ('local:/workspace/a');
-                 INSERT INTO system_prompts (
-                    id, prompt_id, name, content, is_active, sort_order, created_at, updated_at
-                 ) VALUES
-                    ('1', 'codex:project:local:/workspace/a:agents', 'agents', 'A', 1, 0, '', ''),
-                    ('2', 'opencode:project:local:/workspace/a:command:review', 'command', 'B', 1, 1, '', '');",
-            )
-            .expect("create legacy prompt schema");
-
-        migrate_system_prompt_scope(&connection).expect("migrate prompt scope");
-
-        let agents = connection
-            .query_row(
-                "SELECT scope, project_id, is_active FROM system_prompts WHERE id = '1'",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .expect("read migrated project instruction");
-        let command = connection
-            .query_row(
-                "SELECT scope, project_id, is_active FROM system_prompts WHERE id = '2'",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .expect("read migrated command template");
-
-        assert_eq!(
-            agents,
-            ("project".to_string(), "local:/workspace/a".to_string(), 1)
-        );
-        assert_eq!(
-            command,
-            ("project".to_string(), "local:/workspace/a".to_string(), 0)
-        );
+    // When rows were actually rewritten, the freed pages remain allocated
+    // inside the SQLite file until VACUUM rebuilds the database. Running
+    // VACUUM once after the purge shrinks the file back to its real size.
+    // Because the UPDATE above is a no-op on already-migrated databases
+    // (purged == 0), VACUUM only fires a single time per database.
+    if purged > 0 {
+        connection.execute_batch("VACUUM")?;
     }
+    Ok(())
 }

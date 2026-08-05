@@ -387,10 +387,9 @@ async fn run_chat_round(
         "tool_choice": "auto",
     });
 
-    // 与主流程（api/chat/payload.rs）保持一致：temperature 0.7、
+    // 与主流程（api/chat/payload.rs）保持一致：
     // max_tokens 遵循用户配置、思考模型的 reasoning_effort 跟随
     // chatThinking 配置，避免 agent 请求与正常聊天行为产生差异。
-    payload["temperature"] = json!(0.7);
     if let Some(max_tokens) = api_config.max_tokens {
         if max_tokens > 0 {
             payload["max_tokens"] = json!(max_tokens);
@@ -641,11 +640,10 @@ async fn run_responses_round(
     });
 
     // 与主流程（api/responses/payload.rs）保持一致：系统提示词放
-    // instructions 字段、temperature 0.7、max_output_tokens 遵循用户配置、
+    // instructions 字段、max_output_tokens 遵循用户配置、
     // reasoning 跟随 responsesReasoning 配置，避免 agent 请求与正常聊天
     // 行为产生差异。
     payload["instructions"] = json!(system_prompt);
-    payload["temperature"] = json!(0.7);
     if let Some(max_tokens) = api_config.max_tokens {
         if max_tokens > 0 {
             payload["max_output_tokens"] = json!(max_tokens);
@@ -847,19 +845,21 @@ async fn run_anthropic_round(
         "tools": tools_as_anthropic_json(tools),
     });
 
-    // 与主流程（api/anthropic/payload.rs）保持一致：temperature 0.7、
+    // 与主流程（api/anthropic/payload.rs）保持一致：
     // system 以数组形式携带 cache_control 启用 prompt 缓存、携带
     // metadata.user_id 用于跟踪与缓存路由、thinking 跟随 thinking 配置，
     // 避免 agent 请求与正常聊天行为产生差异。
-    payload["temperature"] = json!(0.7);
     payload["system"] = json!([{
         "type": "text",
         "text": system_prompt,
         "cache_control": { "type": "ephemeral", "ttl": "5m" },
     }]);
     payload["metadata"] = json!({ "user_id": get_persistent_user_id() });
-    if let Some(thinking) = build_anthropic_thinking(&api_config.config_json) {
+    if let Some((thinking, effort)) = build_anthropic_thinking(&api_config.config_json) {
         payload["thinking"] = thinking;
+        if let Some(effort) = effort {
+            payload["output_config"] = json!({ "effort": effort });
+        }
     }
     // 与主流程一致：给最后一条 user 消息的最后一个内容块加 cache_control，
     // 让多轮工具调用复用缓存前缀。
@@ -1055,11 +1055,10 @@ async fn run_gemini_round(
         ));
     }
 
-    // 与主流程（api/gemini/payload.rs）保持一致：temperature 0.7、
+    // 与主流程（api/gemini/payload.rs）保持一致：
     // maxOutputTokens 遵循用户配置、thinkingConfig 跟随 geminiThinking
     // 配置，避免 agent 请求与正常聊天行为产生差异。
     let mut generation_config = json!({});
-    generation_config["temperature"] = json!(0.7);
     if let Some(max_tokens) = api_config.max_tokens {
         if max_tokens > 0 {
             generation_config["maxOutputTokens"] = json!(max_tokens);

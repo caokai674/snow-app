@@ -929,7 +929,7 @@ export const registerNativeHandlers = (native: NativeBridge): void => {
   );
   ipcMain.handle(
     "checkpoint:list-diffs",
-    (_event, checkpointId: unknown, workDir: unknown) => {
+    (_event, checkpointId: unknown, workDir: unknown, includeAll: unknown) => {
       if (typeof checkpointId !== "string" || !checkpointId.trim()) {
         throw new Error("Checkpoint id is required to list diffs");
       }
@@ -938,7 +938,11 @@ export const registerNativeHandlers = (native: NativeBridge): void => {
           "Working directory path is required to list checkpoint diffs"
         );
       }
-      return native.listCheckpointDiffs(checkpointId.trim(), workDir);
+      return native.listCheckpointDiffs(
+        checkpointId.trim(),
+        workDir,
+        includeAll === true
+      );
     }
   );
 

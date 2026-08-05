@@ -15,6 +15,8 @@ import { registerMemoHandlers } from "./handlers/memoHandlers";
 import { registerPersonalizationHandlers } from "./handlers/personalizationHandlers";
 import { registerCodexHandlers } from "./handlers/codexHandlers";
 import { registerImportConfigHandlers } from "./handlers/importConfigHandlers";
+import { registerImageHandlers } from "./handlers/imageHandlers";
+import { registerImageLibraryHandlers } from "./handlers/imageLibraryHandlers";
 import { PluginRuntimeManager } from "../plugins/pluginRuntimeManager";
 
 export const registerIpcHandlers = (native: NativeBridge): void => {
@@ -36,4 +38,6 @@ export const registerIpcHandlers = (native: NativeBridge): void => {
   registerPersonalizationHandlers();
   registerCodexHandlers(native);
   registerImportConfigHandlers(native, pluginRuntime);
+  registerImageHandlers(native);
+  registerImageLibraryHandlers(native);
 };

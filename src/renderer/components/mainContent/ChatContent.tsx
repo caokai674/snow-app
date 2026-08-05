@@ -63,6 +63,9 @@ const ChatContentBody = ({
     draftToRestore,
     autoSendToken,
     clearDraftToRestore,
+    saveInputDraft,
+    getInputDraft,
+    clearInputDraft,
     rollbackPreview,
     confirmRollback,
     cancelRollback,
@@ -859,6 +862,9 @@ const ChatContentBody = ({
             draftToRestore={draftToRestore}
             autoSendToken={autoSendToken}
             onDraftRestored={clearDraftToRestore}
+            saveInputDraft={saveInputDraft}
+            getInputDraft={getInputDraft}
+            clearInputDraft={clearInputDraft}
             pendingMessages={pendingMessages}
             onWithdrawPendingMessage={withdrawPendingMessage}
             onSendPendingMessageNow={sendPendingMessageNow}

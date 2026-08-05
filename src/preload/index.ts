@@ -11,6 +11,7 @@ import { personalizationApi } from "./modules/personalizationApi";
 import { codexApi } from "./modules/codexApi";
 import { importConfigApi } from "./modules/importConfigApi";
 import { pluginsApi } from "./modules/pluginsApi";
+import { imageLibraryApi } from "./modules/imageLibraryApi";
 
 export type * from "./types";
 
@@ -29,6 +30,7 @@ const api = {
   ...codexApi,
   ...importConfigApi,
   ...pluginsApi,
+  ...imageLibraryApi,
 };
 
 contextBridge.exposeInMainWorld("snow", api);

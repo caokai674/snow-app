@@ -3,15 +3,18 @@ name: snow-app-docs
 description: >-
   Guides the agent to read the built-in Snow App documentation
   (~/.snow/docs) and then help the user configure MCP servers, skills,
-  sub-agents, hooks, API keys/models, proxy & network, project-scoped
-  settings, or look up settings.json fields and built-in tools. Use this
-  skill whenever the user asks to configure, inspect or troubleshoot any
-  of these areas. Covers the config built-in service (config-list/get/set/
-  delete; scopes: settings/snowcfg/proxy/app/custom-headers/system-prompt/
-  theme/language/permissions/lsp-config/buddy/subAgents/hooks/skills/logs),
-  including project-scoped mcpServers/sensitiveCommands/subAgents/hooks/
-  skills via `projectId`, the read-only logs scope for diagnostics, and the
-  app-control-openSettings shortcut.
+  sub-agents, hooks, API keys/models, image generation, proxy & network,
+  project-scoped settings, or look up settings.json fields and built-in
+  tools. Use this skill whenever the user asks to configure, inspect or
+  troubleshoot any of these areas. Covers the config built-in service
+  (config-list/get/set/delete; scopes: settings/snowcfg/proxy/app/
+  custom-headers/system-prompt/theme/language/permissions/lsp-config/buddy/
+  subAgents/hooks/skills/logs/imagegen), including project-scoped
+  mcpServers/sensitiveCommands/subAgents/hooks/skills via `projectId`, the
+  read-only logs scope for diagnostics, the imagegen multi-channel settings
+  (channels keyed by id/name/provider type, plus the top-level
+  maxConcurrentImages concurrency cap, apiKey masked), and the
+  app-control-openSettings shortcut (e.g. page=imagegen-settings).
 enabled: true
 allowed_tools:
   - config-list
@@ -30,7 +33,7 @@ allowed_tools:
 # Snow App 文档阅读与配置指导（Docs & Configuration Guide）
 
 当用户请求**配置 MCP 服务器、安装与管理 Skills、配置 Hooks 与子代理、
-配置 API 密钥与模型、配置代理与网络、项目级设置**，或询问
+配置 API 密钥与模型、配置图像生成、配置代理与网络、项目级设置**，或询问
 **settings.json 字段 / 内置工具 / 日志诊断**时，先阅读应用内置文档，
 再按文档步骤动手配置，而不是凭记忆操作。
 
@@ -49,6 +52,10 @@ allowed_tools:
 | 配置 MCP 服务器 | `2-使用指南/1-配置MCP服务器.md`（en: `2-guides/1-configure-mcp.md`） | `3-参考手册/1-settings.json配置参考.md` |
 | 安装与管理 Skills | `2-使用指南/2-安装与管理Skills.md`（en: `2-guides/2-install-and-manage-skills.md`） | — |
 | 配置 API 密钥与模型 | `2-使用指南/3-配置API密钥与模型.md`（en: `2-guides/3-configure-api-keys.md`） | `3-参考手册/1-settings.json配置参考.md` |
+| 配置图像生成 | `2-使用指南/9-图像生成.md`（en: `2-guides/9-image-generation.md`） | `3-参考手册/2-内置工具参考.md`（imagegen 章节与 config 的 imagegen scope） |
+| 使用聊天与 AI 助手（界面/对话/命令/回滚/压缩） | `2-使用指南/10-使用聊天与AI助手.md`（en: `2-guides/10-using-chat-and-ai.md`） | — |
+| 终端与 SSH 远程管理 | `2-使用指南/11-终端与SSH远程管理.md`（en: `2-guides/11-terminal-and-ssh.md`） | — |
+| Git 面板与代码浏览 | `2-使用指南/12-Git面板与代码浏览.md`（en: `2-guides/12-git-and-code-browsing.md`） | — |
 | 配置代理与网络 | `2-使用指南/4-配置代理与网络.md`（en: `2-guides/4-configure-proxy.md`） | — |
 | 配置 Hooks 与子代理 | `2-使用指南/5-配置Hooks与子代理.md`（en: `2-guides/5-configure-hooks-and-subagents.md`） | — |
 | 浏览器自动化 | `2-使用指南/6-浏览器自动化.md`（en: `2-guides/6-browser-automation.md`） | — |
@@ -59,6 +66,12 @@ allowed_tools:
 > 若 `~/.snow/docs/` 不存在，说明文档尚未同步，可提示用户重启应用后重试。
 
 ## 2. 按文档执行配置（Then apply the configuration）
+
+**通用流程**：任何配置任务，先 `config-list scope=<域>` 查看现状——DB 型域
+（subAgents / hooks / imagegen）的响应会附带 **guidance 使用规则引导**（如
+创建子代理的关键规则、hook 退出码约定），再按本文与文档步骤执行；需要
+`projectId` 时（项目级配置），在 `~/.snow/projects/index.json` 中按项目路径
+查 `projectId`（即 directoryId），或直接问用户从界面获取。
 
 通读对应文档后按步骤执行：
 
@@ -80,11 +93,18 @@ allowed_tools:
   （proxy-config.json）、`app`（active-profile.json）、`custom-headers`、
   `system-prompt`、`theme`、`language`、`permissions`、`lsp-config`、`buddy`。
   文件型配置写后**可能需要重启应用或 UI 重存生效**。
-- **子代理**：`config-list scope=subAgents` 查看；`config-set scope=subAgents
-  key=<agentId> value={name, description, systemPrompt, toolsJson,
-  configProfile}` 创建/更新（toolsJson 接受 JSON 字符串或工具名数组；内置
-  `agent_general` 不可修改）；`config-delete scope=subAgents key=<agentId>`
-  删除；传 `projectId` 为项目级。写入应用数据库**立即生效**。
+- **子代理**：先 `config-list scope=subAgents` 查看现有代理与响应中的
+  **创建规则 guidance**；`config-set scope=subAgents key=<agentId> value={name,
+  description, systemPrompt, toolsJson, configProfile}` 创建/更新；
+  `config-delete scope=subAgents key=<agentId>` 删除；写入应用数据库**立即生效**。
+  关键规则：
+  - `toolsJson` 接受 JSON 字符串或工具名数组；**显式工具名列表必须传
+    `projectId`（项目级）**——全局代理只能用 `"*"`（全部工具）或空列表；
+    每个工具名必须是该项目已启用的工具全名
+  - `configProfile` 必须是已存在的 API 配置档名，留空 = 跟随全局生效配置
+  - `systemPrompt` 必须**完全自包含**（子代理无会话历史：使命/原则/流程/工具用法/输出格式）
+  - 项目级代理激活时优先于同名全局代理；内置 `agent_general` 不可修改/删除
+  - 详细规则见文档 `2-使用指南/5-配置Hooks与子代理.md` 第 2 节
 - **Hooks**：`config-list scope=hooks` 查看；`config-set scope=hooks
   key=<hookType> value={rules:[{description, matcher?, hooks:[{type,
   command?|prompt?|content?, timeout?, enabled?}]}]}` 配置；传 `projectId`
@@ -99,6 +119,20 @@ allowed_tools:
   `project`，项目安装需带 `projectId`），用
   `config-delete scope=skills key=<skillId>` 卸载（**仅限 GitHub 安装的技能**，
   手动放置或应用自带的技能需删除目录）。
+- **图像生成（多渠道）**：用 `config-list scope=imagegen` 查看各渠道状态
+  （enabled/model/configured）与全局 `maxConcurrentImages`（最大并发生成数
+  1-8，默认 4，AI 一次请求多张时最多同时生成的张数）；写入用 `config-set
+  scope=imagegen value={channels:[...]}` 全量替换，或 `{<channelId>: {...}}`
+  按渠道合并（**未提供的字段保留原值**，`maxConcurrentImages` 也会保留除非
+  显式提供），或 `{maxConcurrentImages: 6}` 单独调整并发数（自动收敛 1-8）；
+  `config-get scope=imagegen key=<channelId|openai|gemini|maxConcurrentImages>`
+  读取（省略 key 返回完整设置）；`config-delete scope=imagegen` 清空。写入
+  应用数据库 `system_settings` 表（code=`imagegen_settings`）**立即生效**，
+  与设置面板同源；图形界面为**设置 → 图像生成**
+  （`app-control-openSettings page=imagegen-settings`）。注意：渠道需
+  `enabled`+`apiKey`+`model` 三者齐备才可用，所有渠道均未配置时
+  `imagegen-generate` 工具对模型隐藏；`apiKey` 读取一律脱敏
+  （如 `sk-e****7890`），**不要索要或展示明文密钥**。
 - **日志诊断（只读）**：应用异常时用 `config-list scope=logs` 列出
   `~/.snow/log` 下的日志文件（含最近 error 文件摘要），用 `config-get
   scope=logs key=<文件名>` 或级别简写（`error`/`warn`/`info`/`debug`，读取
@@ -113,8 +147,9 @@ allowed_tools:
   （如 `sk-****abcd`），**不要向用户索要或试图获取明文密钥**；每次写入前
   自动备份到 `~/.snow/.config-backups/`，写入为原子替换——误写可恢复备份。
 - **打开设置页**：用 `app-control-openSettings`，`page` 参数取值见文档
-  （如 `mcp-settings`、`api-settings`、`proxy-browser-settings`、
-  `sub-agent-settings`、`hooks-settings`、`theme-settings`、`system-logs`）。
+  （如 `mcp-settings`、`api-settings`、`imagegen-settings`、
+  `proxy-browser-settings`、`sub-agent-settings`、`hooks-settings`、
+  `theme-settings`、`system-logs`）。
 - **编辑配置文件**：需要读写 `~/.snow/` 下的 JSON 时使用 filesystem 工具，
   注意 **Windows 路径中的反斜杠必须写成 `\\`**（JSON 转义），否则
   `\f`/`\n`/`\v` 会被解析为转义序列导致配置失效。

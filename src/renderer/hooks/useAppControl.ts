@@ -103,6 +103,10 @@ export const useAppControl = ({
           }
 
           case "create_scheduled_task": {
+            const directory = activeDirectoryRef.current;
+            if (!directory) {
+              throw new Error("No active project directory");
+            }
             const name = (payload.name as string) ?? "";
             const prompt = (payload.prompt as string) ?? "";
             const schedule = payload.schedule as
@@ -119,7 +123,12 @@ export const useAppControl = ({
             }
             // The store validates the schedule strictly; an invalid schedule
             // throws here and the error propagates back to the MCP tool caller.
-            const input: CreateScheduledTaskInput = { name, prompt, schedule };
+            const input: CreateScheduledTaskInput = {
+              directoryId: directory.directoryId,
+              name,
+              prompt,
+              schedule,
+            };
             const created = scheduledTasksStore.create(input);
             window.dispatchEvent(
               new CustomEvent(APP_CONTROL_SCHEDULED_TASK_CREATED_EVENT, {

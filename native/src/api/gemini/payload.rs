@@ -240,8 +240,6 @@ pub(super) fn build_gemini_payload(
 
     let mut generation_config = json!({});
 
-    generation_config["temperature"] = json!(0.7);
-
     if let Some(max_tokens) = api_config.max_tokens {
         if max_tokens > 0 {
             generation_config["maxOutputTokens"] = json!(max_tokens);

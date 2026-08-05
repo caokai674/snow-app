@@ -79,7 +79,7 @@ impl McpService for TerminalService {
             McpTool {
                 server_id: SERVER_ID.to_string(),
                 name: "open".to_string(),
-                description: "Open a new terminal tab in the right panel with a live interactive PTY session. Returns a tabId for explicitly targeting it later. The terminal uses a persistent shell process (login shell) that stays alive across multiple send/read operations — unlike bash-terminal-execute which runs a single one-shot command and exits.".to_string(),
+                description: "Open a new terminal tab in the right panel with a live interactive PTY session. Returns a tabId for explicitly targeting it later. The terminal uses a persistent shell process (login shell) that stays alive across multiple send/read operations — unlike bash-terminal-execute which runs a single one-shot command and exits. If cwd is omitted, the active project's directory is used automatically — for SSH projects this opens a remote shell, for local projects it opens a local shell.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -97,7 +97,7 @@ impl McpService for TerminalService {
             McpTool {
                 server_id: SERVER_ID.to_string(),
                 name: "send".to_string(),
-                description: "Send input text to a terminal tab's PTY (as if the user typed it). For commands, include a trailing newline (\\n) to press Enter. Omit tabId to target the most recently focused terminal tab. The input is written to the shell's stdin and processed interactively — tab completion, history, and prompts all work normally.".to_string(),
+                description: "Send input text to a terminal tab's PTY (as if the user typed it). For commands, include a trailing newline (\\n) to press Enter — if you omit it, the backend will automatically append one so the command executes. Omit tabId to target the most recently focused terminal tab. The input is written to the shell's stdin and processed interactively — tab completion, history, and prompts all work normally.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -260,6 +260,15 @@ fn validate_and_normalize_args(tool_name: &str, args: &Value) -> napi::Result<Va
         "send" => {
             optional_non_empty_string(args, "tabId")?;
             required_non_empty_string(args, "input", tool_name)?;
+            if let Some(input_str) = normalized.get("input").and_then(Value::as_str) {
+                let trimmed = input_str.trim_start_matches(['\n', '\r']);
+                if !trimmed.ends_with('\n') && !trimmed.ends_with('\r') {
+                    normalized.insert(
+                        "input".to_string(),
+                        Value::String(format!("{trimmed}\n")),
+                    );
+                }
+            }
         }
         "read" => {
             optional_non_empty_string(args, "tabId")?;

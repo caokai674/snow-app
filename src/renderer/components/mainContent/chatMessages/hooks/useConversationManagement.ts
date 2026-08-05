@@ -32,8 +32,7 @@ export type UseConversationManagementParams = {
 export const useConversationManagement = (
   params: UseConversationManagementParams
 ) => {
-  const { ctx, rejectToolAuthorizations, rejectPendingUserQuestions } =
-    params;
+  const { ctx, rejectToolAuthorizations, rejectPendingUserQuestions } = params;
 
   const withdrawPendingMessage = useCallback((index: number): string | null => {
     const sessionKey =
@@ -90,9 +89,7 @@ export const useConversationManagement = (
       // pendingQueueRef, but activePendingMessages is a single shared state).
       const targetPendingQueue = ctx.pendingQueueRef.current.get(trimmedId);
       ctx.setActivePendingMessages(
-        targetPendingQueue
-          ? targetPendingQueue.map((item) => item.text)
-          : []
+        targetPendingQueue ? targetPendingQueue.map((item) => item.text) : []
       );
 
       // Restore Plan/Goal Mode from the target session's stored state.
@@ -163,7 +160,9 @@ export const useConversationManagement = (
             const checkpointIds = Array.from(
               new Set(
                 page.items
-                  .filter((record) => record.role === "user" && record.checkpointId)
+                  .filter(
+                    (record) => record.role === "user" && record.checkpointId
+                  )
                   .map((record) => record.checkpointId)
               )
             );
@@ -222,7 +221,7 @@ export const useConversationManagement = (
                       ? ("sub" as const)
                       : ("main" as const),
                     subAgentName: isSubAgentConversation
-                      ? (conversationRecord?.subAgentName || undefined)
+                      ? conversationRecord?.subAgentName || undefined
                       : undefined,
                   }))
                 );
@@ -286,8 +285,6 @@ export const useConversationManagement = (
                   isSending: false,
                   isAbortRequested: false,
                   runId: 0,
-                  runTokenBase: 0,
-                  runElapsedBaseMs: 0,
                   iterationTokenCount: 0,
                   iterationElapsedMs: 0,
                   directoryId: conversationDirId,
@@ -323,8 +320,6 @@ export const useConversationManagement = (
                     streamTokenCount: 0,
                     streamElapsedMs: 0,
                     streamTtftMs: 0,
-                    runTokenCount: 0,
-                    runStreamElapsedMs: 0,
                     runTtftMs: 0,
                     baselineCheckpointId,
                     streamStartedAt: 0,
@@ -382,8 +377,7 @@ export const useConversationManagement = (
       ]?.messages.findLast((message) => message.role !== "tool")?.id;
       const onSessionStartContext = JSON.stringify({
         conversationId: trimmedId,
-        cwd:
-          directoryIdToPath(conversationDirId) ?? ctx.directoryPath ?? "",
+        cwd: directoryIdToPath(conversationDirId) ?? ctx.directoryPath ?? "",
         directoryId: conversationDirId ?? "",
       });
       void runHook(
@@ -570,9 +564,7 @@ export const useConversationManagement = (
     const pendingSessionQueue =
       ctx.pendingQueueRef.current.get(PENDING_SESSION_KEY);
     ctx.setActivePendingMessages(
-      pendingSessionQueue
-        ? pendingSessionQueue.map((item) => item.text)
-        : []
+      pendingSessionQueue ? pendingSessionQueue.map((item) => item.text) : []
     );
   }, [
     ctx.setActiveId,
@@ -646,9 +638,7 @@ export const useConversationManagement = (
     );
     // Kill every in-flight bash subprocess of this session so the OS
     // process does not keep running until its timeout.
-    killRunningToolExecutions(
-      ctx.sessionsRef.current?.[key]?.messages ?? []
-    );
+    killRunningToolExecutions(ctx.sessionsRef.current?.[key]?.messages ?? []);
     ctx.updateSessionField(key, "isStreaming", false);
     ctx.updateSessionField(key, "streamStartedAt", 0);
     ctx.updateSessionField(key, "isAborting", false);

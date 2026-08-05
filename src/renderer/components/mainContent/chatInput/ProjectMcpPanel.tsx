@@ -36,6 +36,19 @@ const hasOwnTools = (
   serverId: string
 ): boolean => Object.prototype.hasOwnProperty.call(toolsByServerId, serverId);
 
+const formatServerError = (
+  error: string,
+  t: (key: string, options?: { defaultValue?: string }) => string
+): string => {
+  if (error === "imagegen:not_configured") {
+    return t("projectMcp.serverErrorImagegenNotConfigured", {
+      defaultValue:
+        "No image generation channel configured. Configure at least one channel in Settings -> Image generation.",
+    });
+  }
+  return error;
+};
+
 export const ProjectMcpPanel = ({
   open,
   projectId,
@@ -366,7 +379,7 @@ export const ProjectMcpPanel = ({
               {server.error ? (
                 <div className="project-mcp-server-error">
                   <AlertCircle size={14} />
-                  <span>{server.error}</span>
+                  <span>{formatServerError(server.error, t)}</span>
                 </div>
               ) : null}
               {expanded ? (

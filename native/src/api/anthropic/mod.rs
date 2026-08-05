@@ -170,8 +170,9 @@ async fn create_anthropic_response_async(
             return Err(error);
         }
     };
-    let raw_response_json = serde_json::to_string(&streamed_response.raw_events)
-        .unwrap_or_else(|_| "[]".to_string());
+    // See chat/mod.rs: assistant raw_events are not needed for replay, so we
+    // skip serializing the full SSE chunk array to avoid DB bloat.
+    let raw_response_json = "{}";
 
     for parse_error in &streamed_response.tool_parse_errors {
         log_api_warning(

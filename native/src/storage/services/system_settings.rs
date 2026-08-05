@@ -53,6 +53,10 @@ const DEFAULT_REQUEST_LOGGING_EXPIRY_SETTING_NAME: &str = "Request logging expir
 const DEFAULT_REQUEST_LOGGING_EXPIRY_SETTING_CODE: &str = "request_logging_expires_at";
 const DEFAULT_REQUEST_LOGGING_EXPIRY_SETTING_VALUE: &str = "0";
 
+const DEFAULT_IMAGE_LIBRARY_DIR_SETTING_NAME: &str = "Image library directory";
+const DEFAULT_IMAGE_LIBRARY_DIR_SETTING_CODE: &str = "image_library_dir";
+const DEFAULT_IMAGE_LIBRARY_DIR_SETTING_VALUE: &str = "";
+
 const DEFAULT_PRIVACY_SETTING_NAME: &str = "Privacy settings";
 const DEFAULT_PRIVACY_SETTING_CODE: &str = "privacy_settings";
 const DEFAULT_PRIVACY_SETTING_VALUE: &str = "{\"enabled\":false,\"mode\":\"local\",\"api\":{\"url\":\"\",\"apiKey\":\"\",\"model\":\"openai/privacy-filter\"},\"toolResults\":{\"tools\":[\"filesystem-read\",\"grep-search\",\"bash-terminal-execute\"]}}";
@@ -403,6 +407,25 @@ pub fn set_request_logging_expiry(database_path: &Path, expires_at_ms: i64) -> R
         DEFAULT_REQUEST_LOGGING_EXPIRY_SETTING_NAME,
         DEFAULT_REQUEST_LOGGING_EXPIRY_SETTING_CODE,
         &expires_at_ms.to_string(),
+    )
+}
+
+/// 获取图库自定义保存目录。返回空字符串表示未设置（使用默认 ~/.snowapp/image）。
+pub fn get_image_library_dir(database_path: &Path) -> Result<String> {
+    let Some(value) = get_system_setting_value(database_path, DEFAULT_IMAGE_LIBRARY_DIR_SETTING_CODE)?
+    else {
+        return Ok(String::new());
+    };
+    Ok(value.trim().to_string())
+}
+
+/// 设置图库自定义保存目录。传入空字符串可重置为默认目录。
+pub fn set_image_library_dir(database_path: &Path, dir: &str) -> Result<()> {
+    set_system_setting(
+        database_path,
+        DEFAULT_IMAGE_LIBRARY_DIR_SETTING_NAME,
+        DEFAULT_IMAGE_LIBRARY_DIR_SETTING_CODE,
+        dir.trim(),
     )
 }
 
@@ -1181,6 +1204,12 @@ fn seed_default_settings_with_connection(connection: &Connection) -> rusqlite::R
         DEFAULT_REQUEST_LOGGING_EXPIRY_SETTING_NAME,
         DEFAULT_REQUEST_LOGGING_EXPIRY_SETTING_CODE,
         DEFAULT_REQUEST_LOGGING_EXPIRY_SETTING_VALUE,
+    )?;
+    insert_default_setting(
+        connection,
+        DEFAULT_IMAGE_LIBRARY_DIR_SETTING_NAME,
+        DEFAULT_IMAGE_LIBRARY_DIR_SETTING_CODE,
+        DEFAULT_IMAGE_LIBRARY_DIR_SETTING_VALUE,
     )?;
     insert_default_setting(
         connection,

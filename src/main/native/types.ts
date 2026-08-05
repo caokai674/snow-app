@@ -11,7 +11,12 @@ import type {
   PluginRecord,
 } from "../../shared/plugins";
 
-export type { ImportResourceInput, ImportResourceRecord, ImportResourceRelease, ImportResourceReleaseInput };
+export type {
+  ImportResourceInput,
+  ImportResourceRecord,
+  ImportResourceRelease,
+  ImportResourceReleaseInput,
+};
 export type {
   PluginInput,
   PluginMarketplaceInput,
@@ -674,6 +679,21 @@ export type ChatMessagePage = {
   hasMore: boolean;
 };
 
+/** 图像管理系统（生成图片图库）记录 */
+export type ImageLibraryRecord = {
+  id: string;
+  relativePath: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  width: number | null;
+  height: number | null;
+  prompt: string;
+  model: string;
+  provider: string;
+  createdAt: string;
+};
+
 export type UserMessageSummary = {
   id: string;
   content: string;
@@ -1156,11 +1176,18 @@ export type NativeBridge = {
   ) => Promise<void>;
   listImportResources: () => Promise<ImportResourceRecord[]>;
   upsertImportResources: (items: ImportResourceInput[]) => Promise<void>;
-  commitImportTransaction: (input: ImportDatabaseTransactionInput) => Promise<void>;
-  releaseImportResource: (input: ImportResourceReleaseInput) => Promise<ImportResourceRelease>;
+  commitImportTransaction: (
+    input: ImportDatabaseTransactionInput
+  ) => Promise<void>;
+  releaseImportResource: (
+    input: ImportResourceReleaseInput
+  ) => Promise<ImportResourceRelease>;
   listPlugins: () => Promise<PluginRecord[]>;
   upsertPlugins: (items: PluginInput[]) => Promise<void>;
-  setPluginState: (pluginId: string, state: PluginInput["state"]) => Promise<void>;
+  setPluginState: (
+    pluginId: string,
+    state: PluginInput["state"]
+  ) => Promise<void>;
   deletePlugin: (pluginId: string) => Promise<void>;
   listPluginMarketplaces: () => Promise<PluginMarketplaceRecord[]>;
   upsertPluginMarketplace: (item: PluginMarketplaceInput) => Promise<void>;
@@ -1176,18 +1203,13 @@ export type NativeBridge = {
     projectId?: string
   ) => Promise<void>;
   executeHooks: (input: HookExecuteInput) => Promise<HookExecuteResult>;
-  listSubAgentConfigs: (
-    projectId?: string
-  ) => Promise<SubAgentConfigRecord[]>;
+  listSubAgentConfigs: (projectId?: string) => Promise<SubAgentConfigRecord[]>;
   getSubAgentConfig: (
     agentId: string,
     projectId?: string
   ) => Promise<SubAgentConfigRecord | null>;
   upsertSubAgentConfig: (item: SubAgentConfigInput) => Promise<void>;
-  deleteSubAgentConfig: (
-    agentId: string,
-    projectId?: string
-  ) => Promise<void>;
+  deleteSubAgentConfig: (agentId: string, projectId?: string) => Promise<void>;
   listSensitiveCommandConfigs: () => Promise<SensitiveCommandConfigRecord[]>;
   upsertSensitiveCommandConfig: (
     item: SensitiveCommandConfigInput
@@ -1239,6 +1261,9 @@ export type NativeBridge = {
   listSubAgentConversations: (
     parentConversationId: string
   ) => Promise<ChatConversationRecord[]>;
+  listSubAgentConversationsByParents: (
+    parentConversationIds: string[]
+  ) => Promise<Record<string, ChatConversationRecord[]>>;
   createSubAgentSession: (
     conversationId: string,
     parentConversationId: string,
@@ -1268,11 +1293,10 @@ export type NativeBridge = {
     profileName: string
   ) => Promise<void>;
   deleteConversation: (conversationId: string) => Promise<void>;
+  deleteConversations: (conversationIds: string[]) => Promise<void>;
   appendToolMessage: (conversationId: string, content: string) => Promise<void>;
   listChatMessages: (conversationId: string) => Promise<ChatMessageRecord[]>;
-  listUserMessages: (
-    conversationId: string
-  ) => Promise<UserMessageSummary[]>;
+  listUserMessages: (conversationId: string) => Promise<UserMessageSummary[]>;
   listChatMessagesPaginated: (
     conversationId: string,
     beforeMessageId: string,
@@ -1435,7 +1459,8 @@ export type NativeBridge = {
   ) => Promise<CheckpointFileChange[]>;
   listCheckpointDiffs: (
     checkpointId: string,
-    workDir: string
+    workDir: string,
+    includeAll?: boolean
   ) => Promise<CheckpointFileDiff[]>;
   truncateConversationFromResponse: (
     conversationId: string,
@@ -1482,4 +1507,12 @@ export type NativeBridge = {
   deleteMemo: (memoId: string) => Promise<void>;
   getMemoCountSummary: (directoryId: string) => Promise<MemoCountSummary>;
   sha256File: (filePath: string) => Promise<string>;
+  getImageLibraryRoot: () => Promise<string>;
+  getImageLibraryDir: () => Promise<string>;
+  setImageLibraryDir: (dir: string) => Promise<void>;
+  listImageLibrary: () => Promise<ImageLibraryRecord[]>;
+  readImageLibraryFile: (relativePath: string) => Promise<string | null>;
+  deleteImageLibraryImage: (id: string) => Promise<void>;
+  countConversationImages: (conversationIds: string[]) => Promise<number>;
+  deleteConversationImages: (conversationIds: string[]) => Promise<number>;
 };
