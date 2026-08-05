@@ -153,6 +153,28 @@ pub struct WorkspaceDirectoryRecord {
 }
 
 #[napi(object)]
+pub struct RemoteDraftInput {
+    pub profile_id: String,
+    pub workspace_id: String,
+    pub remote_path: String,
+    pub base_version_json: String,
+    pub content: String,
+    pub status: String,
+}
+
+#[napi(object)]
+pub struct RemoteDraftRecord {
+    pub id: String,
+    pub profile_id: String,
+    pub workspace_id: String,
+    pub remote_path: String,
+    pub base_version_json: String,
+    pub content: String,
+    pub status: String,
+    pub updated_at: String,
+}
+
+#[napi(object)]
 pub struct McpServerConfigInput {
     pub server_id: String,
     pub name: String,
@@ -1112,6 +1134,37 @@ pub fn reorder_workspace_directories(items: Vec<WorkspaceDirectoryInput>) -> Res
 pub fn delete_workspace_directory(directory_id: String) -> Result<()> {
     let database_path = ensure_database_file()?;
     services::workspace_directories::delete_workspace_directory(&database_path, &directory_id)
+}
+
+pub fn list_remote_drafts(
+    workspace_id: String,
+    profile_id: Option<String>,
+) -> Result<Vec<RemoteDraftRecord>> {
+    let database_path = ensure_database_file()?;
+    services::remote_drafts::list_remote_drafts(
+        &database_path,
+        &workspace_id,
+        profile_id.as_deref(),
+    )
+}
+
+pub fn upsert_remote_draft(item: RemoteDraftInput) -> Result<RemoteDraftRecord> {
+    let database_path = ensure_database_file()?;
+    services::remote_drafts::upsert_remote_draft(&database_path, &item)
+}
+
+pub fn delete_remote_draft(
+    profile_id: String,
+    workspace_id: String,
+    remote_path: String,
+) -> Result<()> {
+    let database_path = ensure_database_file()?;
+    services::remote_drafts::delete_remote_draft(
+        &database_path,
+        &profile_id,
+        &workspace_id,
+        &remote_path,
+    )
 }
 
 pub fn create_project_directory(parent_path: String, project_name: String) -> Result<String> {

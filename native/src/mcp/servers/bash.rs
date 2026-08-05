@@ -161,7 +161,7 @@ impl McpService for BashService {
         vec![McpTool {
             server_id: SERVER_ID.to_string(),
             name: "terminal-execute".to_string(),
-            description: "Execute terminal commands like npm, git, build scripts, etc. BEST PRACTICE: For file modifications, prefer filesystem tools first. Primary use cases: (1) Running build/test/lint scripts, (2) Version control operations, (3) Package management, (4) System utilities.\n\nLONG-RUNNING SERVICES (dev servers, watchers, databases): pass detach:true to run the command in the background. The call returns immediately with { pid, logPath }; the service keeps running and writes its output to the log file. Monitor it by reading logPath (filesystem-read), stop it with taskkill /PID <pid> (Windows) or kill <pid> (POSIX). Do NOT run a long-running service in the foreground: it blocks until the timeout and the whole process tree is force-killed.\n\nINTERACTIVE commands (password prompts, y/n confirmations): set isInteractive:true so the command is not killed by the timeout (24h upper bound) and the UI shows an input box.\n\ntimeout: default 30000ms. When a foreground command may legitimately run longer (builds, installs), pass an explicit larger timeout. Ignored when detach:true.".to_string(),
+            description: "Execute terminal commands like npm, git, build scripts, etc. BEST PRACTICE: For file modifications, prefer filesystem tools first. Primary use cases: (1) Running build/test/lint scripts, (2) Version control operations, (3) Package management, (4) System utilities.\n\nLONG-RUNNING SERVICES (dev servers, watchers, databases): pass detach:true to run the command in the background. The call returns immediately with { pid, logPath }; the service keeps running and writes its output to the log file. Monitor it by reading logPath (filesystem-read), stop it with taskkill /PID <pid> (Windows) or kill <pid> (POSIX). Do NOT run a long-running service in the foreground: it blocks until the timeout and the whole process tree is force-killed.\n\nFor a durable build, test, install, deployment, or unknown-duration command on an SSH workspace, pass durable:true. It creates a Remote Job that survives SSH disconnects; then use remote-job-status and remote-job-read. Interactive commands (password prompts, y/n confirmations) cannot be durable; use the application terminal instead.\n\ntimeout: default 30000ms. When a foreground command may legitimately run longer (builds, installs), pass an explicit larger timeout. Ignored when detach:true.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -188,6 +188,10 @@ impl McpService for BashService {
                     "detach": {
                         "type": "boolean",
                         "description": "Run the command in the background and return immediately. Output is written to <workingDirectory>/.snow/logs/<name>-<timestamp>.log; the result contains { detached: true, pid, logPath, hint }. Use for long-running services: monitor via filesystem-read on logPath, stop via taskkill /PID <pid> (Windows) / kill <pid> (POSIX). Default: false. Cannot be combined with isInteractive; not supported for remote (SSH) workspaces."
+                    },
+                    "durable": {
+                        "type": "boolean",
+                        "description": "For SSH workspaces only, launch a Durable Remote Job that survives SSH disconnection. Use for builds, tests, installs, deployments, and unknown-duration commands. Default: false. Cannot be combined with detach or isInteractive."
                     },
                     "sessionId": {
                         "type": "string",
@@ -294,11 +298,21 @@ impl BashService {
             .get("detach")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let durable = args
+            .get("durable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         if detach && is_interactive {
             return Err(Error::new(
                 Status::InvalidArg,
                 "detach cannot be combined with isInteractive: a detached command has no stdin".to_string(),
+            ));
+        }
+        if durable && (detach || is_interactive) {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "durable cannot be combined with detach or isInteractive".to_string(),
             ));
         }
 
@@ -361,6 +375,7 @@ impl BashService {
             }
             let mut remote_args = args.clone();
             remote_args["workingDirectory"] = Value::String(remote_working_directory);
+            remote_args["durable"] = Value::Bool(durable);
             // Register a cancellation token for the remote execution so the
             // stop button / session abort can settle the pending Electron
             // promise immediately (mirrors the local-process registration
@@ -379,6 +394,12 @@ impl BashService {
             .await;
             crate::api::cancel::unregister_tool_execution(&tool_execution_id);
             return result;
+        }
+        if durable {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "durable is only supported for remote (SSH) workspaces".to_string(),
+            ));
         }
 
         let shell_path = load_terminal_shell_path().await?;
@@ -1073,5 +1094,4 @@ fn regex_matches(pattern: &str, text: &str) -> bool {
         .map(|r| r.is_match(text))
         .unwrap_or(false)
 }
-
 

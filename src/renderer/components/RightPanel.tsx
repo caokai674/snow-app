@@ -10,8 +10,13 @@ import {
   useRef,
   useState,
 } from "react";
+import { motion } from "motion/react";
 
 import { useI18n } from "../i18n";
+import {
+  appleLayoutTransition,
+  useAppleThemeMotion,
+} from "../hooks/useAppleThemeMotion";
 import { GitPanelContent } from "./rightPanel/GitPanelContent";
 import { DiffViewer } from "./rightPanel/DiffViewer";
 import { FileDiffPreview } from "./common/FileDiffPreview";
@@ -42,6 +47,7 @@ import type {
   FileDiffPreviewTabData,
   FileViewerTabData,
   OpenDiffTabCallback,
+  RemoteJobsTabData,
   RightPanelContentProps,
   RightPanelTab,
   TerminalTabData,
@@ -68,9 +74,15 @@ const CodebasePanelContent = lazy(() =>
     default: m.CodebasePanelContent,
   }))
 );
+const RemoteJobsPanelContent = lazy(() =>
+  import("./rightPanel/RemoteJobsPanelContent").then((m) => ({
+    default: m.RemoteJobsPanelContent,
+  }))
+);
 
 const GIT_TAB_ID = "git";
 const CODEBASE_TAB_ID = "codebase";
+const REMOTE_JOBS_TAB_ID = "remote-jobs";
 
 // 文件类 tab(diff / file / file-diff-preview)在标题前显示对应的文件类型图标。
 const getTabFileIcon = (tab: RightPanelTab): React.ReactNode => {
@@ -113,18 +125,25 @@ export type RightPanelRef = {
     fileName: string,
     isSsh?: boolean,
     sshSessionId?: string | null,
-    focusLine?: number
+    focusLine?: number,
+    sshWorkspaceRoot?: string,
+    sshWorkspaceId?: string
   ) => void;
 };
 
 type RightPanelProps = RightPanelContentProps & {
   isCollapsed: boolean;
   isFullscreen: boolean;
+  isResizing?: boolean;
 };
 
 export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
-  ({ isCollapsed, isFullscreen, activeDirectory }, ref): React.JSX.Element => {
+  (
+    { isCollapsed, isFullscreen, isResizing = false, activeDirectory },
+    ref
+  ): React.JSX.Element => {
     const { t } = useI18n();
+    const { enabled: appleMotionEnabled, reducedMotion } = useAppleThemeMotion();
     const [tabs, setTabs] = useState<RightPanelTab[]>([
       { id: GIT_TAB_ID, type: "git", title: t("rightPanel.gitTab") },
     ]);
@@ -182,9 +201,9 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
     );
 
     const handleOpenTerminalTab = useCallback(
-      (cwd: string, requestedTabId?: string): string => {
+      (cwd: string, requestedTabId?: string, ptyId?: string): string => {
         const tabId = requestedTabId ?? `terminal-${Date.now()}`;
-        const terminalData: TerminalTabData = { cwd };
+        const terminalData: TerminalTabData = { cwd, ptyId };
         setTabs((prev) => [
           ...prev,
           {
@@ -339,13 +358,48 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
       return handleCodebaseProjectChanged(activeDirectory.directoryId);
     }, [activeDirectory?.directoryId, handleCodebaseProjectChanged]);
 
+    useEffect(() => {
+      const workspacePath = activeDirectory?.path;
+      if (!workspacePath?.startsWith("ssh://")) {
+        setTabs((current) =>
+          current.filter((tab) => tab.id !== REMOTE_JOBS_TAB_ID)
+        );
+        setActiveTabId((current) =>
+          current === REMOTE_JOBS_TAB_ID ? GIT_TAB_ID : current
+        );
+        return;
+      }
+      setTabs((current) => {
+        const data: RemoteJobsTabData = { workspacePath };
+        const existing = current.find((tab) => tab.id === REMOTE_JOBS_TAB_ID);
+        if (existing) {
+          return current.map((tab) =>
+            tab.id === REMOTE_JOBS_TAB_ID
+              ? { ...tab, data, title: t("rightPanel.remoteJobsTab") }
+              : tab
+          );
+        }
+        return [
+          ...current,
+          {
+            id: REMOTE_JOBS_TAB_ID,
+            type: "remote-jobs",
+            title: t("rightPanel.remoteJobsTab"),
+            data,
+          },
+        ];
+      });
+    }, [activeDirectory?.path, t]);
+
     const handleOpenFileTab = useCallback(
       (
         filePath: string,
         fileName: string,
         isSsh: boolean,
         sshSessionId?: string | null,
-        focusLine?: number
+        focusLine?: number,
+        sshWorkspaceRoot?: string,
+        sshWorkspaceId?: string
       ) => {
         const tabId = isSsh
           ? `file:ssh:${sshSessionId ?? "unknown"}:${filePath}`
@@ -361,6 +415,12 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
                     data: {
                       ...(t.data as FileViewerTabData),
                       focusLine,
+                      sshWorkspaceRoot:
+                        sshWorkspaceRoot ??
+                        (t.data as FileViewerTabData).sshWorkspaceRoot,
+                      sshWorkspaceId:
+                        sshWorkspaceId ??
+                        (t.data as FileViewerTabData).sshWorkspaceId,
                     },
                   }
                 : t
@@ -371,6 +431,8 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
             fileName,
             isSsh,
             sshSessionId: sshSessionId ?? undefined,
+            sshWorkspaceRoot,
+            sshWorkspaceId,
             focusLine,
           };
           const newTab: RightPanelTab = {
@@ -535,7 +597,9 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
             fileName,
             isSsh,
             sshSessionId,
-            payload.focusLine
+            payload.focusLine,
+            payload.sshWorkspaceRoot ?? payload.sshWorkspacePath,
+            payload.sshWorkspaceId
           );
           rightPanelEvents.emit("request-expand");
         })().catch((error: unknown) => {
@@ -566,14 +630,18 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
           fileName: string,
           isSsh?: boolean,
           sshSessionId?: string | null,
-          focusLine?: number
+          focusLine?: number,
+          sshWorkspaceRoot?: string,
+          sshWorkspaceId?: string
         ) => {
           handleOpenFileTab(
             filePath,
             fileName,
             isSsh ?? false,
             sshSessionId,
-            focusLine
+            focusLine,
+            sshWorkspaceRoot,
+            sshWorkspaceId
           );
         },
       }),
@@ -812,6 +880,7 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
             <TerminalPanelContent
               tabId={tab.id}
               cwd={(tab.data as TerminalTabData).cwd}
+              ptyId={(tab.data as TerminalTabData).ptyId}
               isActive={activeTabId === tab.id}
               onTitleChange={(title) =>
                 handleTerminalTitleChange(tab.id, title)
@@ -839,6 +908,20 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
                 projectName={(tab.data as CodebaseTabData).projectName}
               />
             ) : null
+          ) : tab.type === "remote-jobs" ? (
+            (tab.data as RemoteJobsTabData) ? (
+              <RemoteJobsPanelContent
+                workspacePath={(tab.data as RemoteJobsTabData).workspacePath}
+                isActive={activeTabId === tab.id}
+                onAttach={(attachment) =>
+                  handleOpenTerminalTab(
+                    (tab.data as RemoteJobsTabData).workspacePath,
+                    `remote-job-${attachment.jobId}-${Date.now()}`,
+                    attachment.ptyId
+                  )
+                }
+              />
+            ) : null
           ) : tab.type === "diff" ? (
             (tab.data as DiffTabData) ? (
               <DiffViewer
@@ -854,6 +937,8 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
                 fileName={(tab.data as FileViewerTabData).fileName}
                 isSsh={(tab.data as FileViewerTabData).isSsh}
                 sshSessionId={(tab.data as FileViewerTabData).sshSessionId}
+                sshWorkspaceRoot={(tab.data as FileViewerTabData).sshWorkspaceRoot}
+                sshWorkspaceId={(tab.data as FileViewerTabData).sshWorkspaceId}
                 focusLine={(tab.data as FileViewerTabData).focusLine}
                 onOpenTerminal={(cwd) => handleOpenTerminalTab(cwd)}
                 onDirtyChange={(dirty) =>
@@ -896,7 +981,13 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
     };
 
     return (
-      <aside className={panelClasses}>
+      <motion.aside
+        className={panelClasses}
+        layout={appleMotionEnabled && !isResizing}
+        transition={
+          appleMotionEnabled ? appleLayoutTransition(reducedMotion) : undefined
+        }
+      >
         {tabs.length > 1 && (
           <div className="right-panel-tabs">
             <div
@@ -1009,7 +1100,7 @@ export const RightPanel = forwardRef<RightPanelRef, RightPanelProps>(
             onClose={() => setTabContextMenu(null)}
           />
         )}
-      </aside>
+      </motion.aside>
     );
   }
 );

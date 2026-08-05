@@ -11,6 +11,10 @@ native-test = ["napi/dyn-symbols"]
 [lib]
 crate-type = ["cdylib"]
 
+[[bin]]
+name = "snow-agent"
+path = "src/bin/snow-agent.rs"
+
 [dependencies]
 async-openai = { version = "0.30.1", features = ["byot"] }
 chrono = "0.4.38"

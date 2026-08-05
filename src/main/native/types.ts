@@ -410,6 +410,22 @@ export type WorkspaceDirectoryRecord = WorkspaceDirectoryInput & {
   updatedAt: string;
 };
 
+export type RemoteDraftStatus = "pending" | "conflict";
+
+export type RemoteDraftInput = {
+  profileId: string;
+  workspaceId: string;
+  remotePath: string;
+  baseVersionJson: string;
+  content: string;
+  status: RemoteDraftStatus;
+};
+
+export type RemoteDraftRecord = RemoteDraftInput & {
+  id: string;
+  updatedAt: string;
+};
+
 export type FileSearchResult = {
   path: string;
   relativePath: string;
@@ -1095,6 +1111,16 @@ export type NativeBridge = {
     items: WorkspaceDirectoryInput[]
   ) => Promise<void>;
   deleteWorkspaceDirectory: (directoryId: string) => Promise<void>;
+  listRemoteDrafts: (
+    workspaceId: string,
+    profileId?: string
+  ) => Promise<RemoteDraftRecord[]>;
+  upsertRemoteDraft: (item: RemoteDraftInput) => Promise<RemoteDraftRecord>;
+  deleteRemoteDraft: (
+    profileId: string,
+    workspaceId: string,
+    remotePath: string
+  ) => Promise<void>;
   createProjectDirectory: (
     parentPath: string,
     projectName: string

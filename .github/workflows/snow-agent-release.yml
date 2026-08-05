@@ -1,0 +1,61 @@
+name: Snow Agent release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version embedded in the signed protocol manifest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+jobs:
+  package:
+    name: Package snow-agent (${{ matrix.target.name }})
+    runs-on: ${{ matrix.target.runner }}
+    strategy:
+      matrix:
+        target:
+          - name: linux-x64
+            runner: ubuntu-24.04
+            binary: native/target/release/snow-agent
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build snow-agent
+        run: cargo build --release --manifest-path native/Cargo.toml --bin snow-agent
+
+      - name: Create signed release manifest
+        env:
+          SNOW_AGENT_RELEASE_SIGNING_KEY: ${{ secrets.SNOW_AGENT_RELEASE_SIGNING_KEY }}
+        shell: bash
+        run: |
+          test -n "$SNOW_AGENT_RELEASE_SIGNING_KEY"
+          node scripts/sign-snow-agent-release.cjs \
+            --artifact "${{ matrix.target.binary }}" \
+            --version "${{ inputs.version }}" \
+            --key-id "snow-agent-release-v1" \
+            --output "native/target/release/snow-agent-release.json" \
+            --public-key-output "native/target/release/snow-agent-release.pub"
+
+      - name: Attest snow-agent artifact
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ matrix.target.binary }}
+            native/target/release/snow-agent-release.json
+
+      - name: Upload signed snow-agent package
+        uses: actions/upload-artifact@v4
+        with:
+          name: snow-agent-${{ inputs.version }}-${{ matrix.target.name }}
+          path: |
+            ${{ matrix.target.binary }}
+            native/target/release/snow-agent-release.json
+            native/target/release/snow-agent-release.pub

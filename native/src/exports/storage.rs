@@ -13,7 +13,7 @@ use crate::storage::{
     SensitiveCommandConfigInput, SensitiveCommandConfigRecord, SensitiveCommandMatchResult,
     SubAgentConfigInput, SubAgentConfigRecord, SystemPromptItemInput, SystemPromptItemRecord,
     WorkspaceDirectoryInput,
-    WorkspaceDirectoryRecord, MemoCountSummary, MemoPage, MemoRecord, UserMessageSummary,
+    WorkspaceDirectoryRecord, RemoteDraftInput, RemoteDraftRecord, MemoCountSummary, MemoPage, MemoRecord, UserMessageSummary,
 };
 use crate::hooks::{HookExecuteInput, HookExecuteResult};
 use crate::storage::services::fs_explorer::{DirectoryEntry, FileContentResult, FileSearchResult};
@@ -713,6 +713,36 @@ pub async fn delete_workspace_directory(directory_id: String) -> napi::Result<()
     tokio::task::spawn_blocking(move || crate::storage::delete_workspace_directory(directory_id))
         .await
         .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn list_remote_drafts(
+    workspace_id: String,
+    profile_id: Option<String>,
+) -> napi::Result<Vec<RemoteDraftRecord>> {
+    tokio::task::spawn_blocking(move || crate::storage::list_remote_drafts(workspace_id, profile_id))
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn upsert_remote_draft(item: RemoteDraftInput) -> napi::Result<RemoteDraftRecord> {
+    tokio::task::spawn_blocking(move || crate::storage::upsert_remote_draft(item))
+        .await
+        .map_err(map_spawn_error)?
+}
+
+#[napi]
+pub async fn delete_remote_draft(
+    profile_id: String,
+    workspace_id: String,
+    remote_path: String,
+) -> napi::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        crate::storage::delete_remote_draft(profile_id, workspace_id, remote_path)
+    })
+    .await
+    .map_err(map_spawn_error)?
 }
 
 #[napi]

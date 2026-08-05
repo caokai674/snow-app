@@ -324,17 +324,21 @@ export function createToolExecutor(
               }
             }
 
-            // Inject the current session id for bash-terminal-execute so child
-            // processes receive SNOW_SESSION_ID / TRELLIS_CONTEXT_ID — the
-            // Snow platform contract Trellis scripts rely on to track the
-            // active task per session.
-            if (toolCall.name === "bash-terminal-execute") {
+            // Bind command execution to the conversation. Durable Remote Jobs
+            // persist this binding so the Job panel can recover the context
+            // after an application restart.
+            if (
+              toolCall.name === "bash-terminal-execute" ||
+              toolCall.name === "remote-job-start"
+            ) {
               try {
                 const parsedArgs = JSON.parse(toolArgs) as Record<
                   string,
                   unknown
                 >;
                 parsedArgs.sessionId = effectiveKey;
+                parsedArgs.conversationId = effectiveKey;
+                parsedArgs.toolCallId = toolCall.callId || undefined;
                 toolArgs = JSON.stringify(parsedArgs);
               } catch {
                 // If args are not valid JSON, let the tool fail naturally.
@@ -343,7 +347,8 @@ export function createToolExecutor(
 
             let sensitiveAuthorizationToken: string | undefined;
             if (
-              toolCall.name === "bash-terminal-execute" &&
+              (toolCall.name === "bash-terminal-execute" ||
+                toolCall.name === "remote-job-start") &&
               authorizationDecision.status === "approved" &&
               authorizationDecision.sensitiveCommandConfirmed === true
             ) {

@@ -497,6 +497,7 @@ CREATE INDEX IF NOT EXISTS idx_api_configs_active
     // Ensure the codebase embed sessions table exists. Defined in a separate
     // module so the schema lives next to its CRUD functions.
     services::codebase_embed_sessions::ensure_sessions_table(connection)?;
+    services::remote_drafts::ensure_remote_drafts_table(connection)?;
 
     // Post-schema migrations run AFTER CREATE TABLE to add columns that
     // older databases lack but fresh databases already have. Each migration
@@ -504,7 +505,7 @@ CREATE INDEX IF NOT EXISTS idx_api_configs_active
     // columns and the sub-agent project_id rebuild (see migrations.rs).
     migrations::run_post_schema_migrations(connection)?;
 
-    connection.pragma_update(None, "user_version", 25)?;
+    connection.pragma_update(None, "user_version", 26)?;
 
     Ok(())
 }

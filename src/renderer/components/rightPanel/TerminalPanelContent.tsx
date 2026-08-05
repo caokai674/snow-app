@@ -11,6 +11,7 @@ import { useTerminalMcpInstance } from "./terminal/useTerminalMcpInstance";
 export type TerminalPanelContentProps = {
   tabId: string;
   cwd: string;
+  ptyId?: string;
   isActive: boolean;
   onTitleChange?: (title: string) => void;
   /** 点击终端内的链接时回调（用于打开内置浏览器 tab）。 */
@@ -84,6 +85,7 @@ const DEFAULT_FONT_FAMILY =
 export const TerminalPanelContent = ({
   tabId,
   cwd,
+  ptyId: attachedPtyId,
   isActive,
   onTitleChange,
   onOpenLink,
@@ -256,12 +258,14 @@ export const TerminalPanelContent = ({
       try {
         const cols = term.cols > 0 ? term.cols : 80;
         const rows = term.rows > 0 ? term.rows : 24;
-        const id = await window.snow.ptyCreate({
-          cwd,
-          cols,
-          rows,
-          shellPath: shellPath || undefined,
-        });
+        const id =
+          attachedPtyId ??
+          (await window.snow.ptyCreate({
+            cwd,
+            cols,
+            rows,
+            shellPath: shellPath || undefined,
+          }));
         if (disposed) {
           void window.snow.ptyKill(id);
           return;
@@ -329,7 +333,7 @@ export const TerminalPanelContent = ({
       cleanupRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cwd, shellPath]);
+  }, [attachedPtyId, cwd, shellPath]);
 
   // Live-update font settings without recreating the terminal / PTY.
   useEffect(() => {

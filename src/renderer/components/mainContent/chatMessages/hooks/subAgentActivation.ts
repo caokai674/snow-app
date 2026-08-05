@@ -521,7 +521,8 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
 
           let subSensitiveAuthorizationToken: string | undefined;
           if (
-            subToolCall.name === "bash-terminal-execute" &&
+            (subToolCall.name === "bash-terminal-execute" ||
+              subToolCall.name === "remote-job-start") &&
             subAuthorizationDecision.status === "approved" &&
             subAuthorizationDecision.sensitiveCommandConfirmed === true
           ) {

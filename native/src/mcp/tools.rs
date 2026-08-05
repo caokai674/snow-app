@@ -31,8 +31,8 @@ use super::servers::filesystem::FilesystemService;
 use super::servers::grep::GrepService;
 use super::servers::config::ConfigService;
 use super::servers::remote_workspace::{
-    is_ssh_path, resolve_remote_project_workspace, resolve_remote_workspace_path,
-    RemoteWorkspaceCallback,
+    execute_remote_workspace_command, is_ssh_path, resolve_remote_project_workspace,
+    resolve_remote_workspace_path, RemoteWorkspaceCallback,
 };
 use super::servers::skills::SkillsService;
 use super::servers::terminal::{TerminalCommandCallback, TerminalService};
@@ -93,6 +93,7 @@ const REQUEST_APPROVAL_FULL_NAME: &str = "app-control-requestApproval";
 pub const BUILTIN_SERVER_IDS: &[&str] = &[
     "user-interaction",
     "app-control",
+    "remote-job",
     "filesystem",
     "sub-agents",
     "websearch",
@@ -846,7 +847,45 @@ pub async fn call_mcp_tool(
 
     let returns_plain_text = tool_full_name == "skills-skill-execute";
     let masking_tool_name = tool_full_name.clone();
-    let result = if tool_full_name == "bash-terminal-execute" {
+    let result = if tool_full_name == "remote-job-start" {
+        if !uses_remote_workspace {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "remote-job-start requires an SSH workspace".to_string(),
+            ));
+        }
+        let mut durable_args = args.clone();
+        durable_args["durable"] = Value::Bool(true);
+        BashService::new()
+            .execute_terminal_stream(
+                &durable_args,
+                project_id.as_deref(),
+                sensitive_authorization_token.as_deref(),
+                on_chunk,
+                &on_remote_workspace_command,
+            )
+            .await?
+    } else if let Some(remote_job_tool) = tool_full_name.strip_prefix("remote-job-") {
+        let operation = match remote_job_tool {
+            "status" => "remote-job-status",
+            "read" => "remote-job-read",
+            "cancel" => "remote-job-cancel",
+            "list" => "remote-job-list",
+            _ => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!("Unknown Remote Job tool: {remote_job_tool}"),
+                ));
+            }
+        };
+        execute_remote_workspace_command(
+            &on_remote_workspace_command,
+            operation,
+            &args,
+            None,
+        )
+        .await?
+    } else if tool_full_name == "bash-terminal-execute" {
         let terminal_result = BashService::new()
             .execute_terminal_stream(
                 &args,
@@ -1207,14 +1246,29 @@ async fn prepare_remote_workspace_args(
     let Some(path) = args.get(path_field).and_then(Value::as_str) else {
         return Ok((args, false));
     };
+    let remote_project_workspace = resolve_remote_project_workspace(project_id).await?;
     if is_ssh_path(path) {
+        if let Some(workspace_path) = remote_project_workspace.as_deref() {
+            if let (
+                Some((workspace_authority, workspace_segments)),
+                Some((candidate_authority, candidate_segments)),
+            ) = (normalize_ssh_path(workspace_path), normalize_ssh_path(path))
+            {
+                if workspace_authority == candidate_authority
+                    && remote_segments_start_with(&candidate_segments, &workspace_segments)
+                {
+                    args["workspaceRoot"] = Value::String(workspace_path.to_string());
+                }
+            }
+        }
         return Ok((args, true));
     }
 
-    let Some(workspace_path) = resolve_remote_project_workspace(project_id).await? else {
+    let Some(workspace_path) = remote_project_workspace else {
         return Ok((args, false));
     };
     args[path_field] = Value::String(resolve_remote_workspace_path(&workspace_path, path));
+    args["workspaceRoot"] = Value::String(workspace_path);
     Ok((args, true))
 }
 
@@ -1222,7 +1276,9 @@ fn remote_workspace_path_field(tool_full_name: &str) -> Option<&'static str> {
     match tool_full_name {
         "filesystem-read" | "filesystem-replace_edit" | "filesystem-create" => Some("filePath"),
         "grep-search" => Some("path"),
-        "bash-terminal-execute" => Some("workingDirectory"),
+        "bash-terminal-execute" | "remote-job-start" | "remote-job-list" => {
+            Some("workingDirectory")
+        }
         _ => None,
     }
 }

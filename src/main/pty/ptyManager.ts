@@ -26,6 +26,8 @@ export type PtySessionOptions = {
   cols: number;
   rows: number;
   shellPath?: string;
+  /** Internal-only validated command used to attach an existing Remote Job. */
+  remoteCommand?: string;
 };
 
 export type PtySession = {
@@ -185,7 +187,10 @@ type SshSpawnConfig = {
   passphrase?: string;
 };
 
-const buildSshSpawnConfig = (cwd: string): SshSpawnConfig | null => {
+const buildSshSpawnConfig = (
+  cwd: string,
+  remoteCommand?: string
+): SshSpawnConfig | null => {
   if (!isSshPath(cwd)) {
     return null;
   }
@@ -212,7 +217,7 @@ const buildSshSpawnConfig = (cwd: string): SshSpawnConfig | null => {
   const credential = getSshCredential(host, port, username);
   const config: SshSpawnConfig = {
     shell: resolveWindowsExecutable("ssh"),
-    args: [...sshArgs, `${username}@${host}`],
+    args: sshArgs,
   };
 
   if (credential) {
@@ -232,11 +237,16 @@ const buildSshSpawnConfig = (cwd: string): SshSpawnConfig | null => {
     // agent auth: no extra args needed
   }
 
-  // After connecting, cd to the remote path and start a login shell
-  if (remotePath && remotePath !== "/") {
-    config.args.push("-t", `cd '${remotePath}' && exec $SHELL -l`);
+  const destination = `${username}@${host}`;
+  // Only Main Process creates remoteCommand after validating the Job backend.
+  // Renderer-created terminals always get a normal login shell.
+  if (remoteCommand) {
+    config.args.push("-tt", destination, remoteCommand);
+  } else if (remotePath && remotePath !== "/") {
+    // After connecting, cd to the remote path and start a login shell.
+    config.args.push("-t", destination, `cd '${remotePath}' && exec $SHELL -l`);
   } else {
-    config.args.push("-t", `exec $SHELL -l`);
+    config.args.push("-t", destination, `exec $SHELL -l`);
   }
 
   return config;
@@ -250,7 +260,7 @@ export const createPtySession = (
   const customShell = options.shellPath?.trim();
   const isWindows = process.platform === "win32";
 
-  const sshConfig = buildSshSpawnConfig(options.cwd);
+  const sshConfig = buildSshSpawnConfig(options.cwd, options.remoteCommand);
 
   let shell: string;
   let shellArgs: string[];
@@ -352,6 +362,25 @@ export const createPtySession = (
 
   return id;
 };
+
+/**
+ * Opens a renderer-owned terminal attached to a validated Remote Job. This
+ * stays separate from the public pty:create IPC so a renderer cannot turn a
+ * saved SSH credential into arbitrary background command execution.
+ */
+export const createRemoteJobPtySession = (
+  webContents: WebContents,
+  workspacePath: string,
+  remoteCommand: string,
+  cols: number,
+  rows: number
+): string =>
+  createPtySession(webContents, {
+    cwd: workspacePath,
+    cols,
+    rows,
+    remoteCommand,
+  });
 
 export const writePtyInput = (id: string, data: string): void => {
   const session = sessions.get(id);

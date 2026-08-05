@@ -9,12 +9,17 @@ import {
   useState,
   type RefObject,
 } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import type {
   FileSearchAgentProgress,
   FileSearchResult,
   WorkspaceDirectoryRecord,
 } from "../../../../preload";
 import { useI18n } from "../../../i18n";
+import {
+  appleSurfaceTransition,
+  useAppleThemeMotion,
+} from "../../../hooks/useAppleThemeMotion";
 import { getFileTypeIcon } from "../../../utils/fileIcons";
 import type { FileTag } from "./fileTagUtils";
 
@@ -97,8 +102,10 @@ export const FileMentionPopup = forwardRef<
     onDragStart,
   },
   ref
-): React.JSX.Element | null {
+): React.JSX.Element {
   const { t } = useI18n();
+  const { enabled: appleMotionEnabled, reducedMotion } = useAppleThemeMotion();
+  const transition = appleSurfaceTransition(reducedMotion);
   const [activeDirectory, setActiveDirectory] =
     useState<WorkspaceDirectoryRecord | null>(null);
   const [entries, setEntries] = useState<FileSearchResult[]>([]);
@@ -528,12 +535,35 @@ export const FileMentionPopup = forwardRef<
     t,
   ]);
 
-  if (!visible) {
-    return null;
-  }
-
   return (
-    <div className="file-mention-popup" ref={popupRef}>
+    <AnimatePresence initial={false}>
+      {visible && (
+        <motion.div
+          animate={
+            appleMotionEnabled
+              ? reducedMotion
+                ? { opacity: 1 }
+                : { opacity: 1, scale: 1, y: 0, filter: "blur(0px)" }
+              : undefined
+          }
+          className="file-mention-popup"
+          exit={
+            appleMotionEnabled
+              ? reducedMotion
+                ? { opacity: 0 }
+                : { opacity: 0, scale: 0.98, y: -4, filter: "blur(1px)" }
+              : undefined
+          }
+          initial={
+            appleMotionEnabled
+              ? reducedMotion
+                ? { opacity: 0 }
+                : { opacity: 0, scale: 0.98, y: -4, filter: "blur(1px)" }
+              : false
+          }
+          ref={popupRef}
+          transition={appleMotionEnabled ? transition : undefined}
+        >
       <div className="file-mention-list" ref={listRef}>
         {isLoadingInitial ? (
           <div className="file-mention-skeleton">
@@ -660,6 +690,8 @@ export const FileMentionPopup = forwardRef<
           {t("fileMention.dragToInput")}
         </span>
       </div>
-    </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 });

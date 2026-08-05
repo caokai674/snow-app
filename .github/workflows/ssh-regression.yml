@@ -1,0 +1,117 @@
+name: SSH regression
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ssh-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  openssh:
+    name: OpenSSH on Debian ${{ matrix.debian }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        debian: ["12", "13"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Build OpenSSH test server
+        run: docker build --build-arg DEBIAN_SUITE=${{ matrix.debian }} --tag snow-ssh-test:${{ matrix.debian }} scripts/ssh-test-server
+
+      - name: Start OpenSSH test server and SSH agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_root="$RUNNER_TEMP/snow-ssh-test"
+          mkdir -p "$test_root/host-keys"
+          ssh-keygen -q -t ed25519 -N '' -f "$test_root/id_ed25519"
+          cp "$test_root/id_ed25519.pub" "$test_root/authorized_keys"
+          ssh-keygen -q -t ed25519 -N '' -f "$test_root/host-keys/ssh_host_ed25519_key"
+          eval "$(ssh-agent -s)"
+          ssh-add "$test_root/id_ed25519"
+          container_name="snow-ssh-test-${{ matrix.debian }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker run --detach --name "$container_name" --publish 127.0.0.1::2222 \
+            --volume "$test_root/host-keys:/host-keys" \
+            --volume "$test_root/authorized_keys:/run/snow-authorized-keys:ro" \
+            "snow-ssh-test:${{ matrix.debian }}"
+          port="$(docker port "$container_name" 2222/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
+          test -n "$port"
+          {
+            echo "SNOW_SSH_TEST=1"
+            echo "SNOW_SSH_TEST_HOST=127.0.0.1"
+            echo "SNOW_SSH_TEST_PORT=$port"
+            echo "SNOW_SSH_TEST_CONTAINER=$container_name"
+            echo "SNOW_SSH_TEST_HOST_KEY=$test_root/host-keys/ssh_host_ed25519_key"
+            echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"
+          } >> "$GITHUB_ENV"
+
+      - name: Run SSH regression tests
+        run: npx vitest run src/main/ssh/sshManager.test.ts src/main/ssh/sshManager.openssh.test.ts src/main/ssh/remoteJobs.openssh.test.ts
+
+      - name: Collect OpenSSH logs on failure
+        if: failure()
+        run: docker logs "$SNOW_SSH_TEST_CONTAINER" || true
+
+      - name: Remove OpenSSH test server
+        if: always()
+        run: docker rm --force "$SNOW_SSH_TEST_CONTAINER" || true
+
+  windows-openssh:
+    name: OpenSSH on Windows Server
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Enable local OpenSSH test account
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $capability = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
+          if ($capability.State -ne 'Installed') {
+            Add-WindowsCapability -Online -Name $capability.Name
+          }
+          $password = ConvertTo-SecureString 'snow-test-password' -AsPlainText -Force
+          if (-not (Get-LocalUser -Name snowssh -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name snowssh -Password $password -PasswordNeverExpires | Out-Null
+          }
+          $config = 'C:\ProgramData\ssh\sshd_config'
+          Add-Content -LiteralPath $config -Value "`nPasswordAuthentication yes`n"
+          Set-Service -Name sshd -StartupType Manual
+          Restart-Service -Name sshd
+
+      - name: Run Windows OpenSSH Remote Job regression
+        shell: pwsh
+        run: |
+          $env:SNOW_WINDOWS_SSH_TEST = '1'
+          $env:SNOW_WINDOWS_SSH_TEST_HOST = '127.0.0.1'
+          $env:SNOW_WINDOWS_SSH_TEST_PORT = '22'
+          $env:SNOW_WINDOWS_SSH_TEST_USER = 'snowssh'
+          npx vitest run src/main/ssh/remoteJobs.windows.openssh.test.ts src/main/ssh/windowsRemoteRunner.test.ts src/main/ssh/snowAgent.test.ts

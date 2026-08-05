@@ -1,5 +1,8 @@
-import { createRequire } from "node:module";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path/posix";
+import { createRequire } from "node:module";
+import { getSshHostKey, saveSshHostKey } from "./sshHostKeys";
 
 const require2 = createRequire(import.meta.url);
 const ssh2 = require2("ssh2") as typeof import("ssh2");
@@ -15,7 +18,48 @@ export type SshConnectParams = {
   password?: string;
   privateKeyPath?: string;
   passphrase?: string;
+  /** Replaces a pinned host key only after an explicit renderer confirmation. */
+  hostKeyPolicy?: "replace";
 };
+
+export type SshOperationSideEffect = "none" | "possible";
+export type RemoteProcessTermination = "not_requested" | "unconfirmed";
+
+export class SshOperationError extends Error {
+  readonly code: string;
+  readonly operation: string;
+  readonly sideEffect: SshOperationSideEffect;
+  readonly remoteProcessTermination?: RemoteProcessTermination;
+
+  constructor(params: {
+    code: string;
+    operation: string;
+    message: string;
+    sideEffect?: SshOperationSideEffect;
+    remoteProcessTermination?: RemoteProcessTermination;
+  }) {
+    super(`[${params.code}] ${params.message}`);
+    this.name = "SshOperationError";
+    this.code = params.code;
+    this.operation = params.operation;
+    this.sideEffect = params.sideEffect ?? "none";
+    this.remoteProcessTermination = params.remoteProcessTermination;
+  }
+}
+
+export const isSshOperationError = (
+  error: unknown
+): error is SshOperationError => error instanceof SshOperationError;
+
+export const toSshOperationErrorResult = (
+  error: SshOperationError
+): Record<string, unknown> => ({
+  code: error.code,
+  operation: error.operation,
+  sideEffect: error.sideEffect,
+  remoteProcessTermination: error.remoteProcessTermination,
+  message: error.message.replace(/^\[[^\]]+\]\s*/, ""),
+});
 
 export type SshDirectoryEntry = {
   name: string;
@@ -29,9 +73,85 @@ export type SshSession = {
   client: import("ssh2").Client;
   sftp: import("ssh2").SFTPWrapper;
   params: SshConnectParams;
+  capabilities?: SshCapabilities;
+};
+
+export type SshCapabilities = {
+  platform: "posix" | "windows";
+  posixShell: boolean;
+  systemdUser: boolean;
+  tmux: boolean;
+  setsid: boolean;
+  nohup: boolean;
+  powerShell: boolean;
+  windowsJobObjects: boolean;
+};
+
+export type SshFileSaveGuarantee =
+  | "strong_atomic"
+  | "atomic_best_effort";
+
+/** A content-addressed remote file version used as the write CAS precondition. */
+export type SshFileVersion = {
+  exists: boolean;
+  sha256?: string;
+  size?: number;
+  mtime?: number;
+};
+
+export type SshFileWriteOptions = {
+  signal?: AbortSignal;
+  /** Required by user-facing write paths to prevent a stale editor overwrite. */
+  expectedVersion?: SshFileVersion;
+  /** Absolute remote workspace path, already bound to the active SSH profile. */
+  workspaceRoot?: string;
+};
+
+export type SshFileWriteResult = {
+  guarantee: SshFileSaveGuarantee;
+  sideEffect: "committed";
+  bytes: number;
+  version: SshFileVersion;
+  durability: {
+    fsynced: boolean;
+    posixRename: boolean;
+  };
 };
 
 const sessions = new Map<string, SshSession>();
+
+/**
+ * A stable profile handle can be resolved to the current ephemeral SSH
+ * session by SshConnectionManager. Keeping this indirection here lets the
+ * existing SFTP/exec APIs stay compatible while reconnects replace a client.
+ */
+type SshSessionHandleResolver = (handle: string) => string | undefined;
+let sessionHandleResolver: SshSessionHandleResolver | undefined;
+
+export const setSshSessionHandleResolver = (
+  resolver?: SshSessionHandleResolver
+): void => {
+  sessionHandleResolver = resolver;
+};
+
+export const getSshSession = (sessionIdOrHandle: string): SshSession | undefined => {
+  const direct = sessions.get(sessionIdOrHandle);
+  if (direct) {
+    return direct;
+  }
+  const resolvedSessionId = sessionHandleResolver?.(sessionIdOrHandle);
+  return resolvedSessionId ? sessions.get(resolvedSessionId) : undefined;
+};
+
+type SshClientFactory = () => import("ssh2").Client;
+let sshClientFactory: SshClientFactory = () => new Client();
+
+/** Test-only injection point for deterministic cancellation and disconnect races. */
+export const setSshClientFactoryForTesting = (
+  factory?: SshClientFactory
+): void => {
+  sshClientFactory = factory ?? (() => new Client());
+};
 
 const generateSessionId = (): string =>
   `ssh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -42,16 +162,43 @@ export const getSshProfileKey = (params: {
   username: string;
 }): string => `${params.username}@${params.host}:${params.port}`;
 
-export const connectSsh = (params: SshConnectParams): Promise<string> => {
+export const connectSsh = (
+  params: SshConnectParams,
+  options?: { signal?: AbortSignal }
+): Promise<string> => {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const client = new Client();
+    let observedFingerprint: string | null = null;
+    let hostKeyMismatch: { expected: string; received: string } | null = null;
+    const client = sshClientFactory();
+    const signal = options?.signal;
 
-    const connectConfig: Record<string, unknown> = {
+    const connectConfig: import("ssh2").ConnectConfig = {
       host: params.host,
       port: params.port,
       username: params.username,
       readyTimeout: 15000,
+      keepaliveInterval: 10_000,
+      keepaliveCountMax: 3,
+      agentForward: false,
+      hostHash: "sha256",
+      hostVerifier: (value: string | Buffer): boolean => {
+        const fingerprint = String(value);
+        const trusted = getSshHostKey(params.host, params.port);
+        if (
+          trusted &&
+          trusted.fingerprint !== fingerprint &&
+          params.hostKeyPolicy !== "replace"
+        ) {
+          hostKeyMismatch = {
+            expected: trusted.fingerprint,
+            received: fingerprint,
+          };
+          return false;
+        }
+        observedFingerprint = fingerprint;
+        return true;
+      },
     };
 
     if (params.authMethod === "password" && params.password) {
@@ -69,40 +216,128 @@ export const connectSsh = (params: SshConnectParams): Promise<string> => {
         connectConfig.passphrase = params.passphrase;
       }
     } else if (params.authMethod === "agent") {
-      const https = require2("node:https") as typeof import("node:https");
-      connectConfig.agent = new https.Agent();
+      const agentSocket = process.env.SSH_AUTH_SOCK;
+      if (!agentSocket) {
+        reject(
+          new SshOperationError({
+            code: "SSH_AGENT_UNAVAILABLE",
+            operation: "connect",
+            message: "SSH agent authentication requires SSH_AUTH_SOCK",
+          })
+        );
+        return;
+      }
+      connectConfig.agent = agentSocket;
     } else {
       reject(new Error("Invalid authentication method or missing credentials"));
       return;
     }
 
+    const clearAbortListener = (): void => {
+      signal?.removeEventListener("abort", onAbort);
+    };
+
+    const rejectConnection = (error: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearAbortListener();
+      try {
+        client.end();
+      } catch {
+        // The transport may already be closed.
+      }
+      reject(error);
+    };
+
+    const onAbort = (): void => {
+      rejectConnection(
+        new SshOperationError({
+          code: "SSH_OPERATION_CANCELLED",
+          operation: "connect",
+          message: "SSH connection cancelled",
+        })
+      );
+    };
+
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+
     client.on("ready", () => {
       client.sftp(
         (err: Error | undefined, sftp: import("ssh2").SFTPWrapper) => {
           if (err) {
-            if (!settled) {
-              settled = true;
+            rejectConnection(
+              new Error(`SFTP initialization failed: ${err.message}`)
+            );
+            return;
+          }
+
+          if (settled) {
+            try {
+              sftp.end();
               client.end();
-              reject(new Error(`SFTP initialization failed: ${err.message}`));
+            } catch {
+              // The transport may already be closed.
             }
+            return;
+          }
+
+          if (!observedFingerprint) {
+            rejectConnection(
+              new SshOperationError({
+                code: "SSH_HOST_KEY_UNAVAILABLE",
+                operation: "connect",
+                message: "SSH server did not provide a host key fingerprint",
+              })
+            );
+            return;
+          }
+
+          try {
+            saveSshHostKey({
+              host: params.host,
+              port: params.port,
+              fingerprint: observedFingerprint,
+            });
+          } catch (error) {
+            rejectConnection(
+              new Error(
+                `Failed to persist SSH host key: ${
+                  error instanceof Error ? error.message : String(error)
+                }`
+              )
+            );
             return;
           }
 
           const id = generateSessionId();
           const session: SshSession = { id, client, sftp, params };
           sessions.set(id, session);
-          if (!settled) {
-            settled = true;
-            resolve(id);
-          }
+          settled = true;
+          clearAbortListener();
+          resolve(id);
         }
       );
     });
 
     client.on("error", (err: Error) => {
       if (!settled) {
-        settled = true;
-        reject(new Error(err.message));
+        if (hostKeyMismatch) {
+          rejectConnection(
+            new SshOperationError({
+              code: "SSH_HOST_KEY_CHANGED",
+              operation: "connect",
+              message: `Host key changed for ${params.host}:${params.port}. Expected ${hostKeyMismatch.expected}, received ${hostKeyMismatch.received}. Confirm the new fingerprint before reconnecting.`,
+            })
+          );
+          return;
+        }
+        rejectConnection(new Error(err.message));
       }
     });
 
@@ -114,36 +349,66 @@ export const connectSsh = (params: SshConnectParams): Promise<string> => {
         }
       }
       if (!settled) {
-        settled = true;
-        reject(new Error("SSH connection closed before establishing session"));
+        rejectConnection(
+          new Error("SSH connection closed before establishing session")
+        );
       }
     });
 
     try {
       client.connect(connectConfig);
     } catch (err) {
-      if (!settled) {
-        settled = true;
-        reject(new Error(err instanceof Error ? err.message : String(err)));
-      }
+      rejectConnection(
+        new Error(err instanceof Error ? err.message : String(err))
+      );
     }
   });
 };
 
 export const listSshDirectory = (
   sessionId: string,
-  remotePath: string
+  remotePath: string,
+  options?: { signal?: AbortSignal }
 ): Promise<SshDirectoryEntry[]> => {
   return new Promise((resolve, reject) => {
-    const session = sessions.get(sessionId);
+    const session = getSshSession(sessionId);
     if (!session) {
       reject(new Error("SSH session not found. Please reconnect."));
       return;
     }
 
+    const signal = options?.signal;
+    let settled = false;
+    const cleanup = (): void => {
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const settleAndReject = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = (): void => {
+      settleAndReject(
+        new SshOperationError({
+          code: "SSH_OPERATION_CANCELLED",
+          operation: "sftp_list",
+          message: "Remote directory read cancelled",
+        })
+      );
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+
     session.sftp.readdir(remotePath, (err, list) => {
+      if (settled) {
+        return;
+      }
       if (err) {
-        reject(new Error(`Failed to read remote directory: ${err.message}`));
+        settleAndReject(new Error(`Failed to read remote directory: ${err.message}`));
         return;
       }
 
@@ -167,6 +432,8 @@ export const listSshDirectory = (
         return a.name.localeCompare(b.name);
       });
 
+      settled = true;
+      cleanup();
       resolve(entries);
     });
   });
@@ -188,7 +455,7 @@ export const executeSshCommand = (
   options?: SshCommandOptions
 ): Promise<string> => {
   return new Promise((resolve, reject) => {
-    const session = sessions.get(sessionId);
+    const session = getSshSession(sessionId);
     if (!session) {
       reject(new Error("SSH session not found. Please reconnect."));
       return;
@@ -213,50 +480,86 @@ export const executeSshCommand = (
       session.client.removeListener("close", onClientClose);
     };
 
-    const terminate = (): void => {
+    const terminate = (stream = streamRef): void => {
       // Best-effort: signal the remote process group and close the exec
       // channel so the pending wait settles instead of hanging forever.
       try {
-        streamRef?.signal("KILL");
+        stream?.signal("KILL");
       } catch {
         // Channel may already be gone.
       }
       try {
-        streamRef?.close();
+        stream?.close();
       } catch {
         // Channel may already be gone.
       }
     };
 
-    const settleAndReject = (error: Error): void => {
+    const settleAndReject = (error: Error, terminateRemote = true): void => {
       if (settled) {
         return;
       }
       settled = true;
       cleanup();
-      terminate();
+      if (terminateRemote) {
+        terminate();
+      }
       reject(error);
     };
 
     const onAbort = (): void => {
-      settleAndReject(new Error("Remote command cancelled"));
+      settleAndReject(
+        new SshOperationError({
+          code: "SSH_COMMAND_CANCELLED",
+          operation: "exec",
+          message: "Remote command cancelled; remote process termination is unconfirmed",
+          sideEffect: "possible",
+          remoteProcessTermination: "unconfirmed",
+        })
+      );
     };
     const onClientError = (err: Error): void => {
-      settleAndReject(new Error(`SSH connection error: ${err.message}`));
+      settleAndReject(
+        new SshOperationError({
+          code: "SSH_CONNECTION_ERROR",
+          operation: "exec",
+          message: `SSH connection error: ${err.message}`,
+          sideEffect: "possible",
+          remoteProcessTermination: "unconfirmed",
+        }),
+        false
+      );
     };
     const onClientClose = (): void => {
-      settleAndReject(new Error("SSH connection closed before command completed"));
+      settleAndReject(
+        new SshOperationError({
+          code: "SSH_CONNECTION_CLOSED",
+          operation: "exec",
+          message: "SSH connection closed before command completed",
+          sideEffect: "possible",
+          remoteProcessTermination: "unconfirmed",
+        }),
+        false
+      );
     };
 
     if (signal?.aborted) {
-      reject(new Error("Remote command cancelled"));
+      onAbort();
       return;
     }
     session.client.on("error", onClientError);
     session.client.on("close", onClientClose);
     signal?.addEventListener("abort", onAbort, { once: true });
     timer = setTimeout(() => {
-      settleAndReject(new Error(`Remote command timed out after ${timeoutMs}ms`));
+      settleAndReject(
+        new SshOperationError({
+          code: "SSH_COMMAND_TIMED_OUT",
+          operation: "exec",
+          message: `Remote command timed out after ${timeoutMs}ms; remote process termination is unconfirmed`,
+          sideEffect: "possible",
+          remoteProcessTermination: "unconfirmed",
+        })
+      );
     }, timeoutMs);
 
     session.client.exec(command, (err, stream) => {
@@ -267,6 +570,14 @@ export const executeSshCommand = (
         return;
       }
       streamRef = stream;
+
+      // The cancellation/timeout may occur while ssh2 is waiting for the
+      // exec callback. A channel that arrives after settlement must be closed
+      // immediately so the remote command cannot continue in the background.
+      if (settled) {
+        terminate(stream);
+        return;
+      }
 
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
@@ -306,60 +617,666 @@ export const executeSshCommand = (
   });
 };
 
+const POSIX_CAPABILITY_PROBE_COMMAND = [
+  "for capability in sh systemctl tmux setsid nohup; do",
+  '  if command -v "$capability" >/dev/null 2>&1; then',
+  '    printf "%s=1\\n" "$capability"',
+  "  else",
+  '    printf "%s=0\\n" "$capability"',
+  "  fi",
+  "done",
+  'if systemctl --user show-environment >/dev/null 2>&1; then printf "systemd_user=1\\n"; else printf "systemd_user=0\\n"; fi',
+].join("\n");
+
+const WINDOWS_CAPABILITY_PROBE_COMMAND =
+  'powershell.exe -NoProfile -NonInteractive -Command "Write-Output \'platform=windows\';Write-Output \'powershell=1\';Write-Output \'windows_job_objects=1\'"';
+
+export const probeSshCapabilities = async (
+  sessionId: string,
+  options?: { signal?: AbortSignal }
+): Promise<SshCapabilities> => {
+  let platform: SshCapabilities["platform"] = "posix";
+  let output: string;
+  try {
+    output = await executeSshCommand(sessionId, POSIX_CAPABILITY_PROBE_COMMAND, {
+      timeoutMs: 5_000,
+      signal: options?.signal,
+    });
+  } catch (posixError) {
+    try {
+      output = await executeSshCommand(sessionId, WINDOWS_CAPABILITY_PROBE_COMMAND, {
+        timeoutMs: 5_000,
+        signal: options?.signal,
+      });
+      platform = "windows";
+    } catch {
+      throw posixError;
+    }
+  }
+  const values = new Map(
+    output
+      .trim()
+      .split("\n")
+      .flatMap((line) => {
+        const [key, value] = line.split("=", 2);
+        return key && value ? [[key, value] as const] : [];
+      })
+  );
+  const capabilities: SshCapabilities = {
+    platform,
+    posixShell: values.get("sh") === "1",
+    systemdUser: values.get("systemd_user") === "1",
+    tmux: values.get("tmux") === "1",
+    setsid: values.get("setsid") === "1",
+    nohup: values.get("nohup") === "1",
+    powerShell: values.get("powershell") === "1",
+    windowsJobObjects: values.get("windows_job_objects") === "1",
+  };
+  const session = getSshSession(sessionId);
+  if (session) {
+    session.capabilities = capabilities;
+  }
+  return capabilities;
+};
+
 export const readSshFile = (
   sessionId: string,
-  remotePath: string
+  remotePath: string,
+  options?: { signal?: AbortSignal }
+): Promise<Buffer> => {
+  return readSshFileRange(sessionId, remotePath, { signal: options?.signal });
+};
+
+/** Reads a bounded byte range directly through SFTP on POSIX and Windows OpenSSH. */
+export const readSshFileRange = (
+  sessionId: string,
+  remotePath: string,
+  options?: { offset?: number; length?: number; signal?: AbortSignal }
 ): Promise<Buffer> => {
   return new Promise((resolve, reject) => {
-    const session = sessions.get(sessionId);
+    const session = getSshSession(sessionId);
     if (!session) {
       reject(new Error("SSH session not found. Please reconnect."));
       return;
     }
 
     const chunks: Buffer[] = [];
-    const stream = session.sftp.createReadStream(remotePath);
-
-    stream.on("data", (chunk: Buffer) => {
-      chunks.push(chunk);
-    });
-
-    stream.on("end", () => {
-      resolve(Buffer.concat(chunks));
-    });
-
-    stream.on("error", (err: Error) => {
-      reject(new Error(`Failed to read remote file: ${err.message}`));
-    });
-
-    stream.read();
-  });
-};
-
-export const writeSshFile = (
-  sessionId: string,
-  remotePath: string,
-  content: string
-): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    const session = sessions.get(sessionId);
-    if (!session) {
-      reject(new Error("SSH session not found. Please reconnect."));
+    const signal = options?.signal;
+    let settled = false;
+    let stream:
+      | ReturnType<import("ssh2").SFTPWrapper["createReadStream"]>
+      | undefined;
+    const cleanup = (): void => {
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const settleAndReject = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = (): void => {
+      settleAndReject(
+        new SshOperationError({
+          code: "SSH_OPERATION_CANCELLED",
+          operation: "sftp_read",
+          message: "Remote file read cancelled",
+        })
+      );
+      try {
+        stream?.destroy();
+      } catch {
+        // Stream construction or teardown may already have failed.
+      }
+    };
+    if (signal?.aborted) {
+      onAbort();
       return;
     }
 
-    const stream = session.sftp.createWriteStream(remotePath);
+    try {
+      const offset = Math.max(0, Math.floor(options?.offset ?? 0));
+      const length = options?.length;
+      stream = session.sftp.createReadStream(
+        remotePath,
+        length === undefined
+          ? { start: offset }
+          : {
+              start: offset,
+              end: offset + Math.max(1, Math.floor(length)) - 1,
+            }
+      );
+    } catch (error) {
+      settleAndReject(
+        new Error(
+          `Failed to read remote file: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      );
+      return;
+    }
+    const activeStream = stream;
+    signal?.addEventListener("abort", onAbort, { once: true });
 
-    stream.on("error", (err: Error) => {
-      reject(new Error(`Failed to write remote file: ${err.message}`));
+    activeStream.on("data", (chunk: Buffer) => {
+      if (!settled) {
+        chunks.push(chunk);
+      }
     });
 
-    stream.on("close", () => {
-      resolve();
+    activeStream.on("end", () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(Buffer.concat(chunks));
     });
 
-    stream.end(Buffer.from(content, "utf-8"));
+    activeStream.on("error", (err: Error) => {
+      settleAndReject(new Error(`Failed to read remote file: ${err.message}`));
+    });
+
+    activeStream.read();
   });
+};
+
+const SFTP_WRITE_CHUNK_SIZE = 64 * 1024;
+
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const isSftpNotFound = (error: unknown): boolean => {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return code === 2 || code === "ENOENT" || code === "NO_SUCH_FILE";
+};
+
+const isUnsupportedOpenSshExtension = (error: unknown): boolean => {
+  if (/does not support|not supported|unsupported/i.test(errorMessage(error))) {
+    return true;
+  }
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === 8
+  );
+};
+
+const sftpVoid = (
+  run: (callback: (error?: Error | null) => void) => void
+): Promise<void> =>
+  new Promise((resolvePromise, rejectPromise) => {
+    try {
+      run((error?: Error | null) => {
+        if (error) {
+          rejectPromise(error);
+          return;
+        }
+        resolvePromise();
+      });
+    } catch (error) {
+      rejectPromise(error);
+    }
+  });
+
+const sftpOpen = (
+  sftp: import("ssh2").SFTPWrapper,
+  path: string,
+  mode: string,
+  attributes?: { mode: number }
+): Promise<Buffer> =>
+  new Promise((resolvePromise, rejectPromise) => {
+    const callback = (error: Error | undefined, handle: Buffer): void => {
+      if (error) {
+        rejectPromise(error);
+        return;
+      }
+      resolvePromise(handle);
+    };
+    try {
+      if (attributes) {
+        sftp.open(path, mode as never, attributes, callback);
+      } else {
+        sftp.open(path, mode as never, callback);
+      }
+    } catch (error) {
+      rejectPromise(error);
+    }
+  });
+
+const sftpLstat = async (
+  sftp: import("ssh2").SFTPWrapper,
+  path: string
+): Promise<import("ssh2").Stats | null> =>
+  new Promise((resolvePromise, rejectPromise) => {
+    try {
+      sftp.lstat(path, (error, stats) => {
+        if (error) {
+          if (isSftpNotFound(error)) {
+            resolvePromise(null);
+            return;
+          }
+          rejectPromise(error);
+          return;
+        }
+        resolvePromise(stats);
+      });
+    } catch (error) {
+      rejectPromise(error);
+    }
+  });
+
+const sftpRealpath = (
+  sftp: import("ssh2").SFTPWrapper,
+  path: string
+): Promise<string> =>
+  new Promise((resolvePromise, rejectPromise) => {
+    try {
+      sftp.realpath(path, (error, resolvedPath) => {
+        if (error) {
+          rejectPromise(error);
+          return;
+        }
+        resolvePromise(resolvedPath);
+      });
+    } catch (error) {
+      rejectPromise(error);
+    }
+  });
+
+const sha256 = (content: Buffer): string =>
+  createHash("sha256").update(content).digest("hex");
+
+const toFileVersion = (
+  stats: import("ssh2").Stats,
+  content: Buffer
+): SshFileVersion => ({
+  exists: true,
+  sha256: sha256(content),
+  size: stats.size,
+  mtime: stats.mtime,
+});
+
+const sameMetadata = (
+  first: import("ssh2").Stats,
+  second: import("ssh2").Stats
+): boolean =>
+  first.size === second.size &&
+  first.mtime === second.mtime &&
+  first.mode === second.mode;
+
+const sameFileVersion = (
+  expected: SshFileVersion,
+  actual: SshFileVersion
+): boolean => {
+  if (expected.exists !== actual.exists) {
+    return false;
+  }
+  if (!expected.exists) {
+    return true;
+  }
+  return (
+    typeof expected.sha256 === "string" &&
+    expected.sha256 === actual.sha256 &&
+    expected.size === actual.size &&
+    expected.mtime === actual.mtime
+  );
+};
+
+const fileTypeError = (
+  path: string,
+  stats: import("ssh2").Stats
+): SshOperationError => {
+  if (stats.isSymbolicLink()) {
+    return new SshOperationError({
+      code: "SSH_FILE_SYMLINK_NOT_ALLOWED",
+      operation: "sftp_atomic_write",
+      message: `Refusing to replace symbolic link outside the verified workspace: ${path}`,
+    });
+  }
+  return new SshOperationError({
+    code: "SSH_FILE_TYPE_UNSUPPORTED",
+    operation: "sftp_atomic_write",
+    message: `Atomic replacement supports regular files only: ${path}`,
+  });
+};
+
+const assertRegularFile = (
+  path: string,
+  stats: import("ssh2").Stats
+): void => {
+  if (!stats.isFile()) {
+    throw fileTypeError(path, stats);
+  }
+};
+
+const isWindowsRemotePath = (path: string): boolean =>
+  /^\/?[A-Za-z]:\//.test(path.replace(/\\/g, "/"));
+
+const normalizedRemotePath = (path: string): string => {
+  const slashNormalized = path.replace(/\\/g, "/");
+  if (isWindowsRemotePath(slashNormalized)) {
+    const withoutLeadingSlash = slashNormalized.replace(/^\//, "");
+    return withoutLeadingSlash.replace(/\/{2,}/g, "/").replace(/\/$/, "");
+  }
+  if (!slashNormalized.startsWith("/")) {
+    throw new SshOperationError({
+      code: "SSH_FILE_INVALID_PATH",
+      operation: "sftp_atomic_write",
+      message: "Remote file paths must be absolute POSIX paths",
+    });
+  }
+  return resolve(slashNormalized);
+};
+
+const isWithinRemoteRoot = (path: string, root: string): boolean => {
+  const left = normalizedRemotePath(path);
+  const right = normalizedRemotePath(root);
+  if (isWindowsRemotePath(left) || isWindowsRemotePath(right)) {
+    const normalizedLeft = left.toLowerCase();
+    const normalizedRight = right.toLowerCase();
+    return (
+      normalizedLeft === normalizedRight ||
+      normalizedLeft.startsWith(`${normalizedRight}/`)
+    );
+  }
+  return right === "/"
+    ? left.startsWith("/")
+    : left === right || left.startsWith(`${right}/`);
+};
+
+const assertWorkspaceBoundary = async (
+  sftp: import("ssh2").SFTPWrapper,
+  remotePath: string,
+  workspaceRoot: string | undefined
+): Promise<void> => {
+  if (!workspaceRoot) {
+    return;
+  }
+
+  const normalizedPath = normalizedRemotePath(remotePath);
+  const normalizedRoot = normalizedRemotePath(workspaceRoot);
+  if (!isWithinRemoteRoot(normalizedPath, normalizedRoot)) {
+    throw new SshOperationError({
+      code: "SSH_FILE_OUTSIDE_WORKSPACE",
+      operation: "sftp_atomic_write",
+      message: "Remote file path is outside the authorized workspace",
+    });
+  }
+
+  const [resolvedRoot, resolvedParent] = await Promise.all([
+    sftpRealpath(sftp, normalizedRoot),
+    sftpRealpath(sftp, dirname(normalizedPath)),
+  ]);
+  if (!isWithinRemoteRoot(resolvedParent, resolvedRoot)) {
+    throw new SshOperationError({
+      code: "SSH_FILE_OUTSIDE_WORKSPACE",
+      operation: "sftp_atomic_write",
+      message: "Remote file parent resolves outside the authorized workspace",
+    });
+  }
+};
+
+const assertNotAborted = (signal: AbortSignal | undefined): void => {
+  if (signal?.aborted) {
+    throw new SshOperationError({
+      code: "SSH_OPERATION_CANCELLED",
+      operation: "sftp_atomic_write",
+      message: "Remote atomic file save cancelled before replacement",
+      sideEffect: "none",
+    });
+  }
+};
+
+const closeHandle = async (
+  sftp: import("ssh2").SFTPWrapper,
+  handle: Buffer | undefined
+): Promise<void> => {
+  if (!handle) {
+    return;
+  }
+  await sftpVoid((callback) => sftp.close(handle, callback));
+};
+
+const cleanupTemporaryFile = async (
+  sftp: import("ssh2").SFTPWrapper,
+  temporaryPath: string
+): Promise<string | null> => {
+  try {
+    await sftpVoid((callback) => sftp.unlink(temporaryPath, callback));
+    return null;
+  } catch (error) {
+    return isSftpNotFound(error) ? null : errorMessage(error);
+  }
+};
+
+const writeHandle = async (
+  sftp: import("ssh2").SFTPWrapper,
+  handle: Buffer,
+  data: Buffer,
+  signal: AbortSignal | undefined
+): Promise<void> => {
+  for (let offset = 0; offset < data.length; offset += SFTP_WRITE_CHUNK_SIZE) {
+    assertNotAborted(signal);
+    const length = Math.min(SFTP_WRITE_CHUNK_SIZE, data.length - offset);
+    await sftpVoid((callback) =>
+      sftp.write(handle, data, offset, length, offset, callback)
+    );
+  }
+  assertNotAborted(signal);
+};
+
+const tryFsync = async (
+  sftp: import("ssh2").SFTPWrapper,
+  handle: Buffer
+): Promise<boolean> => {
+  try {
+    await sftpVoid((callback) => sftp.ext_openssh_fsync(handle, callback));
+    return true;
+  } catch (error) {
+    if (isUnsupportedOpenSshExtension(error)) {
+      return false;
+    }
+    throw error;
+  }
+};
+
+const atomicRename = async (
+  sftp: import("ssh2").SFTPWrapper,
+  temporaryPath: string,
+  remotePath: string
+): Promise<boolean> => {
+  try {
+    await sftpVoid((callback) =>
+      sftp.ext_openssh_rename(temporaryPath, remotePath, callback)
+    );
+    return true;
+  } catch (error) {
+    if (!isUnsupportedOpenSshExtension(error)) {
+      throw error;
+    }
+  }
+  await sftpVoid((callback) => sftp.rename(temporaryPath, remotePath, callback));
+  return false;
+};
+
+const createTemporaryPath = (remotePath: string): string => {
+  const parent = dirname(remotePath);
+  const name = basename(remotePath);
+  const prefix = parent === "/" ? "" : parent;
+  return `${prefix}/.${name}.snow-${randomBytes(12).toString("hex")}.tmp`;
+};
+
+export const readSshFileWithVersion = async (
+  sessionId: string,
+  remotePath: string,
+  options?: { signal?: AbortSignal }
+): Promise<{ content: Buffer; version: SshFileVersion }> => {
+  const session = getSshSession(sessionId);
+  if (!session) {
+    throw new Error("SSH session not found. Please reconnect.");
+  }
+
+  const before = await sftpLstat(session.sftp, remotePath);
+  if (!before) {
+    throw new SshOperationError({
+      code: "SSH_FILE_NOT_FOUND",
+      operation: "sftp_read",
+      message: "Remote file does not exist",
+    });
+  }
+  assertRegularFile(remotePath, before);
+  const content = await readSshFile(sessionId, remotePath, options);
+  const after = await sftpLstat(session.sftp, remotePath);
+  if (!after || !sameMetadata(before, after)) {
+    throw new SshOperationError({
+      code: "SSH_FILE_CHANGED_DURING_READ",
+      operation: "sftp_read",
+      message: "Remote file changed while it was being read; reload before editing",
+    });
+  }
+  assertRegularFile(remotePath, after);
+  return { content, version: toFileVersion(after, content) };
+};
+
+export const writeSshFile = async (
+  sessionId: string,
+  remotePath: string,
+  content: string | Buffer,
+  options?: SshFileWriteOptions
+): Promise<SshFileWriteResult> => {
+  const session = getSshSession(sessionId);
+  if (!session) {
+    throw new Error("SSH session not found. Please reconnect.");
+  }
+
+  const normalizedPath = normalizedRemotePath(remotePath);
+  const signal = options?.signal;
+  const data = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf-8");
+  const temporaryPath = createTemporaryPath(normalizedPath);
+  let handle: Buffer | undefined;
+  let temporaryCreated = false;
+  let renameAttempted = false;
+  let renamed = false;
+
+  try {
+    assertNotAborted(signal);
+    await assertWorkspaceBoundary(session.sftp, normalizedPath, options?.workspaceRoot);
+
+    const initialStats = await sftpLstat(session.sftp, normalizedPath);
+    if (initialStats) {
+      assertRegularFile(normalizedPath, initialStats);
+    }
+
+    if (options?.expectedVersion) {
+      const actualVersion = initialStats
+        ? (await readSshFileWithVersion(sessionId, normalizedPath, { signal })).version
+        : { exists: false };
+      if (!sameFileVersion(options.expectedVersion, actualVersion)) {
+        throw new SshOperationError({
+          code: "SSH_FILE_CONFLICT",
+          operation: "sftp_atomic_write",
+          message: "Remote file changed since it was loaded; reload and resolve the conflict",
+        });
+      }
+    }
+
+    const mode = initialStats?.mode ? initialStats.mode & 0o777 : 0o600;
+    handle = await sftpOpen(session.sftp, temporaryPath, "wx", { mode });
+    temporaryCreated = true;
+    await writeHandle(session.sftp, handle, data, signal);
+    if (initialStats?.mode && session.capabilities?.platform !== "windows") {
+      await sftpVoid((callback) => session.sftp.fchmod(handle as Buffer, mode, callback));
+    }
+    const fsynced = await tryFsync(session.sftp, handle);
+    await closeHandle(session.sftp, handle);
+    handle = undefined;
+
+    assertNotAborted(signal);
+    await assertWorkspaceBoundary(session.sftp, normalizedPath, options?.workspaceRoot);
+    if (options?.expectedVersion) {
+      const currentStats = await sftpLstat(session.sftp, normalizedPath);
+      const currentVersion = currentStats
+        ? (await readSshFileWithVersion(sessionId, normalizedPath, { signal })).version
+        : { exists: false };
+      if (!sameFileVersion(options.expectedVersion, currentVersion)) {
+        throw new SshOperationError({
+          code: "SSH_FILE_CONFLICT",
+          operation: "sftp_atomic_write",
+          message: "Remote file changed before replacement; reload and resolve the conflict",
+        });
+      }
+    }
+
+    renameAttempted = true;
+    const usedPosixRename = await atomicRename(
+      session.sftp,
+      temporaryPath,
+      normalizedPath
+    );
+    renamed = true;
+    const version = (
+      await readSshFileWithVersion(sessionId, normalizedPath, { signal })
+    ).version;
+    if (
+      !version.exists ||
+      version.size !== data.length ||
+      version.sha256 !== sha256(data)
+    ) {
+      throw new SshOperationError({
+        code: "SSH_FILE_VERIFY_FAILED",
+        operation: "sftp_atomic_write",
+        message: "Remote file replacement completed but content verification failed",
+        sideEffect: "possible",
+      });
+    }
+
+    return {
+      // Without a server-side CAS lock, another writer can still race between
+      // the final hash check and rename. Do not overstate this as strong atomic.
+      guarantee: "atomic_best_effort",
+      sideEffect: "committed",
+      bytes: data.length,
+      version,
+      durability: { fsynced, posixRename: usedPosixRename },
+    };
+  } catch (error) {
+    let cleanupFailure: string | null = null;
+    if (!renamed) {
+      try {
+        await closeHandle(session.sftp, handle);
+      } catch (closeError) {
+        cleanupFailure = `close failed: ${errorMessage(closeError)}`;
+      }
+      if (temporaryCreated) {
+        const unlinkFailure = await cleanupTemporaryFile(session.sftp, temporaryPath);
+        cleanupFailure = cleanupFailure ?? unlinkFailure;
+      }
+    }
+
+    if (error instanceof SshOperationError) {
+      if (renameAttempted && error.sideEffect === "none") {
+        throw new SshOperationError({
+          code: error.code,
+          operation: error.operation,
+          message: error.message.replace(/^\[[^\]]+\]\s*/, ""),
+          sideEffect: "possible",
+        });
+      }
+      throw error;
+    }
+    throw new SshOperationError({
+      code: "SSH_FILE_WRITE_FAILED",
+      operation: "sftp_atomic_write",
+      message: `Atomic remote file save failed: ${errorMessage(error)}${
+        cleanupFailure ? `; temporary cleanup ${cleanupFailure}` : ""
+      }`,
+      sideEffect: renameAttempted ? "possible" : "none",
+    });
+  }
 };
 
 export const deleteSshFile = (
@@ -367,7 +1284,7 @@ export const deleteSshFile = (
   remotePath: string
 ): Promise<void> => {
   return new Promise((resolve, reject) => {
-    const session = sessions.get(sessionId);
+    const session = getSshSession(sessionId);
     if (!session) {
       reject(new Error("SSH session not found. Please reconnect."));
       return;
@@ -389,7 +1306,7 @@ export const renameSshFile = (
   newPath: string
 ): Promise<void> => {
   return new Promise((resolve, reject) => {
-    const session = sessions.get(sessionId);
+    const session = getSshSession(sessionId);
     if (!session) {
       reject(new Error("SSH session not found. Please reconnect."));
       return;
@@ -421,7 +1338,7 @@ export const statSshEntry = (
   remotePath: string
 ): Promise<import("ssh2").Stats | null> => {
   return new Promise((resolve, reject) => {
-    const session = sessions.get(sessionId);
+    const session = getSshSession(sessionId);
     if (!session) {
       reject(new Error("SSH session not found. Please reconnect."));
       return;
@@ -442,7 +1359,13 @@ export const statSshEntry = (
 };
 
 export const disconnectSsh = (sessionId: string): void => {
-  const session = sessions.get(sessionId);
+  const resolvedSessionId = sessions.has(sessionId)
+    ? sessionId
+    : sessionHandleResolver?.(sessionId);
+  if (!resolvedSessionId) {
+    return;
+  }
+  const session = sessions.get(resolvedSessionId);
   if (!session) {
     return;
   }
@@ -452,7 +1375,7 @@ export const disconnectSsh = (sessionId: string): void => {
   } catch {
     // Ignore
   }
-  sessions.delete(sessionId);
+  sessions.delete(resolvedSessionId);
 };
 
 export const disconnectAllSsh = (): void => {
@@ -493,6 +1416,34 @@ export const parseSshUrl = (sshUrl: string): ParsedSshUrl => {
   const port =
     colonIndex >= 0 ? parseInt(hostPort.slice(colonIndex + 1), 10) : 22;
   return { host, port, username, remotePath };
+};
+
+/**
+ * Converts a renderer-provided SSH workspace URI into a verified remote root
+ * for an existing session. The renderer never gets to authorize a different
+ * host, account, or port through the write API.
+ */
+export const resolveSshWorkspaceRoot = (
+  sessionId: string,
+  workspaceUrl: string
+): string => {
+  const session = getSshSession(sessionId);
+  if (!session) {
+    throw new Error("SSH session not found. Please reconnect.");
+  }
+  const parsed = parseSshUrl(workspaceUrl);
+  if (
+    parsed.host !== session.params.host ||
+    parsed.port !== session.params.port ||
+    parsed.username !== session.params.username
+  ) {
+    throw new SshOperationError({
+      code: "SSH_WORKSPACE_SESSION_MISMATCH",
+      operation: "sftp_atomic_write",
+      message: "Authorized workspace does not match the active SSH session",
+    });
+  }
+  return normalizedRemotePath(parsed.remotePath);
 };
 
 export const buildSshUrl = (parsed: ParsedSshUrl): string =>

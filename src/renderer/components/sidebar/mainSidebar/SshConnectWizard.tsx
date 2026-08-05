@@ -77,6 +77,7 @@ export function SshConnectWizard({
 
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [hostKeyChanged, setHostKeyChanged] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
 
   const [remotePath, setRemotePath] = useState("/");
@@ -222,9 +223,12 @@ export function SshConnectWizard({
     }
   };
 
-  const handleConnect = async (): Promise<void> => {
+  const handleConnect = async (
+    hostKeyPolicy?: "replace"
+  ): Promise<void> => {
     setIsConnecting(true);
     setConnectError(null);
+    setHostKeyChanged(false);
 
     const params: SshConnectParams = {
       host: host.trim(),
@@ -232,6 +236,9 @@ export function SshConnectWizard({
       username: username.trim(),
       authMethod,
     };
+    if (hostKeyPolicy) {
+      params.hostKeyPolicy = hostKeyPolicy;
+    }
 
     if (authMethod === "password") {
       params.password = password;
@@ -245,6 +252,7 @@ export function SshConnectWizard({
     try {
       const id = await window.snow.sshConnect(params);
       setSessionId(id);
+      setHostKeyChanged(false);
 
       if (rememberCredential) {
         const secret =
@@ -261,13 +269,14 @@ export function SshConnectWizard({
 
       setStep("browse");
     } catch (err) {
-      setConnectError(
+      const message =
         err instanceof Error
           ? err.message
           : t("sidebar.sshConnectError", {
               defaultValue: "Failed to connect to SSH server",
-            })
-      );
+            });
+      setConnectError(message);
+      setHostKeyChanged(message.startsWith("[SSH_HOST_KEY_CHANGED]"));
     } finally {
       setIsConnecting(false);
     }
@@ -697,7 +706,21 @@ export function SshConnectWizard({
             </label>
 
             {connectError ? (
-              <span className="ssh-wizard-error">{connectError}</span>
+              <div className="ssh-wizard-error" role="alert">
+                <span>{connectError}</span>
+                {hostKeyChanged ? (
+                  <button
+                    className="ssh-wizard-host-key-confirm"
+                    disabled={isConnecting}
+                    onClick={() => void handleConnect("replace")}
+                    type="button"
+                  >
+                    {t("sidebar.sshTrustNewHostKey", {
+                      defaultValue: "Trust new host key",
+                    })}
+                  </button>
+                ) : null}
+              </div>
             ) : null}
           </div>
         ) : (

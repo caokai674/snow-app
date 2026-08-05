@@ -7,6 +7,7 @@ pub mod filesystem;
 pub mod grep;
 pub mod config;
 pub mod remote_workspace;
+pub mod remote_jobs;
 pub mod skills;
 pub mod skills_config;
 pub mod skills_installer;
