@@ -195,21 +195,19 @@ impl<'a> DeclaredNameVisitor<'a> {
                     self.extract_from_declaration(decl);
                 }
             }
-            ast::Statement::ExportDefaultDeclaration(export) => {
-                match &export.declaration {
-                    ast::ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                        if let Some(id) = &func.id {
-                            self.names.insert(id.name.as_str().to_string());
-                        }
+            ast::Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ast::ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                    if let Some(id) = &func.id {
+                        self.names.insert(id.name.as_str().to_string());
                     }
-                    ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                        if let Some(id) = &class.id {
-                            self.names.insert(id.name.as_str().to_string());
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                    if let Some(id) = &class.id {
+                        self.names.insert(id.name.as_str().to_string());
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -258,9 +256,7 @@ impl<'a> DeclaredNameVisitor<'a> {
 
 fn binding_name(pattern: &ast::BindingPattern<'_>) -> Option<String> {
     match &pattern.kind {
-        ast::BindingPatternKind::BindingIdentifier(id) => {
-            Some(id.name.as_str().to_string())
-        }
+        ast::BindingPatternKind::BindingIdentifier(id) => Some(id.name.as_str().to_string()),
         _ => None,
     }
 }
@@ -268,11 +264,26 @@ fn binding_name(pattern: &ast::BindingPattern<'_>) -> Option<String> {
 /// Add Node.js / Electron globals that are not part of TypeScript's DOM/ES libs.
 fn add_node_globals(globals: &mut HashSet<String>) {
     let node_names = [
-        "process", "Buffer", "require", "module", "exports",
-        "__dirname", "__filename", "global", "setImmediate",
-        "clearImmediate", "queueMicrotask", "structuredClone",
-        "console", "napi", "napi_derive", "tokio", "serde",
-        "serde_json", "std", "self",
+        "process",
+        "Buffer",
+        "require",
+        "module",
+        "exports",
+        "__dirname",
+        "__filename",
+        "global",
+        "setImmediate",
+        "clearImmediate",
+        "queueMicrotask",
+        "structuredClone",
+        "console",
+        "napi",
+        "napi_derive",
+        "tokio",
+        "serde",
+        "serde_json",
+        "std",
+        "self",
     ];
     for name in &node_names {
         globals.insert(name.to_string());
@@ -284,35 +295,110 @@ fn add_node_globals(globals: &mut HashSet<String>) {
 fn fallback_globals() -> HashSet<String> {
     let names = [
         // ECMAScript intrinsics
-        "undefined", "NaN", "Infinity", "globalThis",
-        "Object", "Function", "Boolean", "Symbol", "Error", "TypeError",
-        "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError",
-        "AggregateError", "Number", "BigInt", "Math", "Date", "String",
-        "RegExp", "Array", "Int8Array", "Uint8Array", "Uint8ClampedArray",
-        "Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
-        "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array",
-        "Map", "Set", "WeakMap", "WeakSet", "ArrayBuffer", "SharedArrayBuffer",
-        "DataView", "Atomics", "JSON", "Promise", "Generator",
-        "GeneratorFunction", "AsyncFunction", "AsyncGenerator",
-        "AsyncGeneratorFunction", "Reflect", "Proxy", "Intl",
-        "FinalizationRegistry", "WeakRef",
+        "undefined",
+        "NaN",
+        "Infinity",
+        "globalThis",
+        "Object",
+        "Function",
+        "Boolean",
+        "Symbol",
+        "Error",
+        "TypeError",
+        "RangeError",
+        "ReferenceError",
+        "SyntaxError",
+        "EvalError",
+        "URIError",
+        "AggregateError",
+        "Number",
+        "BigInt",
+        "Math",
+        "Date",
+        "String",
+        "RegExp",
+        "Array",
+        "Int8Array",
+        "Uint8Array",
+        "Uint8ClampedArray",
+        "Int16Array",
+        "Uint16Array",
+        "Int32Array",
+        "Uint32Array",
+        "Float32Array",
+        "Float64Array",
+        "BigInt64Array",
+        "BigUint64Array",
+        "Map",
+        "Set",
+        "WeakMap",
+        "WeakSet",
+        "ArrayBuffer",
+        "SharedArrayBuffer",
+        "DataView",
+        "Atomics",
+        "JSON",
+        "Promise",
+        "Generator",
+        "GeneratorFunction",
+        "AsyncFunction",
+        "AsyncGenerator",
+        "AsyncGeneratorFunction",
+        "Reflect",
+        "Proxy",
+        "Intl",
+        "FinalizationRegistry",
+        "WeakRef",
         // Global functions
-        "eval", "parseInt", "parseFloat", "isNaN", "isFinite",
-        "decodeURI", "decodeURIComponent", "encodeURI", "encodeURIComponent",
-        "escape", "unescape",
+        "eval",
+        "parseInt",
+        "parseFloat",
+        "isNaN",
+        "isFinite",
+        "decodeURI",
+        "decodeURIComponent",
+        "encodeURI",
+        "encodeURIComponent",
+        "escape",
+        "unescape",
         // Timers (available in both browser and Node)
-        "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+        "setTimeout",
+        "setInterval",
+        "clearTimeout",
+        "clearInterval",
         "queueMicrotask",
         // Common cross-environment
-        "console", "fetch", "URL", "URLSearchParams", "AbortController",
-        "AbortSignal", "Event", "EventTarget", "CustomEvent",
-        "TextEncoder", "TextDecoder", "structuredClone",
+        "console",
+        "fetch",
+        "URL",
+        "URLSearchParams",
+        "AbortController",
+        "AbortSignal",
+        "Event",
+        "EventTarget",
+        "CustomEvent",
+        "TextEncoder",
+        "TextDecoder",
+        "structuredClone",
         // Node.js / Electron
-        "process", "Buffer", "require", "module", "exports",
-        "__dirname", "__filename", "global", "setImmediate",
+        "process",
+        "Buffer",
+        "require",
+        "module",
+        "exports",
+        "__dirname",
+        "__filename",
+        "global",
+        "setImmediate",
         "clearImmediate",
         // Rust crate names that appear in napi context
-        "napi", "napi_derive", "tokio", "serde", "serde_json", "std", "self",
+        "napi",
+        "napi_derive",
+        "tokio",
+        "serde",
+        "serde_json",
+        "std",
+        "self",
     ];
     names.iter().map(|s| s.to_string()).collect()
 }

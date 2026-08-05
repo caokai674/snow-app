@@ -233,18 +233,14 @@ pub fn get_sub_agent_config(
         .and_then(|connection| {
             let mut configs = query_sub_agent_configs(&connection, None)?;
             let found = configs.drain(..).find(|config| {
-                config.agent_id == normalized_agent_id
-                    && config.project_id == normalized_project_id
+                config.agent_id == normalized_agent_id && config.project_id == normalized_project_id
             });
             Ok(found)
         })
         .map_err(|error| database::database_error(database_path, "get sub-agent config", error))
 }
 
-pub fn upsert_sub_agent_config(
-    database_path: &Path,
-    item: &SubAgentConfigInput,
-) -> Result<()> {
+pub fn upsert_sub_agent_config(database_path: &Path, item: &SubAgentConfigInput) -> Result<()> {
     database::open_connection(database_path)
         .and_then(|connection| upsert_sub_agent_config_with_connection(&connection, item))
         .map_err(|error| database::database_error(database_path, "upsert sub-agent config", error))
@@ -366,7 +362,12 @@ fn upsert_sub_agent_config_with_connection(
     connection: &Connection,
     item: &SubAgentConfigInput,
 ) -> rusqlite::Result<()> {
-    let project_id = match item.project_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    let project_id = match item
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         Some(id) => id.to_string(),
         None => String::new(),
     };

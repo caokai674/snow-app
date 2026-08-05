@@ -75,7 +75,10 @@ pub fn resolve_conversation_id(
     conversation_id: Option<&str>,
     previous_response_id: Option<&str>,
 ) -> Result<String> {
-    if let Some(conversation_id) = conversation_id.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(conversation_id) = conversation_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         return Ok(conversation_id.to_string());
     }
 
@@ -83,7 +86,9 @@ pub fn resolve_conversation_id(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        if let Some(conversation_id) = find_conversation_id_by_response_id(database_path, previous_response_id)? {
+        if let Some(conversation_id) =
+            find_conversation_id_by_response_id(database_path, previous_response_id)?
+        {
             return Ok(conversation_id);
         }
 
@@ -139,14 +144,12 @@ pub fn load_context_messages(
                 // raw_json column (where store_chat_exchange persists the
                 // structured [{name, callId, result}] array). Other message
                 // types leave this as None.
-                let tool_results_json = if role.trim() == "tool"
-                    && !raw_json.is_empty()
-                    && raw_json != "{}"
-                {
-                    Some(raw_json)
-                } else {
-                    None
-                };
+                let tool_results_json =
+                    if role.trim() == "tool" && !raw_json.is_empty() && raw_json != "{}" {
+                        Some(raw_json)
+                    } else {
+                        None
+                    };
                 // For assistant messages, restore the thinking text so
                 // providers can round-trip it as reasoning_content (Chat) or
                 // thought parts (Gemini).
@@ -181,7 +184,10 @@ pub fn load_context_messages(
         .map_err(|error| database::database_error(database_path, "load chat context", error))
 }
 
-pub fn store_chat_exchange(database_path: &Path, input: &StoreChatExchangeInput<'_>) -> Result<Vec<String>> {
+pub fn store_chat_exchange(
+    database_path: &Path,
+    input: &StoreChatExchangeInput<'_>,
+) -> Result<Vec<String>> {
     database::open_connection(database_path)
         .and_then(|mut connection| {
             let transaction = connection.transaction()?;
@@ -387,11 +393,8 @@ pub fn store_failed_chat_exchange(
         return Err(Error::from_reason("Chat message content is required"));
     }
 
-    let conversation_id = resolve_conversation_id(
-        database_path,
-        conversation_id,
-        previous_response_id,
-    )?;
+    let conversation_id =
+        resolve_conversation_id(database_path, conversation_id, previous_response_id)?;
     let error_message = error_message.trim();
     let response_content = if error_message.is_empty() {
         "AI response failed, please try again later."
@@ -755,7 +758,9 @@ pub fn list_pinned_conversations(
             let rows = statement.query_map(params![directory_id], map_chat_conversation_row)?;
             rows.collect()
         })
-        .map_err(|error| database::database_error(database_path, "list pinned conversations", error))
+        .map_err(|error| {
+            database::database_error(database_path, "list pinned conversations", error)
+        })
 }
 
 pub fn get_chat_conversation(
@@ -840,13 +845,11 @@ pub fn list_sub_agent_conversations(
                    JOIN chat_conversations AS conversation
                      ON conversation.conversation_id = sub_agent.conversation_id
                   WHERE sub_agent.parent_conversation_id = ?1
-                  ORDER BY sub_agent.created_at ASC, sub_agent.id ASC"
+                  ORDER BY sub_agent.created_at ASC, sub_agent.id ASC",
             )?;
 
-            let rows = statement.query_map(
-                params![parent_conversation_id],
-                map_chat_conversation_row,
-            )?;
+            let rows =
+                statement.query_map(params![parent_conversation_id], map_chat_conversation_row)?;
             rows.collect()
         })
         .map_err(|error| {
@@ -899,14 +902,12 @@ pub fn list_sub_agent_conversations_by_parents(
                   ORDER BY sub_agent.created_at ASC, sub_agent.id ASC"
             ))?;
 
-            let rows = statement.query_map(
-                params_from_iter(parent_conversation_ids.iter()),
-                |row| {
+            let rows =
+                statement.query_map(params_from_iter(parent_conversation_ids.iter()), |row| {
                     let parent_id = row.get::<_, String>(17)?;
                     let record = map_chat_conversation_row(row)?;
                     Ok((parent_id, record))
-                },
-            )?;
+                })?;
 
             let mut grouped: HashMap<String, Vec<ChatConversationRecord>> = HashMap::new();
             for row in rows {
@@ -1069,11 +1070,7 @@ pub fn update_conversation_status(
         .map(|_| ())
 }
 
-pub fn rename_conversation(
-    database_path: &Path,
-    conversation_id: &str,
-    title: &str,
-) -> Result<()> {
+pub fn rename_conversation(database_path: &Path, conversation_id: &str, title: &str) -> Result<()> {
     let trimmed_title = title.trim();
     if trimmed_title.is_empty() {
         return Ok(());
@@ -1110,14 +1107,13 @@ pub fn update_conversation_emoji(
                 params![conversation_id, trimmed_emoji],
             )
         })
-        .map_err(|error| database::database_error(database_path, "update conversation emoji", error))
+        .map_err(|error| {
+            database::database_error(database_path, "update conversation emoji", error)
+        })
         .map(|_| ())
 }
 
-pub fn delete_conversation(
-    database_path: &Path,
-    conversation_id: &str,
-) -> Result<()> {
+pub fn delete_conversation(database_path: &Path, conversation_id: &str) -> Result<()> {
     let mut connection = database::open_connection(database_path)
         .map_err(|error| database::database_error(database_path, "delete conversation", error))?;
 
@@ -1139,12 +1135,18 @@ pub fn delete_conversation(
                    FROM sub_agent_sessions
                   WHERE parent_conversation_id = ?1",
             )
-            .map_err(|error| database::database_error(database_path, "list sub-agent sessions", error))?;
+            .map_err(|error| {
+                database::database_error(database_path, "list sub-agent sessions", error)
+            })?;
         let rows = statement
             .query_map(params![conversation_id], |row| row.get::<_, String>(0))
-            .map_err(|error| database::database_error(database_path, "list sub-agent sessions", error))?;
+            .map_err(|error| {
+                database::database_error(database_path, "list sub-agent sessions", error)
+            })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| database::database_error(database_path, "list sub-agent sessions", error))?
+            .map_err(|error| {
+                database::database_error(database_path, "list sub-agent sessions", error)
+            })?
     };
     conversation_ids.extend(child_ids);
 
@@ -1154,7 +1156,9 @@ pub fn delete_conversation(
                 "DELETE FROM chat_messages WHERE conversation_id = ?1",
                 params![target_id],
             )
-            .map_err(|error| database::database_error(database_path, "delete chat messages", error))?;
+            .map_err(|error| {
+                database::database_error(database_path, "delete chat messages", error)
+            })?;
         transaction
             .execute(
                 "DELETE FROM todo_items WHERE session_id = ?1",
@@ -1169,7 +1173,9 @@ pub fn delete_conversation(
               WHERE parent_conversation_id = ?1 OR conversation_id = ?1",
             params![conversation_id],
         )
-        .map_err(|error| database::database_error(database_path, "delete sub-agent sessions", error))?;
+        .map_err(|error| {
+            database::database_error(database_path, "delete sub-agent sessions", error)
+        })?;
 
     for target_id in conversation_ids.iter().rev() {
         transaction
@@ -1177,7 +1183,9 @@ pub fn delete_conversation(
                 "DELETE FROM chat_conversations WHERE conversation_id = ?1",
                 params![target_id],
             )
-            .map_err(|error| database::database_error(database_path, "delete conversation", error))?;
+            .map_err(|error| {
+                database::database_error(database_path, "delete conversation", error)
+            })?;
     }
 
     transaction
@@ -1198,10 +1206,7 @@ fn in_clause_placeholders(count: usize) -> String {
 /// 批量删除会话，语义与单条 [delete_conversation] 完全一致：
 /// 选中父会话时其直接子代理会话随级联删除，消息与 todo 一并清理。
 /// 与逐条删除相比，只打开一次数据库、使用单个事务，避免 N+1 查询。
-pub fn delete_conversations(
-    database_path: &Path,
-    conversation_ids: &[String],
-) -> Result<()> {
+pub fn delete_conversations(database_path: &Path, conversation_ids: &[String]) -> Result<()> {
     if conversation_ids.is_empty() {
         return Ok(());
     }
@@ -1262,9 +1267,7 @@ pub fn delete_conversations(
         let placeholders = in_clause_placeholders(chunk.len());
         transaction
             .execute(
-                &format!(
-                    "DELETE FROM chat_messages WHERE conversation_id IN ({placeholders})"
-                ),
+                &format!("DELETE FROM chat_messages WHERE conversation_id IN ({placeholders})"),
                 params_from_iter(chunk.iter()),
             )
             .map_err(|error| {
@@ -1272,14 +1275,10 @@ pub fn delete_conversations(
             })?;
         transaction
             .execute(
-                &format!(
-                    "DELETE FROM todo_items WHERE session_id IN ({placeholders})"
-                ),
+                &format!("DELETE FROM todo_items WHERE session_id IN ({placeholders})"),
                 params_from_iter(chunk.iter()),
             )
-            .map_err(|error| {
-                database::database_error(database_path, "delete todo items", error)
-            })?;
+            .map_err(|error| database::database_error(database_path, "delete todo items", error))?;
     }
 
     // 删除子代理会话关联行：父会话被删时其子代理行一并删除
@@ -1532,9 +1531,7 @@ pub fn find_latest_tool_result(
                 .optional()
         })
         .map(|content| content.and_then(|c| extract_tool_result(&c, tool_name)))
-        .map_err(|error| {
-            database::database_error(database_path, "find latest tool result", error)
-        })
+        .map_err(|error| database::database_error(database_path, "find latest tool result", error))
 }
 
 pub fn fork_conversation(
@@ -1615,7 +1612,17 @@ pub fn fork_conversation(
     // non-empty, only messages up to and including the one with that
     // response_id are copied (supports forking from an intermediate AI
     // message). When empty, all messages are copied (full fork).
-    let message_rows: Vec<(String, String, String, String, String, String, String, String, String)> = {
+    let message_rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )> = {
         let mut stmt = transaction
             .prepare(
                 "SELECT message_id, role, content, model, response_id, status, raw_json, thinking, tool_calls_json
@@ -1650,8 +1657,9 @@ pub fn fork_conversation(
     };
 
     for (index, msg) in message_rows.iter().enumerate() {
-        transaction.execute(
-            "INSERT INTO chat_messages (
+        transaction
+            .execute(
+                "INSERT INTO chat_messages (
                id,
                message_id,
                conversation_id,
@@ -1667,21 +1675,21 @@ pub fn fork_conversation(
              ) VALUES (
                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now', 'localtime')
              )",
-            params![
-                database::create_snowflake_id(),
-                create_chat_id(&format!("msg{index}")),
-                new_conversation_id,
-                &msg.1,  // role
-                &msg.2,  // content
-                &msg.3,  // model
-                &msg.4,  // response_id
-                &msg.5,  // status
-                &msg.6,  // raw_json
-                &msg.7,  // thinking
-                &msg.8,  // tool_calls_json
-            ],
-        )
-        .map_err(|error| database::database_error(database_path, "fork conversation", error))?;
+                params![
+                    database::create_snowflake_id(),
+                    create_chat_id(&format!("msg{index}")),
+                    new_conversation_id,
+                    &msg.1, // role
+                    &msg.2, // content
+                    &msg.3, // model
+                    &msg.4, // response_id
+                    &msg.5, // status
+                    &msg.6, // raw_json
+                    &msg.7, // thinking
+                    &msg.8, // tool_calls_json
+                ],
+            )
+            .map_err(|error| database::database_error(database_path, "fork conversation", error))?;
     }
 
     // Update message count and last_message_preview. The preview reflects
@@ -1709,14 +1717,13 @@ pub fn fork_conversation(
         .map_err(|error| database::database_error(database_path, "fork conversation", error))?;
 
     // Re-read from DB to get accurate created_at / updated_at
-    get_chat_conversation(database_path, &new_conversation_id)?
-        .ok_or_else(|| {
-            database::database_error(
-                database_path,
-                "fork conversation",
-                rusqlite::Error::QueryReturnedNoRows,
-            )
-        })
+    get_chat_conversation(database_path, &new_conversation_id)?.ok_or_else(|| {
+        database::database_error(
+            database_path,
+            "fork conversation",
+            rusqlite::Error::QueryReturnedNoRows,
+        )
+    })
 }
 
 pub fn truncate_conversation_from_response(
@@ -1766,7 +1773,9 @@ pub fn truncate_conversation_from_response(
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|error| database::database_error(database_path, "truncate conversation", error))?;
+            .map_err(|error| {
+                database::database_error(database_path, "truncate conversation", error)
+            })?;
         request_id.unwrap_or_else(|| target_id.clone())
     };
 
@@ -2020,8 +2029,14 @@ pub fn get_conversation_api_profile(
 fn create_title(messages: &[ChatContextMessage]) -> String {
     let source = messages
         .iter()
-        .find(|message| normalize_role(&message.role) == "user" && !message.content.trim().is_empty())
-        .or_else(|| messages.iter().find(|message| !message.content.trim().is_empty()))
+        .find(|message| {
+            normalize_role(&message.role) == "user" && !message.content.trim().is_empty()
+        })
+        .or_else(|| {
+            messages
+                .iter()
+                .find(|message| !message.content.trim().is_empty())
+        })
         .map(|message| message.content.as_str())
         .unwrap_or("新对话");
 
@@ -2063,7 +2078,10 @@ fn create_search_snippet(content: &str, query: &str) -> String {
         .map(|(byte_pos, _)| byte_pos)
         .unwrap_or(0);
 
-    let remaining: String = content[start_char..].split_whitespace().collect::<Vec<_>>().join(" ");
+    let remaining: String = content[start_char..]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
 
     let mut chars = remaining.chars();
     let mut snippet = chars.by_ref().take(max_chars).collect::<String>();
@@ -2118,10 +2136,14 @@ pub fn get_conversation_modes(
                     |row| {
                         Ok(ConversationModes {
                             plan_mode: Some(
-                                row.get::<_, Option<i64>>(0)?.map(|v| v != 0).unwrap_or(false),
+                                row.get::<_, Option<i64>>(0)?
+                                    .map(|v| v != 0)
+                                    .unwrap_or(false),
                             ),
                             goal_mode: Some(
-                                row.get::<_, Option<i64>>(1)?.map(|v| v != 0).unwrap_or(false),
+                                row.get::<_, Option<i64>>(1)?
+                                    .map(|v| v != 0)
+                                    .unwrap_or(false),
                             ),
                             goal_mode_token_budget: row.get::<_, Option<i64>>(2)?,
                         })
@@ -2130,9 +2152,7 @@ pub fn get_conversation_modes(
                 .optional()
         })
         .map(|record| record.unwrap_or_default())
-        .map_err(|error| {
-            database::database_error(database_path, "get conversation modes", error)
-        })
+        .map_err(|error| database::database_error(database_path, "get conversation modes", error))
 }
 
 /// Upsert a conversation's Plan/Goal Mode overrides. Only the columns whose

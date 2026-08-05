@@ -26,8 +26,8 @@ use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::super::service::McpService;
 use super::super::servers::bash::{BashStreamCallback, BashStreamChunk};
+use super::super::service::McpService;
 use super::super::tools::McpTool;
 
 const SERVER_ID: &str = "imagegen";
@@ -259,18 +259,46 @@ impl ImageGenService {
         match provider {
             "gemini" => {
                 self.generate_gemini(
-                    args, channel_config, prompt, &model, &size, &quality, &base_url,
-                    api_key, n, stream_enabled, on_chunk, &images, seed,
-                    thinking_level.as_deref(), image_search, &channel_label, timeout_secs,
+                    args,
+                    channel_config,
+                    prompt,
+                    &model,
+                    &size,
+                    &quality,
+                    &base_url,
+                    api_key,
+                    n,
+                    stream_enabled,
+                    on_chunk,
+                    &images,
+                    seed,
+                    thinking_level.as_deref(),
+                    image_search,
+                    &channel_label,
+                    timeout_secs,
                 )
                 .await
             }
             _ => {
                 self.generate_openai(
-                    args, prompt, &model, &size, &quality, &output_format,
-                    &base_url, api_key, n, stream_enabled, on_chunk, &images,
-                    seed, input_fidelity.as_deref(), background.as_deref(),
-                    moderation.as_deref(), &channel_label, timeout_secs,
+                    args,
+                    prompt,
+                    &model,
+                    &size,
+                    &quality,
+                    &output_format,
+                    &base_url,
+                    api_key,
+                    n,
+                    stream_enabled,
+                    on_chunk,
+                    &images,
+                    seed,
+                    input_fidelity.as_deref(),
+                    background.as_deref(),
+                    moderation.as_deref(),
+                    &channel_label,
+                    timeout_secs,
                 )
                 .await
             }
@@ -308,55 +336,51 @@ impl ImageGenService {
         // --- Image-to-image: POST /images/edits (multipart) ---
         if !images.is_empty() {
             let endpoint = format!("{base_url}/images/edits");
-            let build_form =
-                |background: Option<&str>| -> napi::Result<reqwest::multipart::Form> {
-                    let mut form = reqwest::multipart::Form::new()
-                        .text("model", model.to_string())
-                        .text("prompt", prompt.to_string())
-                        .text("n", n.to_string());
-                    for (index, image) in images.iter().enumerate() {
-                        let bytes = decode_base64(&image.data)?;
-                        let file_name = format!(
-                            "image-{}.{}",
-                            index + 1,
-                            ext_for_mime(&image.mime_type)
-                        );
-                        let part = reqwest::multipart::Part::bytes(bytes)
-                            .file_name(file_name)
-                            .mime_str(&image.mime_type)
-                            .map_err(|error| {
-                                generic_error(format!("Failed to build multipart part: {error}"))
-                            })?;
-                        form = form.part("image[]", part);
+            let build_form = |background: Option<&str>| -> napi::Result<reqwest::multipart::Form> {
+                let mut form = reqwest::multipart::Form::new()
+                    .text("model", model.to_string())
+                    .text("prompt", prompt.to_string())
+                    .text("n", n.to_string());
+                for (index, image) in images.iter().enumerate() {
+                    let bytes = decode_base64(&image.data)?;
+                    let file_name =
+                        format!("image-{}.{}", index + 1, ext_for_mime(&image.mime_type));
+                    let part = reqwest::multipart::Part::bytes(bytes)
+                        .file_name(file_name)
+                        .mime_str(&image.mime_type)
+                        .map_err(|error| {
+                            generic_error(format!("Failed to build multipart part: {error}"))
+                        })?;
+                    form = form.part("image[]", part);
+                }
+                if let Some(value) = size {
+                    form = form.text("size", value.clone());
+                }
+                if let Some(value) = quality {
+                    form = form.text("quality", value.clone());
+                }
+                if let Some(value) = output_format {
+                    form = form.text("output_format", value.clone());
+                }
+                if let Some(value) = args.get("outputCompression").and_then(Value::as_u64) {
+                    form = form.text("output_compression", value.clamp(0, 100).to_string());
+                }
+                if let Some(value) = input_fidelity {
+                    // gpt-image-2 不允许设置 input_fidelity（自动高保真）
+                    if !is_gpt_image_2 && matches!(value, "low" | "high" | "auto") {
+                        form = form.text("input_fidelity", value.to_string());
                     }
-                    if let Some(value) = size {
-                        form = form.text("size", value.clone());
+                }
+                if let Some(value) = sanitize_background(model, background) {
+                    form = form.text("background", value.to_string());
+                }
+                if let Some(value) = moderation {
+                    if matches!(value, "auto" | "low") {
+                        form = form.text("moderation", value.to_string());
                     }
-                    if let Some(value) = quality {
-                        form = form.text("quality", value.clone());
-                    }
-                    if let Some(value) = output_format {
-                        form = form.text("output_format", value.clone());
-                    }
-                    if let Some(value) = args.get("outputCompression").and_then(Value::as_u64) {
-                        form = form.text("output_compression", value.clamp(0, 100).to_string());
-                    }
-                    if let Some(value) = input_fidelity {
-                        // gpt-image-2 不允许设置 input_fidelity（自动高保真）
-                        if !is_gpt_image_2 && matches!(value, "low" | "high" | "auto") {
-                            form = form.text("input_fidelity", value.to_string());
-                        }
-                    }
-                    if let Some(value) = sanitize_background(model, background) {
-                        form = form.text("background", value.to_string());
-                    }
-                    if let Some(value) = moderation {
-                        if matches!(value, "auto" | "low") {
-                            form = form.text("moderation", value.to_string());
-                        }
-                    }
-                    Ok(form)
-                };
+                }
+                Ok(form)
+            };
 
             let client = build_client(timeout_secs).await?;
             // 部分模型/代理不支持透明背景（400 "Transparent background is not
@@ -378,10 +402,7 @@ impl ImageGenService {
                 if status.is_success() {
                     break response;
                 }
-                let response_body: Value = response
-                    .json()
-                    .await
-                    .unwrap_or_else(|_| json!({}));
+                let response_body: Value = response.json().await.unwrap_or_else(|_| json!({}));
                 if attempt == 0
                     && current_background.is_some()
                     && is_transparent_unsupported_error(&response_body)
@@ -397,14 +418,9 @@ impl ImageGenService {
                 ));
             };
 
-            let response_body: Value = response
-                .json()
-                .await
-                .map_err(|error| {
-                    generic_error(format!(
-                        "Failed to parse image edit response: {error}"
-                    ))
-                })?;
+            let response_body: Value = response.json().await.map_err(|error| {
+                generic_error(format!("Failed to parse image edit response: {error}"))
+            })?;
             let Some(data) = response_body.get("data").and_then(Value::as_array) else {
                 return Err(generic_error(
                     "Image edit response is missing the data array".to_string(),
@@ -494,10 +510,7 @@ impl ImageGenService {
             if status.is_success() {
                 break response;
             }
-            let response_body: Value = response
-                .json()
-                .await
-                .unwrap_or_else(|_| json!({}));
+            let response_body: Value = response.json().await.unwrap_or_else(|_| json!({}));
             if attempt == 0
                 && body.get("background").is_some()
                 && is_transparent_unsupported_error(&response_body)
@@ -519,8 +532,14 @@ impl ImageGenService {
         if stream_enabled && !is_dall_e {
             let mut partials: Vec<(usize, String)> = Vec::new();
             let mut completed: Vec<Value> = Vec::new();
-            read_openai_sse(response, &mut partials, &mut completed, on_chunk, &mime_type)
-                .await?;
+            read_openai_sse(
+                response,
+                &mut partials,
+                &mut completed,
+                on_chunk,
+                &mime_type,
+            )
+            .await?;
 
             let final_images = if !completed.is_empty() {
                 completed
@@ -536,24 +555,15 @@ impl ImageGenService {
                     "Image generation stream ended without any image data".to_string(),
                 ));
             };
-            return collect_openai_result(
-                prompt,
-                model,
-                channel_label,
-                final_images,
-                mime_type,
-            );
+            return collect_openai_result(prompt, model, channel_label, final_images, mime_type);
         }
 
         // --- Non-streaming path ---
-        let response_body: Value = response
-            .json()
-            .await
-            .map_err(|error| {
-                generic_error(format!(
-                    "Failed to parse image generation response: {error}"
-                ))
-            })?;
+        let response_body: Value = response.json().await.map_err(|error| {
+            generic_error(format!(
+                "Failed to parse image generation response: {error}"
+            ))
+        })?;
 
         let Some(data) = response_body.get("data").and_then(Value::as_array) else {
             return Err(generic_error(
@@ -599,9 +609,7 @@ impl ImageGenService {
     ) -> napi::Result<Value> {
         let is_nano_banana_2 = matches!(
             model,
-            "gemini-3.1-flash-image"
-                | "gemini-3-pro-image"
-                | "gemini-3.1-flash-lite-image"
+            "gemini-3.1-flash-image" | "gemini-3-pro-image" | "gemini-3.1-flash-lite-image"
         );
 
         // --- Shared: reference images as inlineData / image parts ---
@@ -625,8 +633,7 @@ impl ImageGenService {
             let mut search_tool = json!({ "type": "google_search" });
             if image_search {
                 // 图片搜索（3.1 Flash Image 专属）：web + image 双通道
-                search_tool["search_types"] =
-                    json!(["web_search", "image_search"]);
+                search_tool["search_types"] = json!(["web_search", "image_search"]);
             }
             tools.push(search_tool);
         }
@@ -657,9 +664,7 @@ impl ImageGenService {
                     response_format["image_size"] = json!(trimmed);
                 } else if trimmed.contains(':')
                     && trimmed.split(':').count() == 2
-                    && trimmed
-                        .split(':')
-                        .all(|part| part.parse::<u32>().is_ok())
+                    && trimmed.split(':').all(|part| part.parse::<u32>().is_ok())
                 {
                     response_format["aspect_ratio"] = json!(trimmed);
                 }
@@ -685,7 +690,10 @@ impl ImageGenService {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                if matches!(person_generation, "dont_allow" | "allow_all" | "allow_adult") {
+                if matches!(
+                    person_generation,
+                    "dont_allow" | "allow_all" | "allow_adult"
+                ) {
                     generation_config["personGeneration"] = json!(person_generation);
                 }
             }
@@ -714,10 +722,7 @@ impl ImageGenService {
                 })?;
             let status = response.status();
             if !status.is_success() {
-                let response_body: Value = response
-                    .json()
-                    .await
-                    .unwrap_or_else(|_| json!({}));
+                let response_body: Value = response.json().await.unwrap_or_else(|_| json!({}));
                 return Err(api_error(
                     "Image generation failed",
                     status.as_u16(),
@@ -725,14 +730,11 @@ impl ImageGenService {
                 ));
             }
 
-            let response_body: Value = response
-                .json()
-                .await
-                .map_err(|error| {
-                    generic_error(format!(
-                        "Failed to parse image generation response: {error}"
-                    ))
-                })?;
+            let response_body: Value = response.json().await.map_err(|error| {
+                generic_error(format!(
+                    "Failed to parse image generation response: {error}"
+                ))
+            })?;
 
             // Parse steps[].content blocks where type == "image"
             // (only model_output steps; thought steps are hidden drafts).
@@ -791,7 +793,10 @@ impl ImageGenService {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            if matches!(person_generation, "dont_allow" | "allow_all" | "allow_adult") {
+            if matches!(
+                person_generation,
+                "dont_allow" | "allow_all" | "allow_adult"
+            ) {
                 generation_config["personGeneration"] = json!(person_generation);
             }
         }
@@ -823,15 +828,10 @@ impl ImageGenService {
             .json(&body)
             .send()
             .await
-            .map_err(|error| {
-                generic_error(format!("Image generation request failed: {error}"))
-            })?;
+            .map_err(|error| generic_error(format!("Image generation request failed: {error}")))?;
         let status = response.status();
         if !status.is_success() {
-            let response_body: Value = response
-                .json()
-                .await
-                .unwrap_or_else(|_| json!({}));
+            let response_body: Value = response.json().await.unwrap_or_else(|_| json!({}));
             return Err(api_error(
                 "Image generation failed",
                 status.as_u16(),
@@ -846,14 +846,11 @@ impl ImageGenService {
         }
 
         // --- Non-streaming path ---
-        let response_body: Value = response
-            .json()
-            .await
-            .map_err(|error| {
-                generic_error(format!(
-                    "Failed to parse image generation response: {error}"
-                ))
-            })?;
+        let response_body: Value = response.json().await.map_err(|error| {
+            generic_error(format!(
+                "Failed to parse image generation response: {error}"
+            ))
+        })?;
 
         let images = parse_gemini_candidates(&response_body);
         collect_gemini_result(prompt, model, channel_label, images)
@@ -1002,10 +999,7 @@ struct ReferenceImage {
 ///   `[Reference image #N for imagegen-generate: ...]` 引用块），由服务端
 ///   读取文件并转 base64，避免把大段 base64 塞进对话上下文。
 /// 最多 14 张（Gemini 3 Pro Image 官方上限），单张 base64 上限约 20MB。
-fn parse_reference_images(
-    args: &Value,
-    database_path: &Path,
-) -> napi::Result<Vec<ReferenceImage>> {
+fn parse_reference_images(args: &Value, database_path: &Path) -> napi::Result<Vec<ReferenceImage>> {
     const MAX_IMAGES: usize = 14;
     const MAX_BASE64_LEN: usize = 20 * 1024 * 1024; // 20MB base64
 
@@ -1018,7 +1012,10 @@ fn parse_reference_images(
     if items.len() > MAX_IMAGES {
         return Err(Error::new(
             Status::InvalidArg,
-            format!("Too many reference images: {} (max {MAX_IMAGES})", items.len()),
+            format!(
+                "Too many reference images: {} (max {MAX_IMAGES})",
+                items.len()
+            ),
         ));
     }
 
@@ -1034,7 +1031,8 @@ fn parse_reference_images(
         let Some(data) = item.get("data").and_then(Value::as_str) else {
             return Err(Error::new(
                 Status::InvalidArg,
-                "Each reference image must have a base64 `data` string or a `path` string".to_string(),
+                "Each reference image must have a base64 `data` string or a `path` string"
+                    .to_string(),
             ));
         };
         let data = data.trim().to_string();
@@ -1145,7 +1143,13 @@ fn load_reference_image_from_path(
 
 /// 按文件扩展名推断图片 MIME 类型（与 `images.rs` 的推断保持一致）。
 fn mime_for_path(path: &str) -> String {
-    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+    match path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "png" => "image/png".to_string(),
         "jpg" | "jpeg" => "image/jpeg".to_string(),
         "gif" => "image/gif".to_string(),
@@ -1158,9 +1162,12 @@ fn mime_for_path(path: &str) -> String {
 
 fn decode_base64(data: &str) -> napi::Result<Vec<u8>> {
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
-    BASE64_STANDARD
-        .decode(data)
-        .map_err(|error| Error::new(Status::InvalidArg, format!("Invalid base64 image data: {error}")))
+    BASE64_STANDARD.decode(data).map_err(|error| {
+        Error::new(
+            Status::InvalidArg,
+            format!("Invalid base64 image data: {error}"),
+        )
+    })
 }
 
 fn ext_for_mime(mime_type: &str) -> String {
@@ -1205,8 +1212,7 @@ async fn read_openai_sse(
     let mut line_count = 0usize;
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|error| generic_error(format!("Stream read failed: {error}")))?;
+        let chunk = chunk.map_err(|error| generic_error(format!("Stream read failed: {error}")))?;
         buffer.extend_from_slice(&chunk);
 
         loop {
@@ -1308,7 +1314,14 @@ fn collect_openai_result(
         ));
     }
 
-    Ok(build_result(prompt, model, channel_label, generated, content, remote_urls))
+    Ok(build_result(
+        prompt,
+        model,
+        channel_label,
+        generated,
+        content,
+        remote_urls,
+    ))
 }
 
 /// 解析 Gemini Interactions API 响应：`steps[]` 中 `model_output` 步骤的
@@ -1400,8 +1413,7 @@ async fn read_gemini_stream(
     let mut partial_index = 0usize;
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|error| generic_error(format!("Stream read failed: {error}")))?;
+        let chunk = chunk.map_err(|error| generic_error(format!("Stream read failed: {error}")))?;
         buffer.extend_from_slice(&chunk);
 
         loop {
@@ -1539,14 +1551,8 @@ fn load_imagegen_settings() -> napi::Result<ImageGenSettings> {
             }
 
             // 更旧单渠道格式（顶层字段）→ 迁移为一个渠道
-            let old_provider = parsed
-                .get("provider")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let old_base_url = parsed
-                .get("baseUrl")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let old_provider = parsed.get("provider").and_then(Value::as_str).unwrap_or("");
+            let old_base_url = parsed.get("baseUrl").and_then(Value::as_str).unwrap_or("");
             let is_gemini = old_provider == "gemini"
                 || old_base_url.contains("generativelanguage")
                 || old_base_url.contains("googleapis.com");
@@ -1741,9 +1747,7 @@ fn api_error(prefix: &str, status: u16, response_body: &Value) -> Error {
 /// 常见 400 错误的修复提示（命中关键词时给出具体建议）。
 fn hint_for_api_400(message: &str) -> Option<&'static str> {
     let lower = message.to_ascii_lowercase();
-    if lower.contains("number of images")
-        || (lower.contains("n must be") && lower.contains("1"))
-    {
+    if lower.contains("number of images") || (lower.contains("n must be") && lower.contains("1")) {
         return Some(
             "Possible cause: this model does not support generating multiple images per request (n>1). Retry with n=1.",
         );
@@ -1757,14 +1761,12 @@ fn hint_for_api_400(message: &str) -> Option<&'static str> {
             "Possible cause: this model does not support image inputs (image-to-image). Retry without reference images, or use gpt-image-1/gpt-image-2 / a Gemini Nano Banana model for editing.",
         );
     }
-    if lower.contains("size") && (lower.contains("invalid") || lower.contains("not supported"))
-    {
+    if lower.contains("size") && (lower.contains("invalid") || lower.contains("not supported")) {
         return Some(
             "Possible cause: the requested size / aspect ratio is not supported by this model. Retry with a supported size (e.g. 1024x1024 for OpenAI, 1K/2K/4K or a 12-ratio preset for Gemini).",
         );
     }
-    if lower.contains("quality") && (lower.contains("invalid") || lower.contains("not supported"))
-    {
+    if lower.contains("quality") && (lower.contains("invalid") || lower.contains("not supported")) {
         return Some(
             "Possible cause: the requested quality value is not supported by this model. Retry with quality=\"auto\" or omit quality.",
         );

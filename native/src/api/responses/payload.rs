@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use crate::api::common::inject_custom_headers;
 use crate::api::config::{normalize_base_url, resolve_sdk_api_base_url};
 use crate::api::conversation::parse_chat_message_content;
-use crate::storage::services::chat_conversations::ChatContextMessage;
 use crate::api::responses::ResponsesApiRequest;
+use crate::storage::services::chat_conversations::ChatContextMessage;
 use crate::storage::ApiConfigRecord;
 
 /// Resolve the full HTTP endpoint URL for a Responses API request.
@@ -71,11 +71,13 @@ pub(super) fn build_responses_payload(
                 continue;
             }
             let results = match message.tool_results_json {
-                Some(ref raw) => crate::api::conversation::tool_messages::parse_tool_results_with_images(
-                    raw,
-                    database_path,
-                    skip_image_parsing,
-                ),
+                Some(ref raw) => {
+                    crate::api::conversation::tool_messages::parse_tool_results_with_images(
+                        raw,
+                        database_path,
+                        skip_image_parsing,
+                    )
+                }
                 None => Vec::new(),
             };
             for tool_result in &results {
@@ -150,7 +152,11 @@ pub(super) fn build_responses_payload(
             .unwrap_or_default();
         let has_reasoning = !reasoning_items.is_empty();
 
-        if content.is_empty() && message.tool_calls_json.is_none() && !has_thinking && !has_reasoning {
+        if content.is_empty()
+            && message.tool_calls_json.is_none()
+            && !has_thinking
+            && !has_reasoning
+        {
             continue;
         }
 
@@ -252,12 +258,20 @@ pub(super) fn build_responses_payload(
 
         if !content.is_empty() {
             if skip_image_parsing || !has_images {
-                let block_type = if role == "assistant" { "output_text" } else { "input_text" };
+                let block_type = if role == "assistant" {
+                    "output_text"
+                } else {
+                    "input_text"
+                };
                 content_blocks.push(json!({"type": block_type, "text": content}));
             } else {
                 let parsed_content = parse_chat_message_content(content, database_path)?;
                 if !parsed_content.text.is_empty() {
-                    let block_type = if role == "assistant" { "output_text" } else { "input_text" };
+                    let block_type = if role == "assistant" {
+                        "output_text"
+                    } else {
+                        "input_text"
+                    };
                     content_blocks.push(json!({"type": block_type, "text": parsed_content.text}));
                 }
                 for image in &parsed_content.images {

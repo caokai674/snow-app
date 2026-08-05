@@ -93,13 +93,14 @@ pub fn run_post_schema_migrations(connection: &Connection) -> rusqlite::Result<(
 /// the snowflake-ID migration was applied; development databases are expected
 /// to be rebuilt.
 fn reset_legacy_integer_primary_key_tables(connection: &Connection) -> rusqlite::Result<()> {
-    let has_legacy_primary_key = LEGACY_INTEGER_PRIMARY_KEY_TABLES
-        .iter()
-        .try_fold(false, |found, table_name| {
-            Ok::<bool, rusqlite::Error>(
-                found || has_integer_primary_key(connection, table_name)?,
-            )
-        })?;
+    let has_legacy_primary_key =
+        LEGACY_INTEGER_PRIMARY_KEY_TABLES
+            .iter()
+            .try_fold(false, |found, table_name| {
+                Ok::<bool, rusqlite::Error>(
+                    found || has_integer_primary_key(connection, table_name)?,
+                )
+            })?;
 
     if !has_legacy_primary_key {
         return Ok(());

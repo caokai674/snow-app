@@ -15,10 +15,11 @@ use crate::api::common::{
     emit_stream_chunk as emit_chat_completion_stream_chunk, emit_tool_args_probe,
     inject_custom_headers, truncate_utf8_safe,
 };
-use crate::api::retry::{
-    non_sse_response_error, should_retry, stream_idle_timeout_error, wait_before_retry, RetryOptions,
-};
 use crate::api::responses::{ResponsesApiStreamCallback, ResponsesApiStreamChunk};
+use crate::api::retry::{
+    non_sse_response_error, should_retry, stream_idle_timeout_error, wait_before_retry,
+    RetryOptions,
+};
 use crate::api::sse::find_sse_separator;
 use crate::storage::services::chat_conversations::ChatTokenUsage;
 
@@ -150,7 +151,10 @@ pub(super) async fn collect_chat_completions_stream(
                         );
 
                         match wait_before_retry(retry_options, cancel_token, attempt).await {
-                            Ok(()) => { attempt += 1; continue; }
+                            Ok(()) => {
+                                attempt += 1;
+                                continue;
+                            }
                             Err(e) => return Err(e),
                         }
                     }
@@ -179,7 +183,10 @@ pub(super) async fn collect_chat_completions_stream(
                     );
 
                     match wait_before_retry(retry_options, cancel_token, attempt).await {
-                        Ok(()) => { attempt += 1; continue; }
+                        Ok(()) => {
+                            attempt += 1;
+                            continue;
+                        }
                         Err(e) => return Err(e),
                     }
                 }

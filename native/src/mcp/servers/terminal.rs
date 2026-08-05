@@ -263,10 +263,7 @@ fn validate_and_normalize_args(tool_name: &str, args: &Value) -> napi::Result<Va
             if let Some(input_str) = normalized.get("input").and_then(Value::as_str) {
                 let trimmed = input_str.trim_start_matches(['\n', '\r']);
                 if !trimmed.ends_with('\n') && !trimmed.ends_with('\r') {
-                    normalized.insert(
-                        "input".to_string(),
-                        Value::String(format!("{trimmed}\n")),
-                    );
+                    normalized.insert("input".to_string(), Value::String(format!("{trimmed}\n")));
                 }
             }
         }
@@ -284,7 +281,8 @@ fn validate_and_normalize_args(tool_name: &str, args: &Value) -> napi::Result<Va
         }
         "wait" => {
             optional_non_empty_string(args, "tabId")?;
-            let timeout = optional_u64_with_min(args, "timeoutMs", DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS)?;
+            let timeout =
+                optional_u64_with_min(args, "timeoutMs", DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS)?;
             let idle_ms = bounded_u64(args, "idleMs", 500, 100, 5000)?;
             normalized.insert("timeoutMs".to_string(), json!(timeout));
             normalized.insert("idleMs".to_string(), json!(idle_ms));

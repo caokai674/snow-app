@@ -74,22 +74,22 @@ pub async fn create_response_stream(
                 .map(|storage_info| PathBuf::from(storage_info.database_path))
                 .ok();
             let resolved_profile = explicit_api_profile.or_else(|| {
-                request_conversation_id.as_deref().and_then(|conversation_id| {
-                    database_path.as_ref().and_then(|database_path| {
-                        get_conversation_api_profile(database_path, conversation_id)
-                            .ok()
-                            .flatten()
+                request_conversation_id
+                    .as_deref()
+                    .and_then(|conversation_id| {
+                        database_path.as_ref().and_then(|database_path| {
+                            get_conversation_api_profile(database_path, conversation_id)
+                                .ok()
+                                .flatten()
+                        })
                     })
-                })
             });
             get_api_request_context_with_fallback(resolved_profile.as_deref())
         }
     })
     .await
     .map_err(|join_error| {
-        Error::from_reason(format!(
-            "Failed to resolve API configuration: {join_error}"
-        ))
+        Error::from_reason(format!("Failed to resolve API configuration: {join_error}"))
     })??;
     if is_sub_agent
         && request

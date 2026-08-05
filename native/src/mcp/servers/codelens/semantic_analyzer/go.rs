@@ -2,29 +2,102 @@ use std::collections::HashSet;
 
 use tree_sitter::Node;
 
-use super::{Definition, DefKind, field_name_text, is_valid_ident, make_def};
+use super::{field_name_text, is_valid_ident, make_def, DefKind, Definition};
 
 pub fn builtins() -> HashSet<&'static str> {
     [
         // built-in functions
-        "append", "cap", "clear", "close", "complex", "copy", "delete",
-        "imag", "len", "make", "max", "min", "new", "panic", "print",
-        "println", "real", "recover",
+        "append",
+        "cap",
+        "clear",
+        "close",
+        "complex",
+        "copy",
+        "delete",
+        "imag",
+        "len",
+        "make",
+        "max",
+        "min",
+        "new",
+        "panic",
+        "print",
+        "println",
+        "real",
+        "recover",
         // built-in types
-        "bool", "byte", "complex64", "complex128", "error", "float32",
-        "float64", "int", "int8", "int16", "int32", "int64", "rune",
-        "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
-        "any", "comparable",
+        "bool",
+        "byte",
+        "complex64",
+        "complex128",
+        "error",
+        "float32",
+        "float64",
+        "int",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "rune",
+        "string",
+        "uint",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "uintptr",
+        "any",
+        "comparable",
         // constants
-        "true", "false", "iota", "nil",
+        "true",
+        "false",
+        "iota",
+        "nil",
         // common packages
-        "fmt", "os", "io", "bufio", "bytes", "strings", "strconv",
-        "math", "sort", "sync", "context", "errors", "log", "time",
-        "net", "http", "json", "encoding", "crypto", "hash", "regexp",
-        "flag", "path", "filepath", "reflect", "runtime", "testing",
-        "unicode", "unicode", "container", "database", "debug",
-        "embed", "expvar", "go", "image", "index", "mime", "plugin",
-        "slices", "maps", "cmp", "iter", "structs",
+        "fmt",
+        "os",
+        "io",
+        "bufio",
+        "bytes",
+        "strings",
+        "strconv",
+        "math",
+        "sort",
+        "sync",
+        "context",
+        "errors",
+        "log",
+        "time",
+        "net",
+        "http",
+        "json",
+        "encoding",
+        "crypto",
+        "hash",
+        "regexp",
+        "flag",
+        "path",
+        "filepath",
+        "reflect",
+        "runtime",
+        "testing",
+        "unicode",
+        "unicode",
+        "container",
+        "database",
+        "debug",
+        "embed",
+        "expvar",
+        "go",
+        "image",
+        "index",
+        "mime",
+        "plugin",
+        "slices",
+        "maps",
+        "cmp",
+        "iter",
+        "structs",
     ]
     .into_iter()
     .collect()
@@ -148,7 +221,8 @@ pub fn extract_definition(
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 if child.kind() == "import_spec" {
-                    let name_node = child.child_by_field_name("name")
+                    let name_node = child
+                        .child_by_field_name("name")
                         .or_else(|| child.child_by_field_name("path"));
                     if let Some(nn) = name_node {
                         let text = nn.utf8_text(source.as_bytes()).ok()?.trim();

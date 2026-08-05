@@ -142,8 +142,13 @@ pub struct ResponsesApiStreamChunk {
 ///
 /// `ThreadsafeFunction` is `Send + Sync`, which allows it to be called from the
 /// background tokio worker thread without blocking the Node.js main thread.
-pub type ResponsesApiStreamCallback =
-    ThreadsafeFunction<ResponsesApiStreamChunk, Unknown<'static>, ResponsesApiStreamChunk, Status, false>;
+pub type ResponsesApiStreamCallback = ThreadsafeFunction<
+    ResponsesApiStreamChunk,
+    Unknown<'static>,
+    ResponsesApiStreamChunk,
+    Status,
+    false,
+>;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -270,7 +275,8 @@ async fn create_response_async(
         tools,
         &prepared_request.user_system_prompts,
     )?;
-    let retry_options = RetryOptions::from_config(api_config.max_retries, api_config.retry_base_delay_ms);
+    let retry_options =
+        RetryOptions::from_config(api_config.max_retries, api_config.retry_base_delay_ms);
     let stream_idle_timeout_sec =
         resolve_stream_idle_timeout_sec(api_config.stream_idle_timeout_sec);
     let request_payload_json = serde_json::to_string(&payload).unwrap_or_default();
@@ -329,7 +335,10 @@ async fn create_response_async(
             &database_path,
             "create_response_stream_with_context",
             "AI returned empty response",
-            &format!("model={}, status={}", streamed_response.model, streamed_response.status),
+            &format!(
+                "model={}, status={}",
+                streamed_response.model, streamed_response.status
+            ),
         );
     }
 

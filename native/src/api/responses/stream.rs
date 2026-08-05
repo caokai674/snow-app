@@ -16,19 +16,18 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use crate::api::common::{emit_stream_chunk, truncate_utf8_safe};
+use crate::api::responses::{ResponsesApiStreamCallback, ResponsesApiStreamChunk};
 use crate::api::retry::{
-    non_sse_response_error, should_retry, stream_idle_timeout_error, wait_before_retry, RetryOptions,
-};
-use crate::api::responses::{
-    ResponsesApiStreamCallback, ResponsesApiStreamChunk,
+    non_sse_response_error, should_retry, stream_idle_timeout_error, wait_before_retry,
+    RetryOptions,
 };
 use crate::api::sse::find_sse_separator;
 use crate::api::token_counter::count_tokens;
 use crate::storage::services::chat_conversations::ChatTokenUsage;
 
 use super::event::{
-    collect_reasoning_items, collect_reasoning_text, collect_tool_calls,
-    extract_output_text, extract_response_thinking, process_responses_sse_event_block,
+    collect_reasoning_items, collect_reasoning_text, collect_tool_calls, extract_output_text,
+    extract_response_thinking, process_responses_sse_event_block,
 };
 
 pub(super) struct StreamingResponseResult {
@@ -179,7 +178,10 @@ pub(super) async fn collect_streaming_response(
                         );
 
                         match wait_before_retry(retry_options, cancel_token, attempt).await {
-                            Ok(()) => { attempt += 1; continue; }
+                            Ok(()) => {
+                                attempt += 1;
+                                continue;
+                            }
                             Err(e) => return Err(e),
                         }
                     }
@@ -208,7 +210,10 @@ pub(super) async fn collect_streaming_response(
                     );
 
                     match wait_before_retry(retry_options, cancel_token, attempt).await {
-                        Ok(()) => { attempt += 1; continue; }
+                        Ok(()) => {
+                            attempt += 1;
+                            continue;
+                        }
                         Err(e) => return Err(e),
                     }
                 }
@@ -432,7 +437,8 @@ pub(super) async fn collect_streaming_response(
         if let Some(response) = completed_response.as_ref() {
             // Check for error responses
             if let Some(error_msg) = response.get("error").and_then(Value::as_str) {
-                if response_status == "failed" && content_chunks.is_empty() && tool_calls.is_empty() {
+                if response_status == "failed" && content_chunks.is_empty() && tool_calls.is_empty()
+                {
                     return Err(Error::from_reason(error_msg.to_string()));
                 }
             }

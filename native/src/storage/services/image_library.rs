@@ -11,10 +11,10 @@ use napi::bindgen_prelude::*;
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 
-use base64::Engine;
 use super::super::database;
 use super::super::paths;
 use super::system_settings;
+use base64::Engine;
 
 /// image_library 记录（服务层结构体，napi 结构体在 storage/mod.rs 门面层）
 #[derive(Debug, Clone)]
@@ -108,7 +108,8 @@ fn probe_dimensions(bytes: &[u8], mime_type: &str) -> (Option<i64>, Option<i64>)
                 continue;
             }
             let marker = bytes[offset + 1];
-            if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
+            if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
+            {
                 let height = u16::from_be_bytes([bytes[offset + 5], bytes[offset + 6]]);
                 let width = u16::from_be_bytes([bytes[offset + 7], bytes[offset + 8]]);
                 return (Some(width as i64), Some(height as i64));
@@ -339,8 +340,9 @@ pub fn delete_image(database_path: &Path, id: &str) -> Result<()> {
     };
 
     // 1) 重写引用该图的会话消息（content + raw_json）
-    let rewritten = rewrite_messages_referencing(&tx, &relative_path)
-        .map_err(|error| database::database_error(database_path, "rewrite messages for image", error))?;
+    let rewritten = rewrite_messages_referencing(&tx, &relative_path).map_err(|error| {
+        database::database_error(database_path, "rewrite messages for image", error)
+    })?;
 
     // 2) 删除索引行
     tx.execute("DELETE FROM image_library WHERE id = ?1", params![id])
@@ -451,9 +453,8 @@ fn collect_paths_for_conversations(
 ) -> rusqlite::Result<Vec<String>> {
     let mut paths: Vec<String> = Vec::new();
     for conversation_id in conversation_ids {
-        let mut statement = connection.prepare(
-            "SELECT content, raw_json FROM chat_messages WHERE conversation_id = ?1",
-        )?;
+        let mut statement = connection
+            .prepare("SELECT content, raw_json FROM chat_messages WHERE conversation_id = ?1")?;
         let rows = statement.query_map(params![conversation_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })?;
@@ -469,14 +470,13 @@ fn collect_paths_for_conversations(
 }
 
 /// 统计指定会话中引用的图库图片数量（去重后按索引存在性计数）。
-pub fn count_conversation_images(
-    database_path: &Path,
-    conversation_ids: &[String],
-) -> Result<i64> {
+pub fn count_conversation_images(database_path: &Path, conversation_ids: &[String]) -> Result<i64> {
     let connection = database::open_connection(database_path)
         .map_err(|error| database::database_error(database_path, "open for image count", error))?;
-    let paths = collect_paths_for_conversations(&connection, conversation_ids)
-        .map_err(|error| database::database_error(database_path, "scan conversation images", error))?;
+    let paths =
+        collect_paths_for_conversations(&connection, conversation_ids).map_err(|error| {
+            database::database_error(database_path, "scan conversation images", error)
+        })?;
     let mut count = 0i64;
     for path in &paths {
         let exists: bool = connection
@@ -499,14 +499,17 @@ pub fn delete_conversation_images(
     database_path: &Path,
     conversation_ids: &[String],
 ) -> Result<i64> {
-    let mut connection = database::open_connection(database_path)
-        .map_err(|error| database::database_error(database_path, "open for image cascade", error))?;
-    let paths = collect_paths_for_conversations(&connection, conversation_ids)
-        .map_err(|error| database::database_error(database_path, "scan conversation images", error))?;
+    let mut connection = database::open_connection(database_path).map_err(|error| {
+        database::database_error(database_path, "open for image cascade", error)
+    })?;
+    let paths =
+        collect_paths_for_conversations(&connection, conversation_ids).map_err(|error| {
+            database::database_error(database_path, "scan conversation images", error)
+        })?;
 
-    let tx = connection
-        .transaction()
-        .map_err(|error| database::database_error(database_path, "begin image cascade tx", error))?;
+    let tx = connection.transaction().map_err(|error| {
+        database::database_error(database_path, "begin image cascade tx", error)
+    })?;
 
     let mut removed_files: Vec<String> = Vec::new();
     for path in &paths {
@@ -517,12 +520,17 @@ pub fn delete_conversation_images(
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|error| database::database_error(database_path, "query image record", error))?;
+            .map_err(|error| {
+                database::database_error(database_path, "query image record", error)
+            })?;
         if file_name.is_none() {
             continue;
         }
-        tx.execute("DELETE FROM image_library WHERE relative_path = ?1", params![path])
-            .map_err(|error| database::database_error(database_path, "delete image index", error))?;
+        tx.execute(
+            "DELETE FROM image_library WHERE relative_path = ?1",
+            params![path],
+        )
+        .map_err(|error| database::database_error(database_path, "delete image index", error))?;
         removed_files.push(path.clone());
     }
 

@@ -274,7 +274,8 @@ pub fn set_system_setting(
 }
 
 pub fn get_yolo_mode(database_path: &Path) -> Result<bool> {
-    let Some(value) = get_system_setting_value(database_path, DEFAULT_YOLO_MODE_SETTING_CODE)? else {
+    let Some(value) = get_system_setting_value(database_path, DEFAULT_YOLO_MODE_SETTING_CODE)?
+    else {
         return Ok(false);
     };
 
@@ -296,7 +297,8 @@ pub fn set_yolo_mode(database_path: &Path, enabled: bool) -> Result<()> {
 }
 
 pub fn get_plan_mode(database_path: &Path) -> Result<bool> {
-    let Some(value) = get_system_setting_value(database_path, DEFAULT_PLAN_MODE_SETTING_CODE)? else {
+    let Some(value) = get_system_setting_value(database_path, DEFAULT_PLAN_MODE_SETTING_CODE)?
+    else {
         return Ok(false);
     };
 
@@ -318,7 +320,8 @@ pub fn set_plan_mode(database_path: &Path, enabled: bool) -> Result<()> {
 }
 
 pub fn get_goal_mode(database_path: &Path) -> Result<bool> {
-    let Some(value) = get_system_setting_value(database_path, DEFAULT_GOAL_MODE_SETTING_CODE)? else {
+    let Some(value) = get_system_setting_value(database_path, DEFAULT_GOAL_MODE_SETTING_CODE)?
+    else {
         return Ok(false);
     };
 
@@ -364,7 +367,8 @@ pub fn set_goal_mode_token_budget(database_path: &Path, budget: i64) -> Result<(
 }
 
 pub fn get_request_logging(database_path: &Path) -> Result<bool> {
-    let Some(value) = get_system_setting_value(database_path, DEFAULT_REQUEST_LOGGING_SETTING_CODE)?
+    let Some(value) =
+        get_system_setting_value(database_path, DEFAULT_REQUEST_LOGGING_SETTING_CODE)?
     else {
         return Ok(false);
     };
@@ -412,7 +416,8 @@ pub fn set_request_logging_expiry(database_path: &Path, expires_at_ms: i64) -> R
 
 /// 获取图库自定义保存目录。返回空字符串表示未设置（使用默认 ~/.snowapp/image）。
 pub fn get_image_library_dir(database_path: &Path) -> Result<String> {
-    let Some(value) = get_system_setting_value(database_path, DEFAULT_IMAGE_LIBRARY_DIR_SETTING_CODE)?
+    let Some(value) =
+        get_system_setting_value(database_path, DEFAULT_IMAGE_LIBRARY_DIR_SETTING_CODE)?
     else {
         return Ok(String::new());
     };
@@ -758,12 +763,13 @@ pub fn get_mcp_project_scope_settings(
         });
     };
 
-    let mut settings = serde_json::from_str::<McpProjectScopeSettings>(&raw_value).map_err(|error| {
-        Error::new(
-            Status::GenericFailure,
-            format!("Failed to parse project MCP scope settings: {error}"),
-        )
-    })?;
+    let mut settings =
+        serde_json::from_str::<McpProjectScopeSettings>(&raw_value).map_err(|error| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to parse project MCP scope settings: {error}"),
+            )
+        })?;
     settings.normalize();
     if settings.project_id.is_empty() {
         settings.project_id = normalized_project_id.clone();
@@ -834,12 +840,13 @@ pub fn get_skills_project_scope_settings(
         });
     };
 
-    let mut settings = serde_json::from_str::<SkillsProjectScopeSettings>(&raw_value).map_err(|error| {
-        Error::new(
-            Status::GenericFailure,
-            format!("Failed to parse project Skills scope settings: {error}"),
-        )
-    })?;
+    let mut settings =
+        serde_json::from_str::<SkillsProjectScopeSettings>(&raw_value).map_err(|error| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Failed to parse project Skills scope settings: {error}"),
+            )
+        })?;
     settings.normalize();
     if settings.project_id.is_empty() {
         settings.project_id = normalized_project_id.clone();
@@ -847,7 +854,8 @@ pub fn get_skills_project_scope_settings(
     if settings.project_id != normalized_project_id {
         return Err(Error::new(
             Status::GenericFailure,
-            "Project Skills scope setting identity does not match the requested project".to_string(),
+            "Project Skills scope setting identity does not match the requested project"
+                .to_string(),
         ));
     }
 
@@ -1003,8 +1011,8 @@ pub fn get_tool_approval_project_scope_settings(
         });
     };
 
-    let mut settings =
-        serde_json::from_str::<ToolApprovalProjectScopeSettings>(&raw_value).map_err(|error| {
+    let mut settings = serde_json::from_str::<ToolApprovalProjectScopeSettings>(&raw_value)
+        .map_err(|error| {
             Error::new(
                 Status::GenericFailure,
                 format!("Failed to parse project Tool approval scope settings: {error}"),

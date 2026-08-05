@@ -2,48 +2,166 @@ use std::collections::HashSet;
 
 use tree_sitter::Node;
 
-use super::{Definition, DefKind, field_name_text, make_def};
+use super::{field_name_text, make_def, DefKind, Definition};
 
 pub fn builtins() -> HashSet<&'static str> {
     [
         // basic functions
-        "assert", "collectgarbage", "dofile", "error", "getmetatable",
-        "ipairs", "load", "loadfile", "next", "pairs", "pcall", "print",
-        "rawequal", "rawget", "rawlen", "rawset", "require", "select",
-        "setmetatable", "tonumber", "tostring", "type", "warn", "xpcall",
+        "assert",
+        "collectgarbage",
+        "dofile",
+        "error",
+        "getmetatable",
+        "ipairs",
+        "load",
+        "loadfile",
+        "next",
+        "pairs",
+        "pcall",
+        "print",
+        "rawequal",
+        "rawget",
+        "rawlen",
+        "rawset",
+        "require",
+        "select",
+        "setmetatable",
+        "tonumber",
+        "tostring",
+        "type",
+        "warn",
+        "xpcall",
         // constants
-        "nil", "true", "false", "_G", "_VERSION", "_ENV",
+        "nil",
+        "true",
+        "false",
+        "_G",
+        "_VERSION",
+        "_ENV",
         // libraries
-        "coroutine", "debug", "io", "math", "os", "package", "string",
-        "table", "utf8",
+        "coroutine",
+        "debug",
+        "io",
+        "math",
+        "os",
+        "package",
+        "string",
+        "table",
+        "utf8",
         // string lib
-        "byte", "char", "dump", "find", "format", "gmatch", "gsub",
-        "len", "lower", "match", "rep", "reverse", "sub", "upper",
+        "byte",
+        "char",
+        "dump",
+        "find",
+        "format",
+        "gmatch",
+        "gsub",
+        "len",
+        "lower",
+        "match",
+        "rep",
+        "reverse",
+        "sub",
+        "upper",
         // table lib
-        "concat", "insert", "move", "pack", "remove", "sort", "unpack",
+        "concat",
+        "insert",
+        "move",
+        "pack",
+        "remove",
+        "sort",
+        "unpack",
         // math lib
-        "abs", "acos", "asin", "atan", "ceil", "cos", "deg", "exp",
-        "floor", "fmod", "huge", "log", "max", "maxinteger", "min",
-        "mininteger", "modf", "pi", "rad", "random", "randomseed",
-        "sin", "sqrt", "tan", "tointeger", "type", "ult",
+        "abs",
+        "acos",
+        "asin",
+        "atan",
+        "ceil",
+        "cos",
+        "deg",
+        "exp",
+        "floor",
+        "fmod",
+        "huge",
+        "log",
+        "max",
+        "maxinteger",
+        "min",
+        "mininteger",
+        "modf",
+        "pi",
+        "rad",
+        "random",
+        "randomseed",
+        "sin",
+        "sqrt",
+        "tan",
+        "tointeger",
+        "type",
+        "ult",
         // io lib
-        "close", "flush", "input", "lines", "open", "output", "popen",
-        "read", "tmpfile", "write", "stdin", "stdout", "stderr",
+        "close",
+        "flush",
+        "input",
+        "lines",
+        "open",
+        "output",
+        "popen",
+        "read",
+        "tmpfile",
+        "write",
+        "stdin",
+        "stdout",
+        "stderr",
         // os lib
-        "clock", "date", "difftime", "execute", "exit", "getenv",
-        "remove", "rename", "setlocale", "time", "tmpname",
+        "clock",
+        "date",
+        "difftime",
+        "execute",
+        "exit",
+        "getenv",
+        "remove",
+        "rename",
+        "setlocale",
+        "time",
+        "tmpname",
         // coroutine lib
-        "create", "isyieldable", "resume", "running", "status", "wrap",
-        "yield", "close",
+        "create",
+        "isyieldable",
+        "resume",
+        "running",
+        "status",
+        "wrap",
+        "yield",
+        "close",
         // debug lib
-        "getinfo", "getlocal", "getupvalue", "getuservalue", "sethook",
-        "setlocal", "setupvalue", "setuservalue", "traceback", "upvalueid",
+        "getinfo",
+        "getlocal",
+        "getupvalue",
+        "getuservalue",
+        "sethook",
+        "setlocal",
+        "setupvalue",
+        "setuservalue",
+        "traceback",
+        "upvalueid",
         "upvaluejoin",
         // utf8 lib
-        "char", "charpattern", "codepoint", "codes", "len", "offset",
+        "char",
+        "charpattern",
+        "codepoint",
+        "codes",
+        "len",
+        "offset",
         // package lib
-        "config", "cpath", "loaded", "loadlib", "path", "preload",
-        "searchers", "searchpath",
+        "config",
+        "cpath",
+        "loaded",
+        "loadlib",
+        "path",
+        "preload",
+        "searchers",
+        "searchpath",
         // self
         "self",
     ]
@@ -66,13 +184,12 @@ pub fn extract_definition(
         }
         "assignment_statement" => {
             // Left side: variable_list
-            let left = node.child_by_field_name("left")
-                .or_else(|| {
-                    // Some grammars use the first named child
-                    let mut c = node.walk();
-                    let first = node.named_children(&mut c).next();
-                    first
-                })?;
+            let left = node.child_by_field_name("left").or_else(|| {
+                // Some grammars use the first named child
+                let mut c = node.walk();
+                let first = node.named_children(&mut c).next();
+                first
+            })?;
             if left.kind() == "identifier" {
                 let text = left.utf8_text(source.as_bytes()).ok()?.trim();
                 if !text.is_empty() {

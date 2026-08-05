@@ -213,8 +213,14 @@ pub fn stream_idle_timeout_error() -> Error {
 /// and is phrased so `is_retriable_error` recognises it as a retriable
 /// condition via the "non-sse response" marker.
 pub fn non_sse_response_error(body: &str) -> Error {
-    let truncated = if body.len() > 1000 { &body[..1000] } else { body };
-    Error::from_reason(format!("Non-SSE response: stream ended without any SSE events (body: {truncated})"))
+    let truncated = if body.len() > 1000 {
+        &body[..1000]
+    } else {
+        body
+    };
+    Error::from_reason(format!(
+        "Non-SSE response: stream ended without any SSE events (body: {truncated})"
+    ))
 }
 
 /// Wrap an async function with retry logic.

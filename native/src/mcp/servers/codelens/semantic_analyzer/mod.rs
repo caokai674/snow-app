@@ -103,7 +103,14 @@ pub fn analyze_semantics(
     );
 
     let builtins = builtin_symbols(lang);
-    let diagnostics = build_diagnostics(&definitions, &references, &builtins, source, line_index, lang);
+    let diagnostics = build_diagnostics(
+        &definitions,
+        &references,
+        &builtins,
+        source,
+        line_index,
+        lang,
+    );
 
     SemanticResult { diagnostics }
 }
@@ -185,7 +192,14 @@ fn collect_definitions(
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_definitions(&child, source, lang, child_depth, definitions, def_name_ranges);
+        collect_definitions(
+            &child,
+            source,
+            lang,
+            child_depth,
+            definitions,
+            def_name_ranges,
+        );
     }
 }
 
@@ -197,19 +211,16 @@ fn should_skip_subtree(kind: &str, lang: TsLang) -> bool {
     match lang {
         TsLang::Rust => matches!(
             kind,
-            "attribute_item" | "inner_attribute_item"
+            "attribute_item"
+                | "inner_attribute_item"
                 | "use_declaration"
-                | "macro_invocation" | "macro_definition"
-                | "scoped_identifier" | "scoped_type_identifier"
+                | "macro_invocation"
+                | "macro_definition"
+                | "scoped_identifier"
+                | "scoped_type_identifier"
         ),
-        TsLang::Python => matches!(
-            kind,
-            "import_statement" | "import_from_statement"
-        ),
-        TsLang::Go => matches!(
-            kind,
-            "import_declaration"
-        ),
+        TsLang::Python => matches!(kind, "import_statement" | "import_from_statement"),
+        TsLang::Go => matches!(kind, "import_declaration"),
         TsLang::C => matches!(
             kind,
             "preproc_include" | "preproc_def" | "preproc_function_def"
@@ -218,14 +229,8 @@ fn should_skip_subtree(kind: &str, lang: TsLang) -> bool {
             kind,
             "import_declaration" | "marker_annotation" | "annotation"
         ),
-        TsLang::CSharp => matches!(
-            kind,
-            "using_directive" | "attribute_list"
-        ),
-        TsLang::Php => matches!(
-            kind,
-            "namespace_use_declaration" | "attribute_list"
-        ),
+        TsLang::CSharp => matches!(kind, "using_directive" | "attribute_list"),
+        TsLang::Php => matches!(kind, "namespace_use_declaration" | "attribute_list"),
         _ => false,
     }
 }
@@ -351,7 +356,14 @@ fn collect_references(
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_references(&child, source, lang, child_depth, def_name_ranges, references);
+        collect_references(
+            &child,
+            source,
+            lang,
+            child_depth,
+            def_name_ranges,
+            references,
+        );
     }
 }
 
@@ -394,13 +406,7 @@ fn field_name_text<'a>(node: &Node, source: &'a str, field: &str) -> Option<(&'a
     Some((text, child.start_byte() as u32, child.end_byte() as u32))
 }
 
-fn make_def(
-    name: &str,
-    kind: DefKind,
-    start_byte: u32,
-    end_byte: u32,
-    depth: usize,
-) -> Definition {
+fn make_def(name: &str, kind: DefKind, start_byte: u32, end_byte: u32, depth: usize) -> Definition {
     Definition {
         name: name.to_string(),
         kind,
@@ -429,8 +435,11 @@ fn is_reference_identifier(node: &Node, lang: TsLang) -> bool {
         TsLang::Java => kind == "identifier" || kind == "type_identifier",
         TsLang::CSharp => kind == "identifier" || kind == "type_identifier",
         TsLang::Ruby => {
-            kind == "identifier" || kind == "constant" || kind == "instance_variable"
-                || kind == "class_variable" || kind == "global_variable"
+            kind == "identifier"
+                || kind == "constant"
+                || kind == "instance_variable"
+                || kind == "class_variable"
+                || kind == "global_variable"
         }
         TsLang::Php => kind == "name" || kind == "variable_name",
         TsLang::Lua => kind == "identifier",
@@ -502,64 +511,125 @@ fn is_scope_node(kind: &str, lang: TsLang) -> bool {
     match lang {
         TsLang::Python => matches!(
             kind,
-            "function_definition" | "class_definition" | "lambda"
-                | "for_statement" | "while_statement" | "if_statement"
-                | "with_statement" | "try_statement" | "decorated_definition"
+            "function_definition"
+                | "class_definition"
+                | "lambda"
+                | "for_statement"
+                | "while_statement"
+                | "if_statement"
+                | "with_statement"
+                | "try_statement"
+                | "decorated_definition"
         ),
         TsLang::Rust => matches!(
             kind,
-            "function_item" | "struct_item" | "enum_item" | "trait_item"
-                | "impl_item" | "mod_item" | "block" | "closure_expression"
-                | "match_arm" | "for_expression" | "while_expression"
-                | "loop_expression" | "if_expression"
+            "function_item"
+                | "struct_item"
+                | "enum_item"
+                | "trait_item"
+                | "impl_item"
+                | "mod_item"
+                | "block"
+                | "closure_expression"
+                | "match_arm"
+                | "for_expression"
+                | "while_expression"
+                | "loop_expression"
+                | "if_expression"
         ),
         TsLang::Go => matches!(
             kind,
-            "function_declaration" | "method_declaration" | "block"
-                | "func_literal" | "for_statement" | "if_statement"
+            "function_declaration"
+                | "method_declaration"
+                | "block"
+                | "func_literal"
+                | "for_statement"
+                | "if_statement"
                 | "type_declaration"
         ),
         TsLang::C => matches!(
             kind,
-            "function_definition" | "compound_statement" | "for_statement"
-                | "while_statement" | "if_statement" | "struct_specifier"
+            "function_definition"
+                | "compound_statement"
+                | "for_statement"
+                | "while_statement"
+                | "if_statement"
+                | "struct_specifier"
                 | "enum_specifier"
         ),
         TsLang::Java => matches!(
             kind,
-            "method_declaration" | "class_declaration" | "interface_declaration"
-                | "enum_declaration" | "block" | "for_statement"
-                | "if_statement" | "try_statement" | "constructor_declaration"
+            "method_declaration"
+                | "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "block"
+                | "for_statement"
+                | "if_statement"
+                | "try_statement"
+                | "constructor_declaration"
         ),
         TsLang::CSharp => matches!(
             kind,
-            "method_declaration" | "class_declaration" | "interface_declaration"
-                | "struct_declaration" | "enum_declaration" | "block"
-                | "for_statement" | "if_statement" | "try_statement"
-                | "constructor_declaration" | "property_declaration"
+            "method_declaration"
+                | "class_declaration"
+                | "interface_declaration"
+                | "struct_declaration"
+                | "enum_declaration"
+                | "block"
+                | "for_statement"
+                | "if_statement"
+                | "try_statement"
+                | "constructor_declaration"
+                | "property_declaration"
         ),
         TsLang::Ruby => matches!(
             kind,
-            "method" | "singleton_method" | "class" | "module" | "block"
-                | "do_block" | "if" | "unless" | "while" | "until"
-                | "for" | "begin" | "case"
+            "method"
+                | "singleton_method"
+                | "class"
+                | "module"
+                | "block"
+                | "do_block"
+                | "if"
+                | "unless"
+                | "while"
+                | "until"
+                | "for"
+                | "begin"
+                | "case"
         ),
         TsLang::Php => matches!(
             kind,
-            "function_definition" | "method_declaration" | "class_declaration"
-                | "interface_declaration" | "compound_statement"
-                | "for_statement" | "if_statement" | "try_statement"
+            "function_definition"
+                | "method_declaration"
+                | "class_declaration"
+                | "interface_declaration"
+                | "compound_statement"
+                | "for_statement"
+                | "if_statement"
+                | "try_statement"
         ),
         TsLang::Lua => matches!(
             kind,
-            "function_declaration" | "function" | "for_statement"
-                | "for_numeric_loop" | "for_generic_loop" | "if_statement"
-                | "while_statement" | "repeat_statement" | "do_statement"
+            "function_declaration"
+                | "function"
+                | "for_statement"
+                | "for_numeric_loop"
+                | "for_generic_loop"
+                | "if_statement"
+                | "while_statement"
+                | "repeat_statement"
+                | "do_statement"
         ),
         TsLang::Bash => matches!(
             kind,
-            "function_definition" | "for_statement" | "while_statement"
-                | "if_statement" | "case_statement" | "subshell"
+            "function_definition"
+                | "for_statement"
+                | "while_statement"
+                | "if_statement"
+                | "case_statement"
+                | "subshell"
         ),
         _ => false,
     }

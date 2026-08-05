@@ -9,8 +9,8 @@ use crate::api::config::{
     normalize_base_url, resolve_sdk_api_base_url, DEFAULT_GEMINI_BASE_URL, DEFAULT_OPENAI_BASE_URL,
 };
 use crate::api::conversation::parse_chat_message_content;
-use crate::storage::services::chat_conversations::ChatContextMessage;
 use crate::api::responses::ResponsesApiRequest;
+use crate::storage::services::chat_conversations::ChatContextMessage;
 use crate::storage::ApiConfigRecord;
 
 pub(crate) fn resolve_gemini_endpoint(
@@ -72,11 +72,13 @@ pub(super) fn build_gemini_payload(
                 continue;
             }
             let results = match message.tool_results_json {
-                Some(ref raw) => crate::api::conversation::tool_messages::parse_tool_results_with_images(
-                    raw,
-                    database_path,
-                    skip_image_parsing,
-                ),
+                Some(ref raw) => {
+                    crate::api::conversation::tool_messages::parse_tool_results_with_images(
+                        raw,
+                        database_path,
+                        skip_image_parsing,
+                    )
+                }
                 None => Vec::new(),
             };
             for tool_result in &results {
@@ -138,7 +140,9 @@ pub(super) fn build_gemini_payload(
         if role == "assistant" {
             if let Some(ref tool_calls_raw) = message.tool_calls_json {
                 let function_call_parts =
-                    crate::api::conversation::tool_messages::tool_calls_as_gemini_parts(tool_calls_raw);
+                    crate::api::conversation::tool_messages::tool_calls_as_gemini_parts(
+                        tool_calls_raw,
+                    );
                 if !function_call_parts.is_empty() {
                     let mut parts = Vec::new();
                     // Round-trip thinking as a thought text part so Gemini
@@ -250,7 +254,11 @@ pub(super) fn build_gemini_payload(
         generation_config["thinkingConfig"] = thinking_config;
     }
 
-    if !generation_config.as_object().map(|obj| obj.is_empty()).unwrap_or(true) {
+    if !generation_config
+        .as_object()
+        .map(|obj| obj.is_empty())
+        .unwrap_or(true)
+    {
         payload["generationConfig"] = generation_config;
     }
 
@@ -272,10 +280,7 @@ fn normalize_gemini_role(role: &str) -> &str {
 
 pub(crate) fn build_gemini_thinking_config(config_json: &str) -> Option<Value> {
     let parsed = serde_json::from_str::<Value>(config_json).ok()?;
-    let gemini_thinking = parsed
-        .get("snowcfg")?
-        .get("geminiThinking")?
-        .as_object()?;
+    let gemini_thinking = parsed.get("snowcfg")?.get("geminiThinking")?.as_object()?;
     let enabled = gemini_thinking
         .get("enabled")
         .and_then(Value::as_bool)

@@ -142,10 +142,7 @@ pub(super) fn process_responses_sse_event_block(
             // reconstruct them (name + call_id) if the stream ends
             "response.output_item.added" => {
                 if let Some(item) = event.get("item") {
-                    let item_type = item
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
+                    let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
 
                     // Capture reasoning items (with encrypted_content) as
                     // early as possible.
@@ -174,21 +171,15 @@ pub(super) fn process_responses_sse_event_block(
                 // Capture reasoning items (with encrypted_content) for
                 // round-tripping when store:false.
                 if let Some(item) = event.get("item") {
-                    let item_type = item
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
+                    let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
                     if item_type == "reasoning" {
                         // Replace any prior entry from `added` with the
                         // finalised `done` version, or push if not already
                         // tracked.
-                        if let Some(pos) = reasoning_items
-                            .iter()
-                            .position(|existing| {
-                                existing.get("id").and_then(Value::as_str)
-                                    == item.get("id").and_then(Value::as_str)
-                            })
-                        {
+                        if let Some(pos) = reasoning_items.iter().position(|existing| {
+                            existing.get("id").and_then(Value::as_str)
+                                == item.get("id").and_then(Value::as_str)
+                        }) {
                             reasoning_items[pos] = item.clone();
                         } else {
                             reasoning_items.push(item.clone());
@@ -212,15 +203,16 @@ pub(super) fn process_responses_sse_event_block(
                         read_response_string(response, "id").unwrap_or_else(|| response_id.clone());
                     *response_model = read_response_string(response, "model")
                         .unwrap_or_else(|| response_model.clone());
-                    *response_status = read_response_string(response, "status").unwrap_or_else(|| {
-                        if event_type == "response.failed" {
-                            "failed".to_string()
-                        } else if event_type == "response.incomplete" {
-                            "incomplete".to_string()
-                        } else {
-                            response_status.clone()
-                        }
-                    });
+                    *response_status =
+                        read_response_string(response, "status").unwrap_or_else(|| {
+                            if event_type == "response.failed" {
+                                "failed".to_string()
+                            } else if event_type == "response.incomplete" {
+                                "incomplete".to_string()
+                            } else {
+                                response_status.clone()
+                            }
+                        });
                     *token_usage = extract_token_usage(response);
                     *completed_response = Some(response.clone());
                 }

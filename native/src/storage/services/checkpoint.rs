@@ -140,10 +140,7 @@ fn to_forward_slashes(path: &Path) -> String {
 }
 
 fn from_forward_slashes(relative: &str) -> PathBuf {
-    PathBuf::from(relative.replace(
-        '/',
-        &std::path::MAIN_SEPARATOR.to_string(),
-    ))
+    PathBuf::from(relative.replace('/', &std::path::MAIN_SEPARATOR.to_string()))
 }
 
 fn canonical_work_dir(work_dir: &str) -> Result<PathBuf> {
@@ -214,8 +211,7 @@ fn path_key(path: &Path) -> String {
 fn is_path_within_root(path: &Path, root: &Path) -> bool {
     let candidate_key = path_key(path);
     let base_key = path_key(root);
-    candidate_key == base_key
-        || candidate_key.starts_with(&format!("{base_key}/"))
+    candidate_key == base_key || candidate_key.starts_with(&format!("{base_key}/"))
 }
 
 /// Resolve a path that may not exist yet while preserving the same Windows
@@ -439,10 +435,7 @@ fn update_checkpoint_git_ref(
     let output = if delete {
         run_git(repository_root, &["update-ref", "-d", &reference])?
     } else {
-        run_git(
-            repository_root,
-            &["update-ref", &reference, &baseline.head],
-        )?
+        run_git(repository_root, &["update-ref", &reference, &baseline.head])?
     };
     if output.status.success() {
         Ok(())
@@ -606,7 +599,11 @@ fn states_match(
     Ok(classify_change(current, expected, baseline, relative)?.is_none())
 }
 
-fn update_expected_state(manifest: &mut CheckpointManifest, absolute: &Path, path: &str) -> Result<bool> {
+fn update_expected_state(
+    manifest: &mut CheckpointManifest,
+    absolute: &Path,
+    path: &str,
+) -> Result<bool> {
     let Some(entry) = manifest.entries.iter_mut().find(|entry| entry.path == path) else {
         return Ok(false);
     };
@@ -654,10 +651,7 @@ fn validate_manifest_work_dir(manifest: &CheckpointManifest, work_dir: &str) -> 
 /// 捕获阶段的目录校验(工具执行前/后):checkpoint 属于其他目录时返回
 /// None,调用方跳过该 checkpoint 并继续,绝不因目录不匹配拦截工具执行。
 /// 回滚阶段仍由 validate_manifest_work_dir 严格校验。
-fn validate_capture_work_dir(
-    manifest: &CheckpointManifest,
-    work_dir: &str,
-) -> Option<PathBuf> {
+fn validate_capture_work_dir(manifest: &CheckpointManifest, work_dir: &str) -> Option<PathBuf> {
     match validate_manifest_work_dir(manifest, work_dir) {
         Ok(root) => Some(root),
         Err(error) => {
@@ -945,9 +939,10 @@ fn restore_entry(
             restore_file(&source, &destination)
         }
         OriginalState::Git => {
-            let baseline = manifest.git.as_ref().ok_or_else(|| {
-                Error::from_reason("Checkpoint Git baseline is missing")
-            })?;
+            let baseline = manifest
+                .git
+                .as_ref()
+                .ok_or_else(|| Error::from_reason("Checkpoint Git baseline is missing"))?;
             let content = read_git_object(baseline, &entry.path)?.ok_or_else(|| {
                 Error::from_reason(format!(
                     "Checkpoint Git object is missing for '{}'",
@@ -1003,7 +998,11 @@ fn write_file(destination: &Path, content: &[u8]) -> Result<()> {
 fn prune_empty_parent_directories(root: &Path, entries: &[CheckpointEntry]) {
     let mut directories: Vec<PathBuf> = entries
         .iter()
-        .filter_map(|entry| resolve_manifest_path(root, &entry.path).parent().map(Path::to_path_buf))
+        .filter_map(|entry| {
+            resolve_manifest_path(root, &entry.path)
+                .parent()
+                .map(Path::to_path_buf)
+        })
         .collect();
     directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     directories.dedup();
@@ -1083,7 +1082,9 @@ fn collect_unused_objects() -> Result<()> {
         let name = entry.file_name().to_string_lossy().to_string();
         if entry.path().is_file() && !referenced.contains(&name) {
             fs::remove_file(entry.path()).map_err(|error| {
-                Error::from_reason(format!("Failed to remove unused checkpoint object: {error}"))
+                Error::from_reason(format!(
+                    "Failed to remove unused checkpoint object: {error}"
+                ))
             })?;
         }
     }
@@ -1190,9 +1191,7 @@ pub fn list_checkpoint_diffs(
             continue;
         };
         let current = resolve_manifest_path(&root, &entry.path);
-        if !include_all
-            && !states_match(&current, expected, manifest.git.as_ref(), &entry.path)?
-        {
+        if !include_all && !states_match(&current, expected, manifest.git.as_ref(), &entry.path)? {
             continue;
         }
         let Some(change_type) = classify_change(
@@ -1200,14 +1199,12 @@ pub fn list_checkpoint_diffs(
             &entry.original,
             manifest.git.as_ref(),
             &entry.path,
-        )? else {
+        )?
+        else {
             continue;
         };
-        let original_content = read_original_content(
-            &entry.original,
-            manifest.git.as_ref(),
-            &entry.path,
-        )?;
+        let original_content =
+            read_original_content(&entry.original, manifest.git.as_ref(), &entry.path)?;
         let current_content = read_current_content(&current)?;
         let (content, is_binary) = build_unified_diff(
             &entry.path,
@@ -1242,9 +1239,8 @@ fn read_original_content(
             })
         }
         OriginalState::Git => {
-            let baseline = baseline.ok_or_else(|| {
-                Error::from_reason("Checkpoint Git baseline is missing")
-            })?;
+            let baseline =
+                baseline.ok_or_else(|| Error::from_reason("Checkpoint Git baseline is missing"))?;
             read_git_object(baseline, relative)
         }
     }
@@ -1315,9 +1311,8 @@ fn classify_change(
             Ok(files_are_different(current, &object).then(|| "modified".to_string()))
         }
         OriginalState::Git => {
-            let baseline = baseline.ok_or_else(|| {
-                Error::from_reason("Checkpoint Git baseline is missing")
-            })?;
+            let baseline =
+                baseline.ok_or_else(|| Error::from_reason("Checkpoint Git baseline is missing"))?;
             let Some(content) = read_git_object(baseline, relative)? else {
                 return Ok(current.exists().then(|| "added".to_string()));
             };
@@ -1337,7 +1332,9 @@ fn file_differs_from_bytes(path: &Path, expected: &[u8]) -> bool {
     if metadata.len() != expected.len() as u64 {
         return true;
     }
-    fs::read(path).map(|content| content != expected).unwrap_or(true)
+    fs::read(path)
+        .map(|content| content != expected)
+        .unwrap_or(true)
 }
 
 /// Compare two files by size first, then by content. Returns true if they

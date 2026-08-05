@@ -6,7 +6,7 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use crate::storage::{ImageLibraryRecord};
+use crate::storage::ImageLibraryRecord;
 
 fn map_spawn_error(error: tokio::task::JoinError) -> Error {
     Error::new(
@@ -65,9 +65,7 @@ pub async fn delete_image_library_image(id: String) -> napi::Result<()> {
 
 /// 统计指定会话中引用的图库图片数量（删除会话确认框展示用）。
 #[napi]
-pub async fn count_conversation_images(
-    conversation_ids: Vec<String>,
-) -> napi::Result<i64> {
+pub async fn count_conversation_images(conversation_ids: Vec<String>) -> napi::Result<i64> {
     tokio::task::spawn_blocking(move || crate::storage::count_conversation_images(conversation_ids))
         .await
         .map_err(map_spawn_error)?
@@ -76,9 +74,7 @@ pub async fn count_conversation_images(
 /// 级联删除指定会话中引用的图库图片（物理文件 + 索引行）。
 /// 由删除会话流程调用（选择不保留图片时）。
 #[napi]
-pub async fn delete_conversation_images(
-    conversation_ids: Vec<String>,
-) -> napi::Result<i64> {
+pub async fn delete_conversation_images(conversation_ids: Vec<String>) -> napi::Result<i64> {
     tokio::task::spawn_blocking(move || {
         crate::storage::delete_conversation_images(conversation_ids)
     })

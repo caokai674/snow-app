@@ -19,10 +19,10 @@ use tokio_util::sync::CancellationToken;
 use crate::api::conversation::{
     prepare_context_request, resolve_sub_agent_tools, ConversationContextRequest,
 };
-use crate::api::retry::{resolve_stream_idle_timeout_sec, RetryOptions};
 use crate::api::responses::{
     ResponsesApiRequest, ResponsesApiResult, ResponsesApiStreamCallback, TokenUsage,
 };
+use crate::api::retry::{resolve_stream_idle_timeout_sec, RetryOptions};
 use crate::storage::services::app_logs::{log_api_error, log_api_warning, maybe_log_api_request};
 use crate::storage::services::chat_conversations::{
     store_chat_exchange, ChatContextMessage, StoreChatExchangeInput,
@@ -133,7 +133,8 @@ async fn create_anthropic_response_async(
         tools,
         &prepared_request.user_system_prompts,
     )?;
-    let retry_options = RetryOptions::from_config(api_config.max_retries, api_config.retry_base_delay_ms);
+    let retry_options =
+        RetryOptions::from_config(api_config.max_retries, api_config.retry_base_delay_ms);
     let stream_idle_timeout_sec =
         resolve_stream_idle_timeout_sec(api_config.stream_idle_timeout_sec);
 
@@ -192,7 +193,10 @@ async fn create_anthropic_response_async(
             &database_path,
             "create_anthropic_response_stream",
             "AI returned empty response",
-            &format!("model={}, status={}", streamed_response.model, streamed_response.status),
+            &format!(
+                "model={}, status={}",
+                streamed_response.model, streamed_response.status
+            ),
         );
     }
 

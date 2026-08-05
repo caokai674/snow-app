@@ -78,18 +78,19 @@ pub fn prepare_context_request(
     // can decide how to combine them with the built-in system prompt
     // (e.g. Anthropic demotes the built-in prompt to a user message when
     // user prompts are present, matching Snow CLI PR #127).
-    let user_system_prompts =
-        resolve_active_system_prompt_contents(
-            request.database_path,
-            request.system_prompt_ids_json,
-            request.directory_id,
-        );
+    let user_system_prompts = resolve_active_system_prompt_contents(
+        request.database_path,
+        request.system_prompt_ids_json,
+        request.directory_id,
+    );
 
     // Inject the built-in system prompt as the first message.
     let working_directory = request
         .directory_id
         .and_then(|id| {
-            get_workspace_directory_path(request.database_path, id).ok().flatten()
+            get_workspace_directory_path(request.database_path, id)
+                .ok()
+                .flatten()
         })
         .unwrap_or_default();
 
@@ -208,7 +209,10 @@ fn resolve_default_shell(database_path: &std::path::Path) -> String {
     };
     let shell_path = serde_json::from_str::<serde_json::Value>(&raw)
         .ok()
-        .and_then(|json| json.get("shellPath").and_then(|v| v.as_str().map(String::from)))
+        .and_then(|json| {
+            json.get("shellPath")
+                .and_then(|v| v.as_str().map(String::from))
+        })
         .unwrap_or_default();
 
     if shell_path.trim().is_empty() {
