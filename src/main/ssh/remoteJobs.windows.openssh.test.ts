@@ -52,7 +52,10 @@ const waitForTerminal = async (jobId: string, timeoutMs = 20_000) => {
     await wait(250);
     result = await getRemoteJob(jobId, { offset: 0, limit: 64 * 1024 });
   }
-  throw new Error(`Windows Remote Job ${jobId} did not reach a terminal state`);
+  throw new Error(
+    `Windows Remote Job ${jobId} did not reach a terminal state ` +
+      `(last status=${result.state.status}, revision=${result.state.revision}, runnerPid=${result.state.runnerPid ?? "unknown"})`
+  );
 };
 
 openSsh("Durable Remote Job Windows OpenSSH", () => {

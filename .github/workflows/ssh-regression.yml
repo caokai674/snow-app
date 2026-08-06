@@ -279,6 +279,22 @@ jobs:
                 "--- $($_.FullName) ---"
                 Get-Content -LiteralPath $_.FullName -ErrorAction Continue
               }
+            $diagnosticNames = @('state.json', 'timeout-ms', 'revision', 'runner.pid')
+            Get-ChildItem -LiteralPath $jobRoot -File -Recurse -ErrorAction Continue |
+              Where-Object { $_.Name -in $diagnosticNames } |
+              ForEach-Object {
+                "--- $($_.FullName) ---"
+                Get-Content -LiteralPath $_.FullName -Raw -ErrorAction Continue
+              }
+            Get-ChildItem -LiteralPath $jobRoot -Filter 'runner.pid' -Recurse -ErrorAction Continue |
+              ForEach-Object {
+                $runnerPid = (Get-Content -LiteralPath $_.FullName -Raw -ErrorAction Continue).Trim()
+                if ($runnerPid -match '^\d+$') {
+                  Get-CimInstance Win32_Process -Filter "ProcessId = $runnerPid" -ErrorAction Continue |
+                    Select-Object ProcessId, ParentProcessId, CommandLine |
+                    Format-List
+                }
+              }
           }
           Get-ScheduledTask -ErrorAction Continue |
             Where-Object { $_.TaskName -like 'SnowAppRemoteJob-*' } |
