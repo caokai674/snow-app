@@ -215,6 +215,7 @@ export const connectSsh = (
             expected: trusted.fingerprint,
             received: fingerprint,
           };
+          rejectHostKeyMismatch();
           return false;
         }
         observedFingerprint = fingerprint;
@@ -270,6 +271,22 @@ export const connectSsh = (
         // The transport may already be closed.
       }
       reject(error);
+    };
+
+    const rejectHostKeyMismatch = (): void => {
+      if (!hostKeyMismatch) {
+        return;
+      }
+      // ssh2 may only emit a transport close after a verifier rejection.
+      // Reject here so that a known key mismatch cannot be masked as a
+      // transient connection loss.
+      rejectConnection(
+        new SshOperationError({
+          code: "SSH_HOST_KEY_CHANGED",
+          operation: "connect",
+          message: `Host key changed for ${params.host}:${params.port}. Expected ${hostKeyMismatch.expected}, received ${hostKeyMismatch.received}. Confirm the new fingerprint before reconnecting.`,
+        })
+      );
     };
 
     const onAbort = (): void => {

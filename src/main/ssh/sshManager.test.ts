@@ -291,6 +291,7 @@ class FakeSftp {
 class FakeClient extends EventEmitter {
   readonly sftpWrapper = new FakeSftp();
   fingerprint = "fingerprint-a";
+  deniedHostKeyEvent: "error" | "close" = "error";
   connectConfig: Record<string, unknown> | undefined;
   execCallback: ExecCallback | undefined;
   ended = false;
@@ -303,7 +304,11 @@ class FakeClient extends EventEmitter {
     const accepted = verifier?.(this.fingerprint) ?? true;
     queueMicrotask(() => {
       if (!accepted) {
-        this.emit("error", new Error("Host denied"));
+        if (this.deniedHostKeyEvent === "close") {
+          this.emit("close");
+        } else {
+          this.emit("error", new Error("Host denied"));
+        }
         return;
       }
       this.emit("ready");
@@ -629,6 +634,7 @@ describe("sshManager cancellation and host identity", () => {
     setSshClientFactoryForTesting(() => {
       const client = new FakeClient();
       client.fingerprint = "fingerprint-new";
+      client.deniedHostKeyEvent = "close";
       clients.push(client);
       return client as never;
     });

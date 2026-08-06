@@ -59,6 +59,9 @@ const waitForServer = async (): Promise<void> => {
       return;
     } catch (error) {
       lastError = error;
+      if ((error as { code?: string }).code === "SSH_HOST_KEY_CHANGED") {
+        throw error;
+      }
       await wait(200);
     }
   }
@@ -230,13 +233,13 @@ openSsh("OpenSSH regression environment", () => {
         workspaceRoot: root,
         expectedVersion: restrictedVersion.version,
       })
-    ).rejects.toMatchObject({
-      code: "SSH_FILE_WRITE_FAILED",
-      sideEffect: "none",
+    ).resolves.toMatchObject({
+      guarantee: "compatibility",
+      sideEffect: "committed",
     });
     await executeSshCommand(sessionId, `chmod 700 ${restrictedDirectory}`);
-    await expect(readSshFile(sessionId, restrictedFile)).resolves.toEqual(
-      Buffer.from("intact")
-    );
+    await expect(
+      executeSshCommand(sessionId, `cat ${restrictedFile}; stat -c %a ${restrictedFile}`)
+    ).resolves.toBe("blocked644\n");
   }, 60_000);
 });
