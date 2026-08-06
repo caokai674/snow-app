@@ -272,6 +272,20 @@ jobs:
           if ($env:SNOW_WINDOWS_SSH_TEST_LOG -and (Test-Path -LiteralPath $env:SNOW_WINDOWS_SSH_TEST_LOG)) {
             Get-Content -LiteralPath $env:SNOW_WINDOWS_SSH_TEST_LOG -ErrorAction Continue
           }
+          $jobRoot = 'C:\Users\snowssh\AppData\Local\SnowApp\jobs'
+          if (Test-Path -LiteralPath $jobRoot) {
+            Get-ChildItem -LiteralPath $jobRoot -Filter 'runner-error.log' -Recurse -ErrorAction Continue |
+              ForEach-Object {
+                "--- $($_.FullName) ---"
+                Get-Content -LiteralPath $_.FullName -ErrorAction Continue
+              }
+          }
+          Get-ScheduledTask -ErrorAction Continue |
+            Where-Object { $_.TaskName -like 'SnowAppRemoteJob-*' } |
+            ForEach-Object {
+              $info = $_ | Get-ScheduledTaskInfo
+              "--- task=$($_.TaskName) state=$($_.State) lastResult=$($info.LastTaskResult) ---"
+            }
 
       - name: Stop isolated Windows OpenSSH test server
         if: always()

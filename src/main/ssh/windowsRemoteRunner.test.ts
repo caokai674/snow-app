@@ -69,6 +69,8 @@ describe("Windows Remote Job runner", () => {
     expect(runner).toContain("AssignProcessToJobObject");
     expect(runner).toContain("state.lock");
     expect(runner).toContain("ConvertFrom-Json");
+    expect(runner).toContain("runner-error.log");
+    expect(runner).toContain("Write-State 'launch_failed'");
   });
 
   it("uses Task Scheduler to detach runners from the OpenSSH process tree", async () => {
