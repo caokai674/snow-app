@@ -65,13 +65,15 @@ describe("Windows Remote Job runner", () => {
     const taskName = "SnowAppRemoteJob-018f5f17-5d18-7bd1-9210-117f17d50001";
     const launcher = buildWindowsScheduledTaskLauncherScript(
       taskName,
-      "[Console]::Out.Write('ok')"
+      "C:/Users/snow/AppData/Local/SnowApp/jobs/probe.ps1"
     );
     expect(launcher).toContain("& schtasks.exe @taskArguments");
     expect(launcher).toContain("& schtasks.exe /Run /TN $taskName");
     expect(launcher).toContain("'/RL', 'LIMITED'");
     expect(launcher).toContain("'12/31/2099'");
     expect(launcher).toContain("exit code $($LASTEXITCODE):");
+    expect(launcher).toContain("-File \"C:/Users/snow/AppData/Local/SnowApp/jobs/probe.ps1\"");
+    expect(launcher).not.toContain("-EncodedCommand");
     expect(launcher).not.toContain("Start-Process");
 
     executeSshCommandMock.mockClear();

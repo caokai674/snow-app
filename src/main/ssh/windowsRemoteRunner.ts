@@ -4,6 +4,9 @@ import { executeSshCommand, type SshCapabilities } from "./sshManager";
 const powerShellQuote = (value: string): string =>
   `'${value.replace(/'/g, "''")}'`;
 
+const windowsCommandQuote = (value: string): string =>
+  `"${value.replace(/"/g, '\\"')}"`;
+
 const POWER_SHELL_NON_INTERACTIVE_PRELUDE =
   "$ProgressPreference = 'SilentlyContinue'\r\n";
 
@@ -29,11 +32,11 @@ const getWindowsTaskName = (id: string): string => `SnowAppRemoteJob-${id}`;
 
 export const buildWindowsScheduledTaskLauncherScript = (
   taskName: string,
-  payload: string
+  scriptPath: string
 ): string => {
   const taskCommand =
-    "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " +
-    encodeWindowsPowerShell(payload);
+    "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " +
+    windowsCommandQuote(scriptPath);
   return [
     "$ErrorActionPreference = 'Stop'",
     `$taskName = ${powerShellQuote(taskName)}`,
@@ -50,13 +53,13 @@ export const buildWindowsScheduledTaskLauncherScript = (
 export const launchWindowsDetachedPowerShell = (
   sessionId: string,
   taskName: string,
-  payload: string,
+  scriptPath: string,
   timeoutMs = 15_000,
   signal?: AbortSignal
 ): Promise<string> =>
   runWindowsPowerShell(
     sessionId,
-    buildWindowsScheduledTaskLauncherScript(taskName, payload),
+    buildWindowsScheduledTaskLauncherScript(taskName, scriptPath),
     timeoutMs,
     signal
   );
@@ -204,7 +207,7 @@ export const launchWindowsRemoteJob = async (
   await launchWindowsDetachedPowerShell(
     sessionId,
     getWindowsTaskName(jobId),
-    `& ${powerShellQuote(runnerPath)}`,
+    runnerPath,
     15_000,
     signal
   );

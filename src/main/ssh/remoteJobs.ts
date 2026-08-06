@@ -1002,6 +1002,7 @@ const verifyBackendLiveness = async (
       const root = await getRemoteJobRoot(sessionId, capabilities);
       const marker = `${root}/.backend-probe-${probeId}`;
       const startedMarker = `${marker}.started`;
+      const windowsProbeScriptPath = `${marker}.ps1`;
       const probeScript = backendProbeScript(marker);
       if (backend.kind === "systemd-user") {
         await runShell(
@@ -1023,10 +1024,15 @@ const verifyBackendLiveness = async (
         );
       } else if (backend.kind === "windows-job") {
         const taskName = getWindowsRemoteJobTaskName(`probe-${probeId}`);
+        await writeInternalSshFile(
+          sessionId,
+          windowsProbeScriptPath,
+          windowsBackendProbeScript(startedMarker, marker, taskName)
+        );
         await launchWindowsDetachedPowerShell(
           sessionId,
           taskName,
-          windowsBackendProbeScript(startedMarker, marker, taskName)
+          windowsProbeScriptPath
         );
       } else {
         await runShell(
@@ -1041,6 +1047,7 @@ const verifyBackendLiveness = async (
       const root = await getRemoteJobRoot(sessionId, capabilities);
       const marker = `${root}/.backend-probe-${probeId}`;
       const startedMarker = `${marker}.started`;
+      const windowsProbeScriptPath = `${marker}.ps1`;
       const deadline =
         Date.now() +
         (backend.kind === "windows-job"
@@ -1053,6 +1060,9 @@ const verifyBackendLiveness = async (
             if (capabilities.platform === "windows") {
               await removeWindowsRemotePath(sessionId, marker);
               await removeWindowsRemotePath(sessionId, startedMarker).catch(
+                () => undefined
+              );
+              await removeWindowsRemotePath(sessionId, windowsProbeScriptPath).catch(
                 () => undefined
               );
             } else {
@@ -1077,6 +1087,11 @@ const verifyBackendLiveness = async (
           () => undefined
         );
         diagnostic = `detached process started after disconnect (${started || "identity unavailable"}) but did not finish`;
+      }
+      if (backend.kind === "windows-job") {
+        await removeWindowsRemotePath(sessionId, windowsProbeScriptPath).catch(
+          () => undefined
+        );
       }
       throw new Error(
         `Remote backend did not survive the SSH disconnect: ${diagnostic}`
