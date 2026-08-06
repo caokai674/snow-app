@@ -25,44 +25,35 @@ export const runWindowsPowerShell = (
     { timeoutMs, signal }
   );
 
-const getWindowsTaskName = (id: string): string => `SnowAppRemoteJob-${id}`;
-
-export const buildWindowsScheduledTaskLauncherScript = (
-  taskName: string,
+export const buildWindowsDetachedProcessLauncherScript = (
   payload: string
 ): string => {
-  const taskCommand =
+  const commandLine =
     "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " +
     encodeWindowsPowerShell(payload);
   return [
     "$ErrorActionPreference = 'Stop'",
-    `$taskName = ${powerShellQuote(taskName)}`,
-    `$taskCommand = ${powerShellQuote(taskCommand)}`,
-    "$taskArguments = @('/Create', '/TN', $taskName, '/SC', 'ONCE', '/ST', '23:59', '/SD', '12/31/2099', '/TR', $taskCommand, '/RL', 'LIMITED', '/F')",
-    "& schtasks.exe @taskArguments | Out-Null",
-    "if ($LASTEXITCODE -ne 0) { throw \"Failed to create detached Windows task $taskName with exit code $LASTEXITCODE\" }",
-    "& schtasks.exe /Run /TN $taskName | Out-Null",
-    "if ($LASTEXITCODE -ne 0) { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null; throw \"Failed to start detached Windows task $taskName with exit code $LASTEXITCODE\" }",
+    `$commandLine = ${powerShellQuote(commandLine)}`,
+    "$startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ CreateFlags = 16777216; ShowWindow = 0 }",
+    "$result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine; ProcessStartupInformation = $startup }",
+    "if ($result.ReturnValue -ne 0) { throw \"Windows WMI process creation failed with return value $($result.ReturnValue)\" }",
+    "[Console]::Out.Write($result.ProcessId)",
     "",
   ].join("\r\n");
 };
 
 export const launchWindowsDetachedPowerShell = (
   sessionId: string,
-  taskName: string,
   payload: string,
   timeoutMs = 15_000,
   signal?: AbortSignal
 ): Promise<string> =>
   runWindowsPowerShell(
     sessionId,
-    buildWindowsScheduledTaskLauncherScript(taskName, payload),
+    buildWindowsDetachedProcessLauncherScript(payload),
     timeoutMs,
     signal
   );
-
-export const getWindowsRemoteJobTaskName = (jobId: string): string =>
-  getWindowsTaskName(jobId);
 
 export const isWindowsRemote = (capabilities: SshCapabilities): boolean =>
   capabilities.platform === "windows" &&
@@ -134,7 +125,6 @@ export const buildWindowsRunnerScript = (jobId: string, createdAt: string): stri
     "$ErrorActionPreference = 'Stop'",
     "$jobDirectory = $PSScriptRoot",
     `$jobId = ${powerShellQuote(jobId)}`,
-    "$scheduledTaskName = 'SnowAppRemoteJob-' + $jobId",
     `$createdAt = ${powerShellQuote(createdAt)}`,
     "$statePath = Join-Path $jobDirectory 'state.json'",
     "$revisionPath = Join-Path $jobDirectory 'revision'",
@@ -191,23 +181,24 @@ export const buildWindowsRunnerScript = (jobId: string, createdAt: string): stri
     "  elseif ($child.ExitCode -eq 0) { Write-State 'succeeded' 0 '' }",
     "  else { Write-State 'failed' $child.ExitCode 'exit' }",
     "} catch { Write-State 'launch_failed' $null $_.Exception.Message }",
-    "finally { if ($job -and $job -ne [IntPtr]::Zero) { [SnowWindowsJob]::CloseHandle($job) | Out-Null }; & schtasks.exe /Delete /TN $scheduledTaskName /F 2>$null | Out-Null }",
+    "finally { if ($job -and $job -ne [IntPtr]::Zero) { [SnowWindowsJob]::CloseHandle($job) | Out-Null } }",
     "",
   ].join("\r\n");
 
 export const launchWindowsRemoteJob = async (
   sessionId: string,
   runnerPath: string,
-  jobId: string,
   signal?: AbortSignal
 ): Promise<void> => {
-  await launchWindowsDetachedPowerShell(
+  const output = await launchWindowsDetachedPowerShell(
     sessionId,
-    getWindowsTaskName(jobId),
     `& ${powerShellQuote(runnerPath)}`,
     15_000,
     signal
   );
+  if (!/^\d+$/.test(output.trim())) {
+    throw new Error("Windows Job backend did not return a runner PID");
+  }
 };
 
 export const inspectWindowsRemoteJob = async (

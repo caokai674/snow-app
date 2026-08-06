@@ -9,7 +9,7 @@ import { executeSshCommand } from "./sshManager";
 import {
   buildWindowsCommandScript,
   buildWindowsRunnerScript,
-  buildWindowsScheduledTaskLauncherScript,
+  buildWindowsDetachedProcessLauncherScript,
   encodeWindowsPowerShell,
   isWindowsRemote,
   launchWindowsRemoteJob,
@@ -59,24 +59,19 @@ describe("Windows Remote Job runner", () => {
     expect(runner).toContain("AssignProcessToJobObject");
     expect(runner).toContain("state.lock");
     expect(runner).toContain("ConvertFrom-Json");
-    expect(runner).toContain("$scheduledTaskName = 'SnowAppRemoteJob-' + $jobId");
-    expect(runner).toContain("schtasks.exe /Delete /TN $scheduledTaskName /F");
   });
 
-  it("uses Task Scheduler to detach runners from the OpenSSH process tree", async () => {
-    const taskName = "SnowAppRemoteJob-018f5f17-5d18-7bd1-9210-117f17d50001";
-    const launcher = buildWindowsScheduledTaskLauncherScript(
-      taskName,
+  it("uses WMI breakaway creation to detach runners from the OpenSSH process tree", async () => {
+    const launcher = buildWindowsDetachedProcessLauncherScript(
       "[Console]::Out.Write('ok')"
     );
-    expect(launcher).toContain("& schtasks.exe @taskArguments");
-    expect(launcher).toContain("& schtasks.exe /Run /TN $taskName");
-    expect(launcher).toContain("'/RL', 'LIMITED'");
-    expect(launcher).toContain("'12/31/2099'");
+    expect(launcher).toContain("New-CimInstance -ClassName Win32_ProcessStartup");
+    expect(launcher).toContain("CreateFlags = 16777216");
+    expect(launcher).toContain("Invoke-CimMethod -ClassName Win32_Process -MethodName Create");
     expect(launcher).not.toContain("Start-Process");
 
     executeSshCommandMock.mockClear();
-    executeSshCommandMock.mockResolvedValueOnce("");
+    executeSshCommandMock.mockResolvedValueOnce("4242");
     await launchWindowsRemoteJob(
       "session",
       "C:/Users/snow/AppData/Local/SnowApp/jobs/runner.ps1",
@@ -86,8 +81,8 @@ describe("Windows Remote Job runner", () => {
     const encoded = command.match(/EncodedCommand ([A-Za-z0-9+/=]+)$/)?.[1];
     expect(encoded).toBeDefined();
     const decoded = Buffer.from(encoded, "base64").toString("utf16le");
-    expect(decoded).toContain("schtasks.exe @taskArguments");
-    expect(decoded).toContain(taskName);
+    expect(decoded).toContain("New-CimInstance -ClassName Win32_ProcessStartup");
+    expect(decoded).toContain("CreateFlags = 16777216");
     expect(decoded).not.toContain("Start-Process");
   });
 
