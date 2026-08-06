@@ -84,7 +84,11 @@ describe("Windows Remote Job runner", () => {
     expect(launcher).toContain("'12/31/2099'");
     expect(launcher).toContain("'/RU', $taskUsername, '/RP', $taskPassword");
     expect(launcher).toContain("$taskUsername = 'snowssh'");
-    expect(launcher).toContain("exit code $($LASTEXITCODE)\"");
+    expect(launcher).toContain("$null = & schtasks.exe @taskArguments 2>&1");
+    expect(launcher).toContain("$createExitCode = $LASTEXITCODE");
+    expect(launcher).toContain("exit code $createExitCode\"");
+    expect(launcher).toContain("$runExitCode = $LASTEXITCODE");
+    expect(launcher).toContain("exit code $runExitCode\"");
     expect(launcher).not.toContain("$createOutput");
     expect(launcher).not.toContain("$runOutput");
     expect(launcher).toContain("-File \"C:/Users/snow/AppData/Local/SnowApp/jobs/probe.ps1\"");

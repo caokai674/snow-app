@@ -169,6 +169,15 @@ jobs:
           if (-not (Get-LocalUser -Name snowssh -ErrorAction SilentlyContinue)) {
             New-LocalUser -Name snowssh -Password $password -PasswordNeverExpires | Out-Null
           }
+          # Password-backed tasks need a batch-logon token once OpenSSH closes.
+          # This built-in group has SeBatchLogonRight on the Windows Server image.
+          $batchLogonGroup = Get-LocalGroup -SID 'S-1-5-32-559'
+          $testUser = Get-LocalUser -Name snowssh -ErrorAction Stop
+          $isBatchLogonMember = Get-LocalGroupMember -Group $batchLogonGroup |
+            Where-Object { $_.SID -eq $testUser.SID }
+          if (-not $isBatchLogonMember) {
+            Add-LocalGroupMember -Group $batchLogonGroup -Member $testUser
+          }
           New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
           & $sshKeygen -A
           if ($LASTEXITCODE -ne 0) {

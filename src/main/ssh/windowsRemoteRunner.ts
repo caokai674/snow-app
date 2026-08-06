@@ -64,10 +64,12 @@ export const buildWindowsScheduledTaskLauncherScript = (
     `$taskUsername = ${powerShellQuote(credentials.username)}`,
     `$taskPassword = ${powerShellQuote(credentials.password)}`,
     "$taskArguments = @('/Create', '/TN', $taskName, '/SC', 'ONCE', '/ST', '23:59', '/SD', '12/31/2099', '/TR', $taskCommand, '/RU', $taskUsername, '/RP', $taskPassword, '/RL', 'LIMITED', '/F')",
-    "& schtasks.exe @taskArguments 2>$null | Out-Null",
-    "if ($LASTEXITCODE -ne 0) { throw \"Failed to create detached Windows task $taskName with exit code $($LASTEXITCODE)\" }",
-    "& schtasks.exe /Run /TN $taskName 2>$null | Out-Null",
-    "if ($LASTEXITCODE -ne 0) { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null; throw \"Failed to start detached Windows task $taskName with exit code $($LASTEXITCODE)\" }",
+    "$null = & schtasks.exe @taskArguments 2>&1",
+    "$createExitCode = $LASTEXITCODE",
+    "if ($createExitCode -ne 0) { throw \"Failed to create detached Windows task $taskName with exit code $createExitCode\" }",
+    "$null = & schtasks.exe /Run /TN $taskName 2>&1",
+    "$runExitCode = $LASTEXITCODE",
+    "if ($runExitCode -ne 0) { $null = & schtasks.exe /Delete /TN $taskName /F 2>&1; throw \"Failed to start detached Windows task $taskName with exit code $runExitCode\" }",
     "",
   ].join("\r\n");
 };
