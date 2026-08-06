@@ -1,6 +1,20 @@
 # Release Notes
 
-## v0.1.18
+## v0.1.20
+
+## New Features
+
+- **Browser MCP Tools**: Added `wait`, `press_key`, `hover`, `navigate_back`, `navigate_forward`, and `select_option` tools. DevTools extended with `network_detail` and `network_clear` actions, plus optional static resource filtering for network listings.
+- **Multi-Environment Import Discovery**: Configuration and skill discovery now works across WSL distributions and SSH remote hosts. Unsupported stdio MCP servers are surfaced as candidates with reasons, remote skills are downloaded via SFTP, and per-environment source details are shown in the import settings UI.
+
+## Improvements
+
+- **Git Graph**: Commit graph now shows full decoration with ref badges and a visual HEAD marker with glow effect. Branch creation dropdown restructured.
+- **Bash Kill Safety**: Cancellation and timeout branches now use `biased` select to guarantee stop requests aren't lost; Windows `taskkill` is bounded with immediate stream draining. UI guards against duplicate kill IPC calls and adds a renderer-side timeout watchdog.
+- **Chat Auto-Scroll**: Scroll-state decoupled from geometric pinning to maintain follow mode during rapid content growth; wheel events intercepted early to honor user intent.
+- **max_tokens Handling**: Updated `max_tokens` handling in Anthropic payload and file search agent; added hints in API settings.
+
+## v0.1.19
 
 ## Bug Fixes
 
@@ -17,7 +31,6 @@
 - Input box supports dragging and dropping images and files from external sources
 - Added copy function to configuration file
 - Optimized UI display of some components
-
 
 ## v0.1.17
 

@@ -130,15 +130,32 @@ export const initBrowserNetworkRecorder = (): void => {
   });
 };
 
-/** 查询网络记录：最新在前；filter 为 URL 正则（Rust 入口已校验）。 */
+/** 查询网络记录：最新在前；filter 为 URL 正则（Rust 入口已校验）。
+ * includeStatic=false 时，过滤掉成功的静态资源（图片/字体/脚本/样式表等），
+ * 与 Playwright browser_network_requests 的 static 参数对齐。 */
+const STATIC_RESOURCE_TYPES = new Set([
+  "image",
+  "font",
+  "script",
+  "stylesheet",
+]);
+
 export const queryNetworkRecords = (
   webContentsId: number,
   filter?: string,
-  limit = 50
+  limit = 50,
+  includeStatic = false
 ): BrowserNetworkRecord[] => {
   let result = networkRecords.filter(
     (record) => record.webContentsId === webContentsId
   );
+  if (!includeStatic) {
+    result = result.filter(
+      (record) =>
+        typeof record.status === "number" &&
+        !STATIC_RESOURCE_TYPES.has(record.resourceType)
+    );
+  }
   if (filter) {
     try {
       const expression = new RegExp(filter);
@@ -148,6 +165,28 @@ export const queryNetworkRecords = (
     }
   }
   return result.slice(-limit).reverse();
+};
+
+/** 按 id 获取单条网络记录详情。 */
+export const getNetworkRecord = (
+  recordId: number
+): BrowserNetworkRecord | undefined =>
+  networkRecords.find((record) => record.id === recordId);
+
+/** 清除指定 webview 的所有网络记录；webContentsId 为 -1 时清除全部。 */
+export const clearNetworkRecords = (webContentsId: number): number => {
+  if (webContentsId < 0) {
+    const count = networkRecords.length;
+    networkRecords.splice(0, networkRecords.length);
+    return count;
+  }
+  const before = networkRecords.length;
+  for (let i = networkRecords.length - 1; i >= 0; i--) {
+    if (networkRecords[i].webContentsId === webContentsId) {
+      networkRecords.splice(i, 1);
+    }
+  }
+  return before - networkRecords.length;
 };
 
 // ===== JavaScript 弹窗捕获与响应 =====

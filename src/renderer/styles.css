@@ -4163,6 +4163,41 @@ input {
   white-space: nowrap;
 }
 
+.import-settings-environments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+}
+
+.import-settings-environment-row {
+  display: grid;
+  grid-template-columns: 16px minmax(96px, 0.25fr) minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.import-settings-environment-label {
+  font-weight: 650;
+  color: var(--text-secondary);
+}
+
+.import-settings-environment-row code {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .import-settings-warnings {
   gap: 7px;
   padding: 10px;
@@ -18929,12 +18964,23 @@ input {
   overflow-y: auto;
 }
 
-.branch-dropdown-loading,
 .branch-dropdown-empty {
   padding: 10px 14px;
   font-size: 12px;
   color: var(--text-muted);
   text-align: center;
+}
+
+.branch-dropdown-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 88px;
+  max-height: 160px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .branch-dropdown-group {
@@ -21726,6 +21772,7 @@ input {
   flex-shrink: 0;
 }
 
+/* 提交行上的引用徽章组（见 GitGraph.tsx 的 parseRefs）。 */
 .git-graph-refs {
   display: flex;
   align-items: center;
@@ -21733,44 +21780,48 @@ input {
   flex-shrink: 20;
   min-width: 0;
   overflow: hidden;
+  padding-left: 4px;
 }
 
 .git-graph-ref {
   display: inline-flex;
   align-items: center;
+  gap: 3px;
   padding: 1px 6px;
   border-radius: var(--radius-sm);
   font-size: 10px;
   font-weight: 500;
-  background: var(--bg-active);
-  color: var(--text-secondary);
   white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 120px;
 }
 
-.git-graph-ref.head {
-  background: var(--accent-green-bg);
-  color: var(--accent-green-text);
+.git-graph-ref svg {
+  flex-shrink: 0;
 }
 
-.git-graph-ref.tag {
-  background: rgba(245, 158, 11, 0.15);
-  color: #b45309;
+/* 本地分支（含当前 HEAD） */
+.git-graph-ref.local {
+  background: var(--accent-blue-bg);
+  color: var(--accent-blue-text);
 }
 
-:root[data-theme="dark"] .git-graph-ref.tag {
-  color: #fbbf24;
-}
-
+/* 远端跟踪分支 */
 .git-graph-ref.remote {
-  background: rgba(59, 130, 246, 0.15);
-  color: #2563eb;
+  background: rgba(168, 85, 247, 0.15);
+  color: #9333ea;
 }
 
 :root[data-theme="dark"] .git-graph-ref.remote {
-  color: #60a5fa;
+  color: #c084fc;
+}
+
+/* 标签 */
+.git-graph-ref.tag {
+  background: var(--accent-amber-bg);
+  color: var(--accent-amber-text);
 }
 
 .git-graph-detail {
@@ -26559,4 +26610,195 @@ body.ctrl-held [data-path] {
 
 .chat-delete-confirm-modal .chat-delete-confirm-btn:hover {
   filter: brightness(1.1);
+}
+
+/* ===== Detached Chat Window（独立会话窗口） ===== */
+.detached-chat-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  padding-top: env(titlebar-area-height, 0px);
+  overflow: hidden;
+  background: var(--app-bg);
+}
+
+.detached-chat-titlebar {
+  position: relative;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  height: 44px;
+  flex-shrink: 0;
+  padding: 0 8px 0 14px;
+  background: var(--app-bg);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+/* macOS 无原生标题栏：为左上角 traffic lights 预留空间 */
+.detached-chat-window.is-macos .detached-chat-titlebar {
+  padding-left: 84px;
+}
+
+.detached-chat-titlebar-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.detached-chat-titlebar-icon {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  pointer-events: none;
+  flex-shrink: 0;
+}
+
+.detached-chat-titlebar-emoji {
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.detached-chat-titlebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detached-chat-titlebar-dir {
+  flex-shrink: 0;
+  max-width: 220px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detached-chat-titlebar .window-controls-buttons {
+  height: 100%;
+}
+
+/* 子代理切换 Tab 行：仅当会话存在子代理时渲染 */
+.detached-chat-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 8px;
+  flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.detached-chat-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.detached-chat-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--surface-island-muted);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+.detached-chat-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.detached-chat-tab.active {
+  background: var(--surface-island-strong);
+  color: var(--text-primary);
+  box-shadow: var(--island-shadow);
+}
+
+.detached-chat-tab-emoji {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.detached-chat-tab-label {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detached-chat-tab-status {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.detached-chat-tab-status.status-running {
+  background: var(--accent-blue);
+  animation: detached-chat-tab-pulse 1.2s ease-in-out infinite;
+}
+
+.detached-chat-tab-status.status-completed {
+  background: var(--accent-green);
+}
+
+.detached-chat-tab-status.status-failed {
+  background: var(--accent-red);
+}
+
+@keyframes detached-chat-tab-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* 主内容岛：与主窗口 .app-layout 的内边距保持一致 */
+.detached-chat-window .detached-chat-main {
+  margin: 0 10px 10px;
+}
+
+/* 运行中提示条：会话正运行于主窗口时展示，结束后自动消失 */
+.detached-chat-running-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 10px 8px;
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  background: var(--accent-blue-bg);
+  color: var(--accent-blue-text);
+  font-size: 12px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+
+.detached-chat-running-banner .spin {
+  flex-shrink: 0;
+  color: var(--accent-blue);
 }

@@ -663,6 +663,7 @@ export const remoteGetGitLog = async (
     output = await runRemoteGitRaw(workspacePath, [
       "log",
       "--all",
+      "--decorate=full",
       "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1f%P",
       "--date=iso",
       "--skip",

@@ -557,6 +557,18 @@ impl BashService {
         };
 
         let wait_result = tokio::select! {
+            // Cancellation and timeout are safety-critical. Prefer them over a
+            // process that becomes ready at the same time, so a stop request
+            // can never be lost to a successful child.wait() branch.
+            biased;
+            _ = cancel_token.cancelled() => {
+                kill_process_tree(&mut child).await;
+                ProcessWaitResult::Cancelled
+            }
+            _ = tokio::time::sleep(effective_timeout) => {
+                kill_process_tree(&mut child).await;
+                ProcessWaitResult::TimedOut
+            }
             status = child.wait() => match status {
                 Ok(status) => ProcessWaitResult::Completed(status.code().unwrap_or(1)),
                 Err(error) => {
@@ -564,14 +576,6 @@ impl BashService {
                     ProcessWaitResult::Failed(error.to_string())
                 }
             },
-            _ = tokio::time::sleep(effective_timeout) => {
-                kill_process_tree(&mut child).await;
-                ProcessWaitResult::TimedOut
-            }
-            _ = cancel_token.cancelled() => {
-                kill_process_tree(&mut child).await;
-                ProcessWaitResult::Cancelled
-            }
         };
 
         // Clean up the interactive session after the process exits.
@@ -603,26 +607,30 @@ impl BashService {
         // this drain phase is the only part of the execution still pending,
         // so the stop button keeps targeting the execution (even though the
         // wait itself is bounded) instead of silently no-oping.
-        let (stdout, stderr) = if matches!(wait_result, ProcessWaitResult::Cancelled) {
-            if let Some(task) = stdout_task {
-                task.abort();
-            }
-            if let Some(task) = stderr_task {
-                task.abort();
-            }
-            (String::new(), String::new())
-        } else {
-            // 无论进程是正常退出（Completed）还是被终止，排空都走有限
-            // 超时。shell 退出后孙进程（如 Start-Process 启动的常驻
-            // 服务）仍持有 stdout/stderr 管道写端时 read_stream 收不到
-            // EOF；若此处无超时，工具调用会永远停留在 running，卡死
-            // agent 循环。
-            let stream_timeout = Some(Duration::from_secs(3));
-            (
-                await_stream_task(stdout_task, stream_timeout).await,
-                await_stream_task(stderr_task, stream_timeout).await,
-            )
-        };
+        let (stdout, stderr) =
+            if matches!(
+                wait_result,
+                ProcessWaitResult::Cancelled | ProcessWaitResult::TimedOut
+            ) {
+                // A stop or timeout must not wait for inherited pipe handles.
+                // The live stream already delivered the useful partial output;
+                // abort both readers immediately after the process-tree kill.
+                if let Some(task) = stdout_task {
+                    task.abort();
+                }
+                if let Some(task) = stderr_task {
+                    task.abort();
+                }
+                (String::new(), String::new())
+            } else {
+                // Drain stdout and stderr concurrently. A grandchild that keeps
+                // one pipe open can therefore delay completion by at most the
+                // single bounded safety timeout, never twice that timeout.
+                tokio::join!(
+                    await_stream_task(stdout_task, Some(Duration::from_secs(3))),
+                     await_stream_task(stderr_task, Some(Duration::from_secs(3))),
+                 )
+             };
 
         // No further cancellation can target this execution once the
         // process has settled and the pipe drain has finished.
@@ -753,31 +761,33 @@ fn create_detach_log_path(
 }
 
 /// Kill the entire process tree rooted at `child`, not just the
-/// immediate shell process.  On Windows, `child.kill()` only
-/// terminates the shell (cmd.exe / powershell) while grandchildren
-/// (the actual command like `npm run build`) keep running and hold
-/// the stdout/stderr pipes open, causing `await_stream_task` to
-/// block until the command finishes naturally.
+/// immediate shell process. On Windows, `taskkill` is launched asynchronously
+/// and bounded by a hard deadline; if it stalls, the shell is force-killed
+/// immediately as a fallback. On Unix the dedicated process group is killed.
 async fn kill_process_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         #[cfg(target_os = "windows")]
         {
             const CREATE_NO_WINDOW: u32 = 0x08000000;
-            // /T = kill entire process tree, /F = force kill
-            let _ = tokio::process::Command::new("taskkill")
+            // /T = kill entire process tree, /F = force kill. Do not await this
+            // command indefinitely: a broken taskkill must never block the
+            // safety-critical cancellation path.
+            let killer = tokio::process::Command::new("taskkill")
                 .args(["/T", "/F", "/PID", &pid.to_string()])
                 .creation_flags(CREATE_NO_WINDOW)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status()
-                .await;
+                .kill_on_drop(true)
+                .spawn();
+            if let Ok(mut killer) = killer {
+                let _ = tokio::time::timeout(Duration::from_millis(750), killer.wait()).await;
+            }
         }
         #[cfg(not(target_os = "windows"))]
         {
-            // Negative PID kills the entire process group.  The child
-            // was spawned with process_group(0) so it leads its own
-            // group.
+            // Negative PID kills the entire process group. The child was
+            // spawned with process_group(0), so it leads its own group.
             let _ = tokio::process::Command::new("kill")
                 .args(["-9", &format!("-{pid}")])
                 .stdin(Stdio::null())
@@ -787,9 +797,11 @@ async fn kill_process_tree(child: &mut tokio::process::Child) {
                 .await;
         }
     }
-    // Fallback: ensure the immediate child is reaped.
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+
+    // Fallback is non-blocking. The bounded wait only reaps the direct child;
+    // it can never keep the Electron event loop blocked.
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_millis(750), child.wait()).await;
 }
 
 async fn read_stream<R>(

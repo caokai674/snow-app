@@ -38,7 +38,7 @@ type UserMessageRailProps = {
    *  to navigate to an earlier message. */
   shouldStickToBottomRef: RefValue<boolean>;
   /** Ref mirroring ChatContent's isInitialBottomPositioningRef. The rail
-   *  resets this to false so updateScrollFollowState stops forcing
+   *  resets this to false so deriveFollowStateFromScroll stops forcing
    *  shouldStickToBottom=true during the initial-bottom-positioning phase. */
   isInitialBottomPositioningRef: RefValue<boolean>;
   /** Ref mirroring ChatContent's isUserScrollIntentRef. The rail sets this to
@@ -503,7 +503,7 @@ export const UserMessageRail = memo(
 
         // Mark this as a user-initiated scroll, exactly like
         // markUserScrollIntent does. This resets isInitialBottomPositioning
-        // (so updateScrollFollowState stops forcing shouldStickToBottom=true)
+        // (so deriveFollowStateFromScroll stops forcing shouldStickToBottom=true)
         // and sets isUserScrollIntent (so the follow state is derived from
         // the live geometry instead of pinning to the bottom). Without this,
         // the ResizeObserver's keepAtBottomSync yanks the viewport back to

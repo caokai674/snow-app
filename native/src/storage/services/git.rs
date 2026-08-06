@@ -913,11 +913,15 @@ pub fn get_git_log(repo_path: &str, skip: i32, limit: i32) -> Result<Vec<GitLogE
     // ("fatal: your current branch does not have any commits yet").
     // run_git_raw returns stdout regardless of exit code, so we get an empty
     // string for repos with no commits.
+    // `--decorate=full` emits unambiguous ref names (refs/heads/…,
+    // refs/remotes/…, refs/tags/…) so the renderer can tell local branches,
+    // remote-tracking branches and tags apart.
     let output = run_git_raw(
         repo_path,
         &[
             "log",
             "--all",
+            "--decorate=full",
             format_arg,
             "--date=iso",
             "--skip",

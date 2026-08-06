@@ -782,14 +782,22 @@ export const windowApi = {
   browserNetworkRequests: (
     webContentsId: number,
     filter?: string,
-    limit?: number
+    limit?: number,
+    includeStatic?: boolean
   ): Promise<unknown[]> =>
     ipcRenderer.invoke(
       "browser:network-requests",
       webContentsId,
       filter,
-      limit
+      limit,
+      includeStatic
     ),
+  browserNetworkRequest: (recordId: number): Promise<unknown | null> =>
+    ipcRenderer.invoke("browser:network-request", recordId),
+  browserNetworkClear: (
+    webContentsId: number
+  ): Promise<{ cleared: number }> =>
+    ipcRenderer.invoke("browser:network-clear", webContentsId),
   browserDialogs: (webContentsId: number): Promise<unknown[]> =>
     ipcRenderer.invoke("browser:dialogs-list", webContentsId),
   browserDialogRespond: (

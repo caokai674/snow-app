@@ -13,6 +13,8 @@ import { markCloseConfirmed } from "../../app/mainWindow";
 import { refreshTrayStats } from "../../app/tray";
 import { clearWindowState } from "../../app/windowState";
 import {
+  clearNetworkRecords,
+  getNetworkRecord,
   listPendingDialogs,
   queryNetworkRecords,
   respondPendingDialog,
@@ -174,14 +176,28 @@ export const registerWindowHandlers = (_native: NativeBridge): void => {
       _event,
       webContentsId: number,
       filter?: string,
-      limit?: number
+      limit?: number,
+      includeStatic?: boolean
     ) =>
       queryNetworkRecords(
         typeof webContentsId === "number" ? webContentsId : -1,
         typeof filter === "string" ? filter : undefined,
-        typeof limit === "number" ? limit : 50
+        typeof limit === "number" ? limit : 50,
+        includeStatic === true
       )
   );
+  ipcMain.handle("browser:network-request", (_event, recordId: number) => {
+    const record = getNetworkRecord(
+      typeof recordId === "number" ? recordId : -1
+    );
+    return record ?? null;
+  });
+  ipcMain.handle("browser:network-clear", (_event, webContentsId: number) => {
+    const cleared = clearNetworkRecords(
+      typeof webContentsId === "number" ? webContentsId : -1
+    );
+    return { cleared };
+  });
   ipcMain.handle("browser:dialogs-list", (_event, webContentsId: number) =>
     listPendingDialogs(
       typeof webContentsId === "number" ? webContentsId : -1
