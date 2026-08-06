@@ -60,6 +60,11 @@ describe("Windows Remote Job runner", () => {
     expect(buildWindowsCommandScript("C:/Users/snow/workspace")).toContain(
       "Set-Location -LiteralPath 'C:/Users/snow/workspace'"
     );
+    const command = buildWindowsCommandScript("C:/Users/snow/workspace");
+    expect(command).toContain("[System.IO.StreamWriter]::new");
+    expect(command).toContain("[System.Text.UTF8Encoding]::new($false)");
+    expect(command).toContain("*>&1 | ForEach-Object");
+    expect(command).not.toContain("*>>");
     const runner = buildWindowsRunnerScript(
       "018f5f17-5d18-7bd1-9210-117f17d50001",
       "2026-08-05T00:00:00.000Z"
@@ -77,6 +82,8 @@ describe("Windows Remote Job runner", () => {
     expect(runner).toContain("ProcessSetQuota");
     expect(runner).toContain("ProcessTerminate");
     expect(runner).toContain("AssignProcessToJobObject");
+    expect(runner).toContain("TerminateJobObject");
+    expect(runner).toContain("$child.WaitForExit(5000)");
     expect(runner).not.toContain("AssignProcessToJobObject($job, [IntPtr]$child.Id)");
     expect(runner).toContain("state.lock");
     expect(runner).toContain("ConvertFrom-Json");
