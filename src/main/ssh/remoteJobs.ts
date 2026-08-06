@@ -55,6 +55,7 @@ const STATE_LOCK_ATTEMPTS = 400;
 const POSIX_CANCEL_GRACE_SECONDS = 5;
 const POSIX_RUNNER_POLL_SECONDS = 0.2;
 const INACTIVE_RUNNER_SETTLE_MS = 750;
+const WINDOWS_BACKEND_PROBE_SETTLE_MS = 2_000;
 
 export type RemoteJobCancellationPolicy = "cancel_remote" | "detach_only";
 
@@ -948,7 +949,9 @@ const backendProbeScript = (markerPath: string): string =>
   `sleep 1; printf ok > ${shellQuote(markerPath)}`;
 
 const windowsBackendProbeScript = (markerPath: string): string =>
-  `Start-Sleep -Seconds 1; [System.IO.File]::WriteAllText('${markerPath.replace(
+  // Avoid first-use PowerShell module loading in a probe that runs as a new
+  // OpenSSH user. The test still writes only after the launching session ends.
+  `[System.Threading.Thread]::Sleep(500); [System.IO.File]::WriteAllText('${markerPath.replace(
     /'/g,
     "''"
   )}', 'ok', [System.Text.Encoding]::ASCII)`;
@@ -1017,7 +1020,11 @@ const verifyBackendLiveness = async (
         );
       }
     });
-    await wait(1_250);
+    await wait(
+      backend.kind === "windows-job"
+        ? WINDOWS_BACKEND_PROBE_SETTLE_MS
+        : 1_250
+    );
     await withSshSession(workspacePath, async (sessionId) => {
       const root = await getRemoteJobRoot(sessionId, capabilities);
       const marker = `${root}/.backend-probe-${probeId}`;
