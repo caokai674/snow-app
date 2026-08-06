@@ -68,7 +68,11 @@ openSsh("Durable Remote Job Windows OpenSSH", () => {
     try {
       await runWindowsPowerShell(
         sessionId,
-        `New-Item -ItemType Directory -Force -Path 'C:/Users/${user}/workspace' | Out-Null; Remove-Item -Force -Recurse -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'SnowApp/jobs')`,
+        [
+          `New-Item -ItemType Directory -Force -Path 'C:/Users/${user}/workspace' | Out-Null`,
+          "$jobRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'SnowApp/jobs'",
+          "if (Test-Path -LiteralPath $jobRoot) { Remove-Item -LiteralPath $jobRoot -Force -Recurse -ErrorAction Stop }",
+        ].join("; "),
       );
     } finally {
       disconnectSsh(sessionId);
