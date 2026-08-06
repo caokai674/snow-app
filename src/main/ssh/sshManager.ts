@@ -697,7 +697,9 @@ export const probeSshCapabilities = async (
       .trim()
       .split("\n")
       .flatMap((line) => {
-        const [key, value] = line.split("=", 2);
+        const [rawKey, rawValue] = line.split("=", 2);
+        const key = rawKey?.trim();
+        const value = rawValue?.trim();
         return key && value ? [[key, value] as const] : [];
       })
   );
