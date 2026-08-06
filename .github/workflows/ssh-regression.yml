@@ -174,7 +174,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "OpenSSH host-key generation failed with exit code $LASTEXITCODE"
           }
-          $hostKey = (Join-Path $env:ProgramData 'ssh\ssh_host_ed25519_key').Replace('\', '/')
+          $hostKeyPath = Join-Path $env:ProgramData 'ssh\ssh_host_ed25519_key'
+          & icacls.exe $hostKeyPath /inheritance:r /setowner '*S-1-5-18' /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to restrict OpenSSH host-key permissions with exit code $LASTEXITCODE"
+          }
+          $hostKey = $hostKeyPath.Replace('\', '/')
           $sftpServer = (Join-Path (Split-Path -Parent $sshd) 'sftp-server.exe').Replace('\', '/')
           @(
             "Port $testPort"
@@ -190,7 +195,8 @@ jobs:
             throw "OpenSSH configuration validation failed with exit code $LASTEXITCODE"
           }
           $taskCommand = "$sshd -D -f $config -E $log"
-          & schtasks.exe /Create /TN $taskName /TR $taskCommand /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST /F | Out-Null
+          $taskStartTime = (Get-Date).AddMinutes(2).ToString('HH:mm')
+          & schtasks.exe /Create /TN $taskName /TR $taskCommand /SC ONCE /ST $taskStartTime /RU SYSTEM /RL HIGHEST /F | Out-Null
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to create isolated OpenSSH task with exit code $LASTEXITCODE"
           }
