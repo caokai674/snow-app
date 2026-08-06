@@ -164,6 +164,7 @@ jobs:
           $testRoot = Join-Path $env:RUNNER_TEMP 'snow-windows-ssh-test'
           $config = Join-Path $testRoot 'sshd_config'
           $log = Join-Path $testRoot 'sshd.log'
+          $taskName = "SnowAppSshRegression-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $password = ConvertTo-SecureString 'Violet!73North' -AsPlainText -Force
           if (-not (Get-LocalUser -Name snowssh -ErrorAction SilentlyContinue)) {
             New-LocalUser -Name snowssh -Password $password -PasswordNeverExpires | Out-Null
@@ -188,7 +189,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "OpenSSH configuration validation failed with exit code $LASTEXITCODE"
           }
-          $server = Start-Process -FilePath $sshd -ArgumentList @('-D', '-f', $config, '-E', $log) -PassThru -WindowStyle Hidden
+          $taskCommand = "$sshd -D -f $config -E $log"
+          & schtasks.exe /Create /TN $taskName /TR $taskCommand /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST /F | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create isolated OpenSSH task with exit code $LASTEXITCODE"
+          }
+          & schtasks.exe /Run /TN $taskName | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to start isolated OpenSSH task with exit code $LASTEXITCODE"
+          }
           $ready = $false
           for ($attempt = 0; $attempt -lt 50; $attempt++) {
             $probe = [System.Net.Sockets.TcpClient]::new()
@@ -202,7 +211,7 @@ jobs:
               $probe.Dispose()
             }
           }
-          if (-not $ready -or $server.HasExited) {
+          if (-not $ready) {
             if (Test-Path -LiteralPath $log) {
               Get-Content -LiteralPath $log
             }
@@ -214,7 +223,7 @@ jobs:
             "SNOW_WINDOWS_SSH_TEST_PORT=$testPort"
             'SNOW_WINDOWS_SSH_TEST_USER=snowssh'
             'SNOW_WINDOWS_SSH_TEST_PASSWORD=Violet!73North'
-            "SNOW_WINDOWS_SSH_TEST_SSHD_PID=$($server.Id)"
+            "SNOW_WINDOWS_SSH_TEST_TASK=$taskName"
             "SNOW_WINDOWS_SSH_TEST_LOG=$log"
           ) | Add-Content -LiteralPath $env:GITHUB_ENV
 
@@ -227,8 +236,8 @@ jobs:
         if: failure()
         shell: pwsh
         run: |
-          if ($env:SNOW_WINDOWS_SSH_TEST_SSHD_PID) {
-            Stop-Process -Id $env:SNOW_WINDOWS_SSH_TEST_SSHD_PID -Force -ErrorAction SilentlyContinue
+          if ($env:SNOW_WINDOWS_SSH_TEST_TASK) {
+            & schtasks.exe /End /TN $env:SNOW_WINDOWS_SSH_TEST_TASK 2>$null
             Start-Sleep -Milliseconds 500
           }
           if ($env:SNOW_WINDOWS_SSH_TEST_LOG -and (Test-Path -LiteralPath $env:SNOW_WINDOWS_SSH_TEST_LOG)) {
@@ -239,6 +248,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          if ($env:SNOW_WINDOWS_SSH_TEST_SSHD_PID) {
-            Stop-Process -Id $env:SNOW_WINDOWS_SSH_TEST_SSHD_PID -Force -ErrorAction SilentlyContinue
+          if ($env:SNOW_WINDOWS_SSH_TEST_TASK) {
+            & schtasks.exe /End /TN $env:SNOW_WINDOWS_SSH_TEST_TASK 2>$null
+            & schtasks.exe /Delete /TN $env:SNOW_WINDOWS_SSH_TEST_TASK /F 2>$null
           }
