@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+mkdir -p /run/sshd
+
 host_key=/host-keys/ssh_host_ed25519_key
 if [ ! -f "$host_key" ]; then
   ssh-keygen -q -t ed25519 -N '' -f "$host_key"
@@ -13,13 +15,13 @@ if [ -f /run/snow-authorized-keys ]; then
   install -o snow -g snow -m 600 /run/snow-authorized-keys /home/snow/.ssh/authorized_keys
 fi
 
+if [ "$INSTALL_SYSTEMD_USER" = "1" ] && [ "${1:-}" != "--systemd-service" ]; then
+  exec /lib/systemd/systemd
+fi
+
 if [ "$INSTALL_SYSTEMD_USER" = "1" ]; then
   runtime_dir="/run/user/$(id -u snow)"
-  install -d -o snow -g snow -m 700 "$runtime_dir"
-  runuser -u snow -- env \
-    XDG_RUNTIME_DIR="$runtime_dir" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
-    sh -c 'dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --fork --nopidfile && exec systemd --user' &
+  systemctl start "user@$(id -u snow).service"
   ready=0
   for _ in $(seq 1 40); do
     if runuser -u snow -- env \

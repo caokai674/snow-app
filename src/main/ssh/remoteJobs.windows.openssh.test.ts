@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const windowsTestPassword = vi.hoisted(
+  () => process.env.SNOW_WINDOWS_SSH_TEST_PASSWORD ?? "snow-test-password"
+);
+
 vi.mock("electron", () => ({
   app: { getPath: () => "C:/Temp" },
 }));
@@ -10,7 +14,7 @@ vi.mock("./sshCredentials", () => ({
     authMethod: "password",
     encryptedSecret: "test-only",
   }),
-  getDecryptedSecret: () => "snow-test-password",
+  getDecryptedSecret: () => windowsTestPassword,
 }));
 
 vi.mock("./sshHostKeys", () => ({
@@ -58,7 +62,7 @@ openSsh("Durable Remote Job Windows OpenSSH", () => {
       port,
       username: user,
       authMethod: "password",
-      password: "snow-test-password",
+      password: windowsTestPassword,
     });
     try {
       await executeSshCommand(
@@ -137,7 +141,7 @@ openSsh("Durable Remote Job Windows OpenSSH", () => {
       port,
       username: user,
       authMethod: "password",
-      password: "snow-test-password",
+      password: windowsTestPassword,
     });
     try {
       while (!childPid && Date.now() < childDeadline) {
@@ -165,7 +169,7 @@ openSsh("Durable Remote Job Windows OpenSSH", () => {
       port,
       username: user,
       authMethod: "password",
-      password: "snow-test-password",
+      password: windowsTestPassword,
     });
     try {
       await expect(

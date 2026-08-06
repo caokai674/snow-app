@@ -77,12 +77,32 @@ jobs:
           eval "$(ssh-agent -s)"
           ssh-add "$test_root/id_ed25519"
           container_name="snow-ssh-test-${{ matrix.debian }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          docker run --detach --name "$container_name" --publish 127.0.0.1::2222 \
+          docker_options=()
+          if [ "${{ matrix.fixture }}" = "systemd-user" ]; then
+            docker_options+=(
+              --privileged
+              --cgroupns=host
+              --tmpfs /run
+              --tmpfs /run/lock
+              --volume /sys/fs/cgroup:/sys/fs/cgroup:rw
+            )
+          fi
+          docker run --detach --name "$container_name" "${docker_options[@]}" --publish 127.0.0.1::2222 \
             --volume "$test_root/host-keys:/host-keys" \
             --volume "$test_root/authorized_keys:/run/snow-authorized-keys:ro" \
             "snow-ssh-test:${{ matrix.debian }}-${{ matrix.fixture }}"
+          test "$(docker inspect --format '{{.State.Running}}' "$container_name")" = "true"
           port="$(docker port "$container_name" 2222/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
           test -n "$port"
+          ready=0
+          for _ in $(seq 1 100); do
+            if (echo > "/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 0.1
+          done
+          test "$ready" = "1"
           {
             echo "SNOW_SSH_TEST=1"
             echo "SNOW_SSH_TEST_HOST=127.0.0.1"
@@ -95,7 +115,9 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Run SSH regression tests
-        run: npx vitest run src/main/ssh/sshManager.test.ts src/main/ssh/sshManager.openssh.test.ts src/main/ssh/remoteJobs.openssh.test.ts
+        # These files intentionally share one fault-injected OpenSSH server.
+        # Run them serially so the host-key test cannot stop it mid-job test.
+        run: npx vitest run --no-file-parallelism src/main/ssh/sshManager.test.ts src/main/ssh/sshManager.openssh.test.ts src/main/ssh/remoteJobs.openssh.test.ts
 
       - name: Collect OpenSSH logs on failure
         if: failure()
@@ -130,7 +152,7 @@ jobs:
           if ($capability.State -ne 'Installed') {
             Add-WindowsCapability -Online -Name $capability.Name
           }
-          $password = ConvertTo-SecureString 'snow-test-password' -AsPlainText -Force
+          $password = ConvertTo-SecureString 'Violet!73North' -AsPlainText -Force
           if (-not (Get-LocalUser -Name snowssh -ErrorAction SilentlyContinue)) {
             New-LocalUser -Name snowssh -Password $password -PasswordNeverExpires | Out-Null
           }
@@ -146,4 +168,5 @@ jobs:
           $env:SNOW_WINDOWS_SSH_TEST_HOST = '127.0.0.1'
           $env:SNOW_WINDOWS_SSH_TEST_PORT = '22'
           $env:SNOW_WINDOWS_SSH_TEST_USER = 'snowssh'
+          $env:SNOW_WINDOWS_SSH_TEST_PASSWORD = 'Violet!73North'
           npx vitest run src/main/ssh/remoteJobs.windows.openssh.test.ts src/main/ssh/windowsRemoteRunner.test.ts src/main/ssh/snowAgent.test.ts
