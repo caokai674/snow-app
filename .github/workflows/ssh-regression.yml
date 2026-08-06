@@ -175,18 +175,6 @@ jobs:
             throw "OpenSSH host-key generation failed with exit code $LASTEXITCODE"
           }
           $hostKeyPath = Join-Path $env:ProgramData 'ssh\ssh_host_ed25519_key'
-          & icacls.exe $hostKeyPath /inheritance:r | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to remove inherited OpenSSH host-key permissions with exit code $LASTEXITCODE"
-          }
-          & icacls.exe $hostKeyPath /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to grant OpenSSH host-key permissions with exit code $LASTEXITCODE"
-          }
-          & icacls.exe $hostKeyPath /setowner '*S-1-5-18' | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to set the OpenSSH host-key owner with exit code $LASTEXITCODE"
-          }
           $hostKey = $hostKeyPath.Replace('\', '/')
           $sftpServer = (Join-Path (Split-Path -Parent $sshd) 'sftp-server.exe').Replace('\', '/')
           @(
@@ -202,6 +190,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "OpenSSH configuration validation failed with exit code $LASTEXITCODE"
           }
+          $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+          $administratorsSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+          $hostKeyAcl = Get-Acl -LiteralPath $hostKeyPath
+          $hostKeyAcl.SetAccessRuleProtection($true, $false)
+          foreach ($accessRule in @($hostKeyAcl.Access)) {
+            $hostKeyAcl.RemoveAccessRuleAll($accessRule)
+          }
+          foreach ($sid in @($systemSid, $administratorsSid)) {
+            $hostKeyAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+              $sid,
+              [System.Security.AccessControl.FileSystemRights]::FullControl,
+              [System.Security.AccessControl.InheritanceFlags]::None,
+              [System.Security.AccessControl.PropagationFlags]::None,
+              [System.Security.AccessControl.AccessControlType]::Allow
+            ))
+          }
+          $hostKeyAcl.SetOwner($systemSid)
+          Set-Acl -LiteralPath $hostKeyPath -AclObject $hostKeyAcl
           $taskCommand = "$sshd -D -f $config -E $log"
           $taskStartTime = (Get-Date).AddMinutes(2).ToString('HH:mm')
           & schtasks.exe /Create /TN $taskName /TR $taskCommand /SC ONCE /ST $taskStartTime /RU SYSTEM /RL HIGHEST /F | Out-Null
