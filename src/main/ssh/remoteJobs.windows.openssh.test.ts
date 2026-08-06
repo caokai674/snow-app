@@ -72,7 +72,7 @@ openSsh("Durable Remote Job Windows OpenSSH", () => {
     } finally {
       disconnectSsh(sessionId);
     }
-  });
+  }, 30_000);
 
   afterEach(() => {
     disconnectAllSsh();
