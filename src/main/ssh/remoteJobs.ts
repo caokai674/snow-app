@@ -29,9 +29,11 @@ import {
   cancelWindowsRemoteJob,
   createWindowsRemoteDirectory,
   encodeWindowsPowerShell,
+  getWindowsRemoteJobTaskName,
   getWindowsRemoteJobRoot,
   inspectWindowsRemoteJob,
   isWindowsRemote,
+  launchWindowsDetachedPowerShell,
   launchWindowsRemoteJob,
   moveWindowsRemotePath,
   removeWindowsRemotePath,
@@ -55,7 +57,8 @@ const STATE_LOCK_ATTEMPTS = 400;
 const POSIX_CANCEL_GRACE_SECONDS = 5;
 const POSIX_RUNNER_POLL_SECONDS = 0.2;
 const INACTIVE_RUNNER_SETTLE_MS = 750;
-const WINDOWS_BACKEND_PROBE_SETTLE_MS = 2_000;
+const WINDOWS_BACKEND_PROBE_TIMEOUT_MS = 10_000;
+const WINDOWS_BACKEND_PROBE_POLL_MS = 200;
 
 export type RemoteJobCancellationPolicy = "cancel_remote" | "detach_only";
 
@@ -792,6 +795,7 @@ const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
       await launchWindowsRemoteJob(
         context.sessionId,
         `${context.jobDirectory}/runner.ps1`,
+        context.jobId,
         context.signal
       );
     },
@@ -948,13 +952,17 @@ const buildRunnerScript = (jobId: string, createdAt: string): string => [
 const backendProbeScript = (markerPath: string): string =>
   `sleep 1; printf ok > ${shellQuote(markerPath)}`;
 
-const windowsBackendProbeScript = (markerPath: string): string =>
+const windowsBackendProbeScript = (markerPath: string, taskName: string): string =>
   // Avoid first-use PowerShell module loading in a probe that runs as a new
   // OpenSSH user. The test still writes only after the launching session ends.
-  `[System.Threading.Thread]::Sleep(500); [System.IO.File]::WriteAllText('${markerPath.replace(
-    /'/g,
-    "''"
-  )}', 'ok', [System.Text.Encoding]::ASCII)`;
+  [
+    "try {",
+    "  [System.Threading.Thread]::Sleep(500)",
+    `  [System.IO.File]::WriteAllText('${markerPath.replace(/'/g, "''")}', 'ok', [System.Text.Encoding]::ASCII)`,
+    "} finally {",
+    `  & schtasks.exe /Delete /TN '${taskName.replace(/'/g, "''")}' /F 2>$null | Out-Null`,
+    "}",
+  ].join("\r\n");
 
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -1006,10 +1014,14 @@ const verifyBackendLiveness = async (
           ].join(" ")
         );
       } else if (backend.kind === "windows-job") {
-        const encoded = encodeWindowsPowerShell(windowsBackendProbeScript(marker));
-        await runPowerShell(
+        const taskId = `probe-${probeId}`;
+        await launchWindowsDetachedPowerShell(
           sessionId,
-          `$process = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand','${encoded}') -WindowStyle Hidden -PassThru; [Console]::Out.Write($process.Id)`
+          getWindowsRemoteJobTaskName(taskId),
+          windowsBackendProbeScript(
+            marker,
+            getWindowsRemoteJobTaskName(taskId)
+          )
         );
       } else {
         await runShell(
@@ -1020,23 +1032,31 @@ const verifyBackendLiveness = async (
         );
       }
     });
-    await wait(
-      backend.kind === "windows-job"
-        ? WINDOWS_BACKEND_PROBE_SETTLE_MS
-        : 1_250
-    );
     await withSshSession(workspacePath, async (sessionId) => {
       const root = await getRemoteJobRoot(sessionId, capabilities);
       const marker = `${root}/.backend-probe-${probeId}`;
-      const content = await readSshFile(sessionId, marker);
-      if (content.toString("utf8") !== "ok") {
-        throw new Error("Remote backend did not survive the SSH disconnect");
+      const deadline =
+        Date.now() +
+        (backend.kind === "windows-job"
+          ? WINDOWS_BACKEND_PROBE_TIMEOUT_MS
+          : 1_250);
+      while (Date.now() < deadline) {
+        if (await remotePathExists(sessionId, marker)) {
+          const content = await readSshFile(sessionId, marker);
+          if (content.toString("utf8") === "ok") {
+            if (capabilities.platform === "windows") {
+              await removeWindowsRemotePath(sessionId, marker);
+            } else {
+              await runShell(sessionId, `rm -f -- ${shellQuote(marker)}`);
+            }
+            return;
+          }
+        }
+        await wait(
+          backend.kind === "windows-job" ? WINDOWS_BACKEND_PROBE_POLL_MS : 125
+        );
       }
-      if (capabilities.platform === "windows") {
-        await removeWindowsRemotePath(sessionId, marker);
-      } else {
-        await runShell(sessionId, `rm -f -- ${shellQuote(marker)}`);
-      }
+      throw new Error("Remote backend did not survive the SSH disconnect");
     });
     BACKEND_PROBE_CACHE.set(cacheKey, Date.now() + BACKEND_PROBE_CACHE_MS);
     return true;

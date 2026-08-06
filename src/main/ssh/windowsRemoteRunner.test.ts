@@ -9,8 +9,10 @@ import { executeSshCommand } from "./sshManager";
 import {
   buildWindowsCommandScript,
   buildWindowsRunnerScript,
+  buildWindowsScheduledTaskLauncherScript,
   encodeWindowsPowerShell,
   isWindowsRemote,
+  launchWindowsRemoteJob,
   runWindowsPowerShell,
 } from "./windowsRemoteRunner";
 
@@ -57,6 +59,36 @@ describe("Windows Remote Job runner", () => {
     expect(runner).toContain("AssignProcessToJobObject");
     expect(runner).toContain("state.lock");
     expect(runner).toContain("ConvertFrom-Json");
+    expect(runner).toContain("$scheduledTaskName = 'SnowAppRemoteJob-' + $jobId");
+    expect(runner).toContain("schtasks.exe /Delete /TN $scheduledTaskName /F");
+  });
+
+  it("uses Task Scheduler to detach runners from the OpenSSH process tree", async () => {
+    const taskName = "SnowAppRemoteJob-018f5f17-5d18-7bd1-9210-117f17d50001";
+    const launcher = buildWindowsScheduledTaskLauncherScript(
+      taskName,
+      "[Console]::Out.Write('ok')"
+    );
+    expect(launcher).toContain("& schtasks.exe @taskArguments");
+    expect(launcher).toContain("& schtasks.exe /Run /TN $taskName");
+    expect(launcher).toContain("'/RL', 'LIMITED'");
+    expect(launcher).toContain("'12/31/2099'");
+    expect(launcher).not.toContain("Start-Process");
+
+    executeSshCommandMock.mockClear();
+    executeSshCommandMock.mockResolvedValueOnce("");
+    await launchWindowsRemoteJob(
+      "session",
+      "C:/Users/snow/AppData/Local/SnowApp/jobs/runner.ps1",
+      "018f5f17-5d18-7bd1-9210-117f17d50001"
+    );
+    const command = executeSshCommandMock.mock.calls[0]?.[1] ?? "";
+    const encoded = command.match(/EncodedCommand ([A-Za-z0-9+/=]+)$/)?.[1];
+    expect(encoded).toBeDefined();
+    const decoded = Buffer.from(encoded, "base64").toString("utf16le");
+    expect(decoded).toContain("schtasks.exe @taskArguments");
+    expect(decoded).toContain(taskName);
+    expect(decoded).not.toContain("Start-Process");
   });
 
   it("suppresses first-use PowerShell progress for every encoded command", async () => {
