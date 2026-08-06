@@ -81,7 +81,22 @@ const clearRemoteJobDirectory = async (): Promise<void> => {
   try {
     await executeSshCommand(
       sessionId,
-      "rm -rf -- /home/snow/.local/state/snow-app/jobs && mkdir -p -- /home/snow/workspace"
+      [
+        'jobs_root="/home/snow/.local/state/snow-app/jobs"',
+        "for attempt in $(seq 1 50); do",
+        '  rm -rf -- "$jobs_root"',
+        '  if [ ! -e "$jobs_root" ]; then',
+        "    sleep 0.1",
+        '    if [ ! -e "$jobs_root" ]; then',
+        "      mkdir -p -- /home/snow/workspace",
+        "      exit 0",
+        "    fi",
+        "  fi",
+        "  sleep 0.1",
+        "done",
+        'printf "Remote Job directory remained active: %s\\n" "$jobs_root" >&2',
+        "exit 1",
+      ].join("\n")
     );
   } finally {
     disconnectSsh(sessionId);
@@ -214,11 +229,12 @@ openSsh("Durable Remote Job OpenSSH fault injection", () => {
       disconnectSsh(sessionId);
     }
 
+    const jobId = randomUUID();
     await startRemoteJob({
       workspacePath: workspacePath(),
       command: "true",
       timeoutMs: 10_000,
-      jobId: randomUUID(),
+      jobId,
       backend: "posix-detach",
     });
 
@@ -230,9 +246,12 @@ openSsh("Durable Remote Job OpenSSH fault injection", () => {
           "stat -c %a -- /home/snow/.local/state/snow-app/jobs"
         )
       ).resolves.toBe("700\n");
-    } finally {
-      disconnectSsh(verificationSession);
-    }
+      } finally {
+        disconnectSsh(verificationSession);
+      }
+    await expect(
+      waitFor(jobId, (result) => isTerminal(result.state.status))
+    ).resolves.toMatchObject({ state: { status: "succeeded" } });
   }, 30_000);
 
   it("keeps a submitted Job indeterminate when its launch acknowledgement is lost", async () => {
