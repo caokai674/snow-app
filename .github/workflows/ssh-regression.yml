@@ -188,7 +188,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "OpenSSH configuration validation failed with exit code $LASTEXITCODE"
           }
-          $server = Start-Process -FilePath $sshd -ArgumentList @('-D', '-ddd', '-f', $config, '-E', $log) -PassThru -WindowStyle Hidden
+          $server = Start-Process -FilePath $sshd -ArgumentList @('-D', '-f', $config, '-E', $log) -PassThru -WindowStyle Hidden
           $ready = $false
           for ($attempt = 0; $attempt -lt 50; $attempt++) {
             $probe = [System.Net.Sockets.TcpClient]::new()
