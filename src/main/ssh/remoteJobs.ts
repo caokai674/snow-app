@@ -28,6 +28,7 @@ import {
   buildWindowsRunnerScript,
   cancelWindowsRemoteJob,
   createWindowsRemoteDirectory,
+  encodeWindowsPowerShell,
   getWindowsRemoteJobRoot,
   inspectWindowsRemoteJob,
   isWindowsRemote,
@@ -347,9 +348,6 @@ const summarizeCommand = (): string => "Remote command";
 
 const pathForJob = (root: string, jobId: string): string => `${root}/${jobId}`;
 
-const powerShellEncodedCommand = (script: string): string =>
-  Buffer.from(script, "utf16le").toString("base64");
-
 const runPowerShell = (
   sessionId: string,
   script: string,
@@ -357,7 +355,7 @@ const runPowerShell = (
 ): Promise<string> =>
   executeSshCommand(
     sessionId,
-    `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${powerShellEncodedCommand(
+    `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${encodeWindowsPowerShell(
       script
     )}`,
     { timeoutMs }
@@ -1005,7 +1003,7 @@ const verifyBackendLiveness = async (
           ].join(" ")
         );
       } else if (backend.kind === "windows-job") {
-        const encoded = powerShellEncodedCommand(windowsBackendProbeScript(marker));
+        const encoded = encodeWindowsPowerShell(windowsBackendProbeScript(marker));
         await runPowerShell(
           sessionId,
           `$process = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand','${encoded}') -WindowStyle Hidden -PassThru; [Console]::Out.Write($process.Id)`

@@ -4,8 +4,14 @@ import { executeSshCommand, type SshCapabilities } from "./sshManager";
 const powerShellQuote = (value: string): string =>
   `'${value.replace(/'/g, "''")}'`;
 
-const encodePowerShell = (script: string): string =>
-  Buffer.from(script, "utf16le").toString("base64");
+const POWER_SHELL_NON_INTERACTIVE_PRELUDE =
+  "$ProgressPreference = 'SilentlyContinue'\r\n";
+
+export const encodeWindowsPowerShell = (script: string): string =>
+  Buffer.from(
+    `${POWER_SHELL_NON_INTERACTIVE_PRELUDE}${script}`,
+    "utf16le"
+  ).toString("base64");
 
 export const runWindowsPowerShell = (
   sessionId: string,
@@ -15,7 +21,7 @@ export const runWindowsPowerShell = (
 ): Promise<string> =>
   executeSshCommand(
     sessionId,
-    `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${encodePowerShell(script)}`,
+    `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${encodeWindowsPowerShell(script)}`,
     { timeoutMs, signal }
   );
 

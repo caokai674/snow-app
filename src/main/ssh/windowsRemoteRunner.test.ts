@@ -1,9 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { Buffer } from "node:buffer";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("./sshManager", () => ({
+  executeSshCommand: vi.fn(),
+}));
+
+import { executeSshCommand } from "./sshManager";
 import {
   buildWindowsCommandScript,
   buildWindowsRunnerScript,
+  encodeWindowsPowerShell,
   isWindowsRemote,
+  runWindowsPowerShell,
 } from "./windowsRemoteRunner";
+
+const executeSshCommandMock = vi.mocked(executeSshCommand);
 
 describe("Windows Remote Job runner", () => {
   it("requires a PowerShell host with Job Object support", () => {
@@ -46,5 +57,20 @@ describe("Windows Remote Job runner", () => {
     expect(runner).toContain("AssignProcessToJobObject");
     expect(runner).toContain("state.lock");
     expect(runner).toContain("ConvertFrom-Json");
+  });
+
+  it("suppresses first-use PowerShell progress for every encoded command", async () => {
+    const script = "[Console]::Out.Write('ok')";
+    expect(Buffer.from(encodeWindowsPowerShell(script), "base64").toString("utf16le")).toBe(
+      "$ProgressPreference = 'SilentlyContinue'\r\n[Console]::Out.Write('ok')"
+    );
+
+    executeSshCommandMock.mockResolvedValueOnce("ok");
+    await expect(runWindowsPowerShell("session", script)).resolves.toBe("ok");
+    expect(executeSshCommandMock).toHaveBeenCalledWith(
+      "session",
+      `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${encodeWindowsPowerShell(script)}`,
+      { timeoutMs: 15_000, signal: undefined }
+    );
   });
 });
