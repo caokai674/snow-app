@@ -114,10 +114,16 @@ jobs:
             echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"
           } >> "$GITHUB_ENV"
 
-      - name: Run SSH regression tests
-        # These files intentionally share one fault-injected OpenSSH server.
-        # Run them serially so the host-key test cannot stop it mid-job test.
-        run: npx vitest run --no-file-parallelism src/main/ssh/sshManager.test.ts src/main/ssh/sshManager.openssh.test.ts src/main/ssh/remoteJobs.openssh.test.ts
+      - name: Run SSH manager unit regression
+        run: npx vitest run src/main/ssh/sshManager.test.ts
+
+      - name: Run OpenSSH remote job regression
+        # This suite must finish before the connection suite stops and restarts
+        # the shared fault-injected server for host-key rotation.
+        run: npx vitest run src/main/ssh/remoteJobs.openssh.test.ts
+
+      - name: Run OpenSSH connection regression
+        run: npx vitest run src/main/ssh/sshManager.openssh.test.ts
 
       - name: Collect OpenSSH logs on failure
         if: failure()
@@ -157,7 +163,12 @@ jobs:
             New-LocalUser -Name snowssh -Password $password -PasswordNeverExpires | Out-Null
           }
           $config = 'C:\ProgramData\ssh\sshd_config'
-          Add-Content -LiteralPath $config -Value "`nPasswordAuthentication yes`n"
+          $configLines = Get-Content -LiteralPath $config | Where-Object {
+            $_ -notmatch '^\s*(PasswordAuthentication|Subsystem\s+sftp)\b'
+          }
+          $configLines += 'PasswordAuthentication yes'
+          $configLines += 'Subsystem sftp sftp-server.exe'
+          Set-Content -LiteralPath $config -Value $configLines
           Set-Service -Name sshd -StartupType Manual
           Restart-Service -Name sshd
 
