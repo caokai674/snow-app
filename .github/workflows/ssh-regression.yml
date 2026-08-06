@@ -150,7 +150,7 @@ jobs:
       - name: Install npm dependencies
         run: npm ci --prefer-offline --no-audit
 
-      - name: Enable local OpenSSH test account
+      - name: Start isolated Windows OpenSSH test server
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -160,57 +160,80 @@ jobs:
           }
           $sshd = (Get-Command sshd.exe -ErrorAction Stop).Source
           $sshKeygen = (Get-Command ssh-keygen.exe -ErrorAction Stop).Source
+          $testPort = 20222
+          $testRoot = Join-Path $env:RUNNER_TEMP 'snow-windows-ssh-test'
+          $config = Join-Path $testRoot 'sshd_config'
+          $log = Join-Path $testRoot 'sshd.log'
           $password = ConvertTo-SecureString 'Violet!73North' -AsPlainText -Force
           if (-not (Get-LocalUser -Name snowssh -ErrorAction SilentlyContinue)) {
             New-LocalUser -Name snowssh -Password $password -PasswordNeverExpires | Out-Null
           }
-          $config = 'C:\ProgramData\ssh\sshd_config'
-          if (-not (Test-Path -LiteralPath $config)) {
-            $defaultConfig = Join-Path (Split-Path -Parent $sshd) 'sshd_config_default'
-            if (-not (Test-Path -LiteralPath $defaultConfig)) {
-              throw "OpenSSH default configuration was not installed: $defaultConfig"
-            }
-            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $config) | Out-Null
-            Copy-Item -LiteralPath $defaultConfig -Destination $config -Force
-          }
-          $configLines = @(Get-Content -LiteralPath $config | Where-Object {
-            $_ -notmatch '^\s*(PasswordAuthentication|Subsystem\s+sftp)\b'
-          })
-          $globalLines = [System.Collections.Generic.List[string]]::new()
-          $matchLines = [System.Collections.Generic.List[string]]::new()
-          $inMatchBlock = $false
-          foreach ($line in $configLines) {
-            if (-not $inMatchBlock -and $line -match '^\s*Match\b') {
-              $inMatchBlock = $true
-            }
-            if ($inMatchBlock) {
-              $matchLines.Add($line)
-            } else {
-              $globalLines.Add($line)
-            }
-          }
-          $configLines = @($globalLines) + @(
-            'PasswordAuthentication yes'
-            'Subsystem sftp sftp-server.exe'
-          ) + @($matchLines)
-          Set-Content -LiteralPath $config -Value $configLines
+          New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
           & $sshKeygen -A
           if ($LASTEXITCODE -ne 0) {
             throw "OpenSSH host-key generation failed with exit code $LASTEXITCODE"
           }
-          & $sshd -t
+          $hostKey = (Join-Path $env:ProgramData 'ssh\ssh_host_ed25519_key').Replace('\', '/')
+          $sftpServer = (Join-Path (Split-Path -Parent $sshd) 'sftp-server.exe').Replace('\', '/')
+          @(
+            "Port $testPort"
+            'ListenAddress 127.0.0.1'
+            "HostKey $hostKey"
+            'PasswordAuthentication yes'
+            "Subsystem sftp $sftpServer"
+            'PermitRootLogin no'
+          ) | Set-Content -LiteralPath $config -Encoding ascii
+          & $sshd -t -f $config
           if ($LASTEXITCODE -ne 0) {
             throw "OpenSSH configuration validation failed with exit code $LASTEXITCODE"
           }
-          Set-Service -Name sshd -StartupType Manual
-          Restart-Service -Name sshd
+          $server = Start-Process -FilePath $sshd -ArgumentList @('-D', '-f', $config, '-E', $log) -PassThru -WindowStyle Hidden
+          $ready = $false
+          for ($attempt = 0; $attempt -lt 50; $attempt++) {
+            $probe = [System.Net.Sockets.TcpClient]::new()
+            try {
+              $probe.Connect('127.0.0.1', $testPort)
+              $ready = $true
+              break
+            } catch {
+              Start-Sleep -Milliseconds 200
+            } finally {
+              $probe.Dispose()
+            }
+          }
+          if (-not $ready -or $server.HasExited) {
+            if (Test-Path -LiteralPath $log) {
+              Get-Content -LiteralPath $log
+            }
+            throw "Isolated OpenSSH test server did not listen on port $testPort"
+          }
+          @(
+            'SNOW_WINDOWS_SSH_TEST=1'
+            'SNOW_WINDOWS_SSH_TEST_HOST=127.0.0.1'
+            "SNOW_WINDOWS_SSH_TEST_PORT=$testPort"
+            'SNOW_WINDOWS_SSH_TEST_USER=snowssh'
+            'SNOW_WINDOWS_SSH_TEST_PASSWORD=Violet!73North'
+            "SNOW_WINDOWS_SSH_TEST_SSHD_PID=$($server.Id)"
+            "SNOW_WINDOWS_SSH_TEST_LOG=$log"
+          ) | Add-Content -LiteralPath $env:GITHUB_ENV
 
       - name: Run Windows OpenSSH Remote Job regression
         shell: pwsh
         run: |
-          $env:SNOW_WINDOWS_SSH_TEST = '1'
-          $env:SNOW_WINDOWS_SSH_TEST_HOST = '127.0.0.1'
-          $env:SNOW_WINDOWS_SSH_TEST_PORT = '22'
-          $env:SNOW_WINDOWS_SSH_TEST_USER = 'snowssh'
-          $env:SNOW_WINDOWS_SSH_TEST_PASSWORD = 'Violet!73North'
           npx vitest run src/main/ssh/remoteJobs.windows.openssh.test.ts src/main/ssh/windowsRemoteRunner.test.ts src/main/ssh/snowAgent.test.ts
+
+      - name: Collect Windows OpenSSH logs on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          if ($env:SNOW_WINDOWS_SSH_TEST_LOG -and (Test-Path -LiteralPath $env:SNOW_WINDOWS_SSH_TEST_LOG)) {
+            Get-Content -LiteralPath $env:SNOW_WINDOWS_SSH_TEST_LOG
+          }
+
+      - name: Stop isolated Windows OpenSSH test server
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:SNOW_WINDOWS_SSH_TEST_SSHD_PID) {
+            Stop-Process -Id $env:SNOW_WINDOWS_SSH_TEST_SSHD_PID -Force -ErrorAction SilentlyContinue
+          }
