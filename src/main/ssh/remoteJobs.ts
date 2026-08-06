@@ -15,7 +15,7 @@ import {
   readSshFile,
   readSshFileRange,
   statSshEntry,
-  writeSshFile,
+  writeInternalSshFile,
   type SshCapabilities,
 } from "./sshManager";
 import {
@@ -50,6 +50,17 @@ const MAX_OUTPUT_READ_BYTES = 64 * 1024;
 const SUCCESS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const FAILURE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const BACKEND_PROBE_CACHE_MS = 10 * 60 * 1000;
+const STATE_LOCK_ATTEMPTS = 400;
+const POSIX_CANCEL_GRACE_SECONDS = 5;
+
+export type RemoteJobCancellationPolicy = "cancel_remote" | "detach_only";
+
+export class RemoteJobLaunchRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RemoteJobLaunchRejectedError";
+  }
+}
 
 export type RemoteJobStatus =
   | "preparing"
@@ -93,6 +104,7 @@ export type RemoteJobBinding = {
   commandHash: string;
   displayCommand: string;
   backend: RemoteJobBackendKind;
+  cancellationPolicy?: RemoteJobCancellationPolicy;
   jobTokenHash: string;
   createdAt: string;
   updatedAt: string;
@@ -115,10 +127,16 @@ export type RemoteJobStartRequest = {
   toolCallId?: string;
 };
 
+export type RemoteJobStartOptions = {
+  signal?: AbortSignal;
+  cancellationPolicy?: RemoteJobCancellationPolicy;
+};
+
 export type RemoteJobOutput = {
   job: RemoteJobBinding;
   state: RemoteJobState;
   output: string;
+  outputBytes: Buffer;
   offset: number;
   nextOffset: number;
   eof: boolean;
@@ -137,6 +155,7 @@ export type RemoteJobBackendContext = {
   jobId: string;
   timeoutMs: number;
   capabilities: SshCapabilities;
+  signal?: AbortSignal;
 };
 
 export interface RemoteJobBackend {
@@ -195,6 +214,11 @@ const isBackendKind = (value: unknown): value is RemoteJobBackendKind =>
   value === "posix-detach" ||
   value === "windows-job";
 
+const isCancellationPolicy = (
+  value: unknown
+): value is RemoteJobCancellationPolicy =>
+  value === "cancel_remote" || value === "detach_only";
+
 const normalizeWorkspacePath = (value: string): string => {
   const path = value.trim();
   if (!path.startsWith("ssh://")) {
@@ -250,6 +274,8 @@ const readBindings = (): RemoteJobBinding[] => {
         typeof job.commandHash === "string" &&
         typeof job.displayCommand === "string" &&
         isBackendKind(job.backend) &&
+        (job.cancellationPolicy === undefined ||
+          isCancellationPolicy(job.cancellationPolicy)) &&
         typeof job.jobTokenHash === "string" &&
         typeof job.createdAt === "string" &&
         typeof job.updatedAt === "string" &&
@@ -312,13 +338,10 @@ const getBinding = (jobId: string): RemoteJobBinding | null =>
 const commandHash = (command: string): string =>
   createHash("sha256").update(command).digest("hex");
 
-const redactCommand = (command: string): string =>
-  command
-    .replace(
-      /((?:api[_-]?key|token|password|secret)\s*=\s*)(['"]?)[^\s'"]+\2/gi,
-      "$1***"
-    )
-    .slice(0, 1_000);
+// The exact command can contain secrets in forms that cannot be reliably
+// recognized without a shell parser. Keep it only in protected remote job
+// files and use a deliberately content-free value in persisted/UI contexts.
+const summarizeCommand = (): string => "Remote command";
 
 const pathForJob = (root: string, jobId: string): string => `${root}/${jobId}`;
 
@@ -350,6 +373,58 @@ const runPlatformScript = (
     : executeSshCommand(sessionId, `sh -lc ${shellQuote(posixScript)}`, {
         timeoutMs,
       });
+
+const powerShellQuote = (value: string): string =>
+  `'${value.replace(/'/g, "''")}'`;
+
+const withRemoteStateLock = async <T>(
+  sessionId: string,
+  capabilities: SshCapabilities,
+  jobDirectory: string,
+  operation: () => Promise<T>
+): Promise<T> => {
+  const lockPath = `${jobDirectory}/state.lock`;
+  const acquirePosix = [
+    `lock=${shellQuote(lockPath)}`,
+    `i=0`,
+    `while ! mkdir -- "$lock" 2>/dev/null; do`,
+    `  i=$((i + 1))`,
+    `  if [ "$i" -ge ${STATE_LOCK_ATTEMPTS} ]; then exit 75; fi`,
+    `  sleep 0.025`,
+    `done`,
+  ].join("\n");
+  const acquireWindows = [
+    `$lock = ${powerShellQuote(lockPath)}`,
+    `$acquired = $false`,
+    `for ($i = 0; $i -lt ${STATE_LOCK_ATTEMPTS}; $i++) {`,
+    `  try { New-Item -ItemType Directory -Path $lock -ErrorAction Stop | Out-Null; $acquired = $true; break } catch { Start-Sleep -Milliseconds 25 }`,
+    `}`,
+    `if (-not $acquired) { throw 'Remote Job state lock timed out' }`,
+  ].join("\n");
+  const releasePosix = `rmdir -- ${shellQuote(lockPath)} 2>/dev/null || true`;
+  const releaseWindows = `Remove-Item -LiteralPath ${powerShellQuote(
+    lockPath
+  )} -Force -Recurse -ErrorAction SilentlyContinue`;
+
+  await runPlatformScript(
+    sessionId,
+    capabilities,
+    acquirePosix,
+    acquireWindows,
+    15_000
+  );
+  try {
+    return await operation();
+  } finally {
+    await runPlatformScript(
+      sessionId,
+      capabilities,
+      releasePosix,
+      releaseWindows,
+      15_000
+    ).catch(() => undefined);
+  }
+};
 
 const remotePathExists = async (sessionId: string, path: string): Promise<boolean> =>
   (await statSshEntry(sessionId, path)) !== null;
@@ -398,7 +473,9 @@ const getRemoteJobRoot = async (
       sessionId,
       [
         'state_root="${XDG_STATE_HOME:-$HOME/.local/state}/snow-app/jobs"',
+        "umask 077",
         'mkdir -p -- "$state_root"',
+        'chmod 700 -- "$state_root"',
         'cd -- "$state_root"',
         "pwd -P",
       ].join("\n"),
@@ -472,17 +549,41 @@ const writeRemoteState = async (
   sessionId: string,
   jobDirectory: string,
   previous: RemoteJobState,
-  update: Partial<RemoteJobState>
+  update: Partial<RemoteJobState>,
+  capabilities: SshCapabilities
 ): Promise<RemoteJobState> => {
-  const next: RemoteJobState = {
-    ...previous,
-    ...update,
-    schemaVersion: JOB_SCHEMA_VERSION,
-    revision: previous.revision + 1,
-    updatedAt: new Date().toISOString(),
-  };
-  await writeSshFile(sessionId, `${jobDirectory}/state.json`, `${JSON.stringify(next)}\n`);
-  return next;
+  return withRemoteStateLock(sessionId, capabilities, jobDirectory, async () => {
+    const current = await readRemoteState(sessionId, jobDirectory, previous.jobId);
+    // A caller may have read an older snapshot while the Runner advanced the
+    // state. Returning the authoritative snapshot prevents a stale terminal
+    // write from changing a completed job back to cancelled/lost.
+    if (
+      current.revision !== previous.revision ||
+      TERMINAL_STATUSES.has(current.status)
+    ) {
+      return current;
+    }
+    const next: RemoteJobState = {
+      ...current,
+      ...update,
+      schemaVersion: JOB_SCHEMA_VERSION,
+      revision: current.revision + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    // Keep the revision source used by all remote Runners in sync with the
+    // atomically replaced state file while holding the shared lock.
+    await writeInternalSshFile(
+      sessionId,
+      `${jobDirectory}/revision`,
+      `${next.revision}\n`
+    );
+    await writeInternalSshFile(
+      sessionId,
+      `${jobDirectory}/state.json`,
+      `${JSON.stringify(next)}\n`
+    );
+    return next;
+  });
 };
 
 const getUnitName = (jobId: string): string =>
@@ -494,9 +595,49 @@ const getTmuxSessionName = (jobId: string): string =>
 const runShell = (
   sessionId: string,
   script: string,
-  timeoutMs = 15_000
+  timeoutMs = 15_000,
+  signal?: AbortSignal
 ): Promise<string> =>
-  executeSshCommand(sessionId, `sh -lc ${shellQuote(script)}`, { timeoutMs });
+  executeSshCommand(sessionId, `sh -lc ${shellQuote(script)}`, { timeoutMs, signal });
+
+const runConfirmedLaunchShell = async (
+  sessionId: string,
+  script: string,
+  signal?: AbortSignal
+): Promise<string> => {
+  const marker = `__snow_remote_job_launch_${randomUUID()}__`;
+  const output = await runShell(
+    sessionId,
+    [
+      "set +e",
+      `(${script})`,
+      "status=$?",
+      `printf '\\n${marker}:%s\\n' \"$status\"`,
+      "exit 0",
+    ].join("\n"),
+    15_000,
+    signal
+  );
+  const match = output.match(new RegExp(`\\n${marker}:(\\d+)\\n?$`));
+  if (!match) {
+    throw new Error("Remote Job backend launch acknowledgement was not confirmed");
+  }
+  const status = Number(match[1]);
+  if (status !== 0) {
+    throw new RemoteJobLaunchRejectedError(
+      `Remote Job backend rejected the launch with exit code ${status}`
+    );
+  }
+  return output.slice(0, match.index).trim();
+};
+
+const withSystemdUserEnvironment = (command: string): string =>
+  [
+    'runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
+    'export XDG_RUNTIME_DIR="$runtime_dir"',
+    'export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$runtime_dir/bus}"',
+    command,
+  ].join("\n");
 
 const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
   "snow-agent": {
@@ -508,7 +649,8 @@ const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
         context.sessionId,
         context.capabilities,
         context.jobDirectory,
-        context.jobId
+        context.jobId,
+        context.signal
       );
     },
     async inspect(context): Promise<"active" | "inactive"> {
@@ -532,31 +674,36 @@ const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
     async launch(context): Promise<void> {
       const unit = getUnitName(context.jobId);
       const timeoutSeconds = Math.max(1, Math.ceil(context.timeoutMs / 1000));
-      await runShell(
+      await runConfirmedLaunchShell(
         context.sessionId,
-        [
-          "exec systemd-run --user --no-block --quiet",
+        withSystemdUserEnvironment([
+          "systemd-run --user --no-block --quiet",
           `--unit ${shellQuote(unit)}`,
           `--property=${shellQuote(`RuntimeMaxSec=${timeoutSeconds}`)}`,
           `--property=${shellQuote("KillMode=control-group")}`,
           `/bin/sh ${shellQuote(`${context.jobDirectory}/runner.sh`)}`,
-        ].join(" ")
+        ].join(" ")),
+        context.signal
       );
     },
     async inspect(context): Promise<"active" | "inactive"> {
       const unit = getUnitName(context.jobId);
       const output = await runShell(
         context.sessionId,
-        `if systemctl --user is-active --quiet ${shellQuote(
-          unit
-        )}; then printf active; else printf inactive; fi`
+        withSystemdUserEnvironment(
+          `if systemctl --user is-active --quiet ${shellQuote(
+            unit
+          )}; then printf active; else printf inactive; fi`
+        )
       );
       return output.trim() === "active" ? "active" : "inactive";
     },
     async cancel(context): Promise<void> {
       await runShell(
         context.sessionId,
-        `systemctl --user stop ${shellQuote(getUnitName(context.jobId))} || true`
+        withSystemdUserEnvironment(
+          `systemctl --user stop ${shellQuote(getUnitName(context.jobId))} || true`
+        )
       );
     },
   },
@@ -565,13 +712,14 @@ const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
     isAvailable: (capabilities) => capabilities.tmux,
     supportsInteractiveAttach: true,
     async launch(context): Promise<void> {
-      await runShell(
+      await runConfirmedLaunchShell(
         context.sessionId,
         [
           "tmux -L snow-app -f /dev/null new-session -d",
           `-s ${shellQuote(getTmuxSessionName(context.jobId))}`,
           `/bin/sh ${shellQuote(`${context.jobDirectory}/runner.sh`)}`,
-        ].join(" ")
+        ].join(" "),
+        context.signal
       );
     },
     async inspect(context): Promise<"active" | "inactive"> {
@@ -596,11 +744,12 @@ const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
     kind: "posix-detach",
     isAvailable: (capabilities) => capabilities.setsid && capabilities.nohup,
     async launch(context): Promise<void> {
-      const output = await runShell(
+      const output = await runConfirmedLaunchShell(
         context.sessionId,
         `nohup setsid /bin/sh ${shellQuote(
           `${context.jobDirectory}/runner.sh`
-        )} </dev/null >/dev/null 2>&1 & printf '%s' "$!"`
+        )} </dev/null >/dev/null 2>&1 & printf '%s' "$!"`,
+        context.signal
       );
       if (!/^\d+$/.test(output.trim())) {
         throw new Error("POSIX detached backend did not return a runner PID");
@@ -641,7 +790,8 @@ const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
     async launch(context): Promise<void> {
       await launchWindowsRemoteJob(
         context.sessionId,
-        `${context.jobDirectory}/runner.ps1`
+        `${context.jobDirectory}/runner.ps1`,
+        context.signal
       );
     },
     async inspect(context): Promise<"active" | "inactive"> {
@@ -682,10 +832,22 @@ const buildRunnerScript = (jobId: string, createdAt: string): string => [
   'timeout_ms=$(cat "$job_dir/timeout-ms")',
   'log_path="$job_dir/output.log"',
   'revision_path="$job_dir/revision"',
+  'state_lock="$job_dir/state.lock"',
   'runner_pid="$$"',
   'printf "%s\\n" "$runner_pid" > "$job_dir/runner.pid"',
   "chmod 600 \"$job_dir/runner.pid\" 2>/dev/null || true",
   "ulimit -f 102400 2>/dev/null || true",
+  "acquire_state_lock() {",
+  '  i=0',
+  '  while ! mkdir -- "$state_lock" 2>/dev/null; do',
+  '    i=$((i + 1))',
+  `    if [ "$i" -ge ${STATE_LOCK_ATTEMPTS} ]; then return 75; fi`,
+  '    sleep 0.025',
+  '  done',
+  "}",
+  "release_state_lock() {",
+  '  rmdir -- "$state_lock" 2>/dev/null || true',
+  "}",
   "next_revision() {",
   '  current=$(cat "$revision_path" 2>/dev/null || printf 0)',
   '  current=$((current + 1))',
@@ -696,6 +858,11 @@ const buildRunnerScript = (jobId: string, createdAt: string): string => [
   '  status="$1"',
   '  exit_code="${2:-null}"',
   '  reason="${3:-}"',
+  '  acquire_state_lock',
+  "  if [ -f \"$job_dir/state.json\" ] && grep -Eq '\"status\":\"(succeeded|failed|timed_out|cancelled|lost|launch_failed|indeterminate)\"' \"$job_dir/state.json\"; then",
+  '    release_state_lock',
+  '    return 0',
+  '  fi',
   '  revision=$(next_revision)',
   '  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")',
   '  completed=""',
@@ -704,20 +871,44 @@ const buildRunnerScript = (jobId: string, createdAt: string): string => [
   '  if [ -n "$reason" ]; then reason_json=",\\"reason\\":\\"$reason\\"" ; fi',
   '  printf "{\\"schemaVersion\\":1,\\"jobId\\":\\"%s\\",\\"status\\":\\"%s\\",\\"revision\\":%s,\\"backend\\":\\"%s\\",\\"runnerPid\\":%s,\\"createdAt\\":\\"%s\\",\\"updatedAt\\":\\"%s\\"%s%s,\\"exitCode\\":%s}\\n" "$job_id" "$status" "$revision" "$backend" "$runner_pid" "$created_at" "$now" "$completed" "$reason_json" "$exit_code" > "$job_dir/state.json.tmp"',
   '  mv -f -- "$job_dir/state.json.tmp" "$job_dir/state.json"',
+  '  release_state_lock',
   "}",
   'write_state launching null ""',
   'write_state running null ""',
+  'if [ -f "$job_dir/cancel.request" ]; then',
+  '  write_state cancelled null "cancelled before command start"',
+  '  exit 0',
+  "fi",
   'timeout_seconds=$(( (timeout_ms + 999) / 1000 ))',
-  '( sleep "$timeout_seconds"; if [ -f "$job_dir/command.pid" ] && kill -0 "$(cat "$job_dir/command.pid")" 2>/dev/null; then touch "$job_dir/timeout.request"; kill -TERM "$(cat "$job_dir/command.pid")" 2>/dev/null || true; fi ) &',
-  'watchdog_pid="$!"',
-  '"/bin/sh" "$job_dir/command.sh" >> "$log_path" 2>&1 &',
+  "terminate_command_group() {",
+  '  signal="$1"',
+  '  kill -"$signal" -- "-$command_pgid" 2>/dev/null || kill -"$signal" "$command_pid" 2>/dev/null || true',
+  "}",
+  "command_group_active() {",
+  '  kill -0 -- "-$command_pgid" 2>/dev/null || kill -0 "$command_pid" 2>/dev/null',
+  "}",
+  'setsid /bin/sh "$job_dir/command.sh" >> "$log_path" 2>&1 &',
   'command_pid="$!"',
+  'command_pgid="$command_pid"',
   'printf "%s\\n" "$command_pid" > "$job_dir/command.pid"',
+  'printf "%s\\n" "$command_pgid" > "$job_dir/command.pgid"',
+  '( sleep "$timeout_seconds"; touch "$job_dir/timeout.request" ) &',
+  'watchdog_pid="$!"',
   'cancelled=0',
-  'while kill -0 "$command_pid" 2>/dev/null; do',
-  '  if [ -f "$job_dir/cancel.request" ]; then',
+  'timed_out=0',
+  'termination_deadline=0',
+  'while command_group_active; do',
+  '  if [ -f "$job_dir/timeout.request" ] && [ "$timed_out" -eq 0 ]; then',
+  '    timed_out=1',
+  `    termination_deadline=$(( $(date +%s) + ${POSIX_CANCEL_GRACE_SECONDS} ))`,
+  '    terminate_command_group TERM',
+  '  elif [ -f "$job_dir/cancel.request" ] && [ "$cancelled" -eq 0 ] && [ "$timed_out" -eq 0 ]; then',
   '    cancelled=1',
-  '    kill -TERM "$command_pid" 2>/dev/null || true',
+  `    termination_deadline=$(( $(date +%s) + ${POSIX_CANCEL_GRACE_SECONDS} ))`,
+  '    terminate_command_group TERM',
+  '  elif [ "$termination_deadline" -gt 0 ] && [ "$(date +%s)" -ge "$termination_deadline" ]; then',
+  '    terminate_command_group KILL',
+  '    termination_deadline=$(( $(date +%s) + 1 ))',
   "  fi",
   "  sleep 1",
   "done",
@@ -780,11 +971,11 @@ const verifyBackendLiveness = async (
       if (backend.kind === "systemd-user") {
         await runShell(
           sessionId,
-          [
+          withSystemdUserEnvironment([
             "exec systemd-run --user --no-block --quiet",
             `--unit ${shellQuote(`snow-app-probe-${probeId.replace(/-/g, "")}`)}`,
             `/bin/sh -lc ${shellQuote(probeScript)}`,
-          ].join(" ")
+          ].join(" "))
         );
       } else if (backend.kind === "tmux") {
         await runShell(
@@ -865,17 +1056,16 @@ const getRemoteOutput = async (
   outputPath: string,
   offset: number,
   limit: number
-): Promise<string> => {
+): Promise<Buffer> => {
   const normalizedOffset = Math.max(0, Math.floor(offset));
   const normalizedLimit = Math.min(
     MAX_OUTPUT_READ_BYTES,
     Math.max(1, Math.floor(limit))
   );
-  const output = await readSshFileRange(sessionId, outputPath, {
+  return readSshFileRange(sessionId, outputPath, {
     offset: normalizedOffset,
     length: normalizedLimit,
   });
-  return output.toString("utf8");
 };
 
 const buildBinding = (params: {
@@ -886,6 +1076,7 @@ const buildBinding = (params: {
   backend: RemoteJobBackendKind;
   jobTokenHash: string;
   createdAt: string;
+  cancellationPolicy: RemoteJobCancellationPolicy;
   conversationId?: string;
   toolCallId?: string;
 }): RemoteJobBinding => ({
@@ -894,8 +1085,9 @@ const buildBinding = (params: {
   workspaceId: params.workspaceId,
   profileId: params.workspacePath.replace(/^ssh:\/\//, "").split("/")[0],
   commandHash: commandHash(params.command),
-  displayCommand: redactCommand(params.command),
+  displayCommand: summarizeCommand(),
   backend: params.backend,
+  cancellationPolicy: params.cancellationPolicy,
   jobTokenHash: params.jobTokenHash,
   createdAt: params.createdAt,
   updatedAt: params.createdAt,
@@ -944,6 +1136,9 @@ const readExistingJob = async (
     backend:
       state.backend ??
       (isBackendKind(manifest.backend) ? manifest.backend : expected.backend),
+    cancellationPolicy: isCancellationPolicy(manifest.cancellationPolicy)
+      ? manifest.cancellationPolicy
+      : expected.cancellationPolicy ?? "cancel_remote",
     status: state.status,
     revision: state.revision,
     updatedAt: state.updatedAt,
@@ -951,8 +1146,13 @@ const readExistingJob = async (
 };
 
 export const startRemoteJob = async (
-  request: RemoteJobStartRequest
+  request: RemoteJobStartRequest,
+  options?: RemoteJobStartOptions
 ): Promise<RemoteJobBinding> => {
+  const signal = options?.signal;
+  if (signal?.aborted) {
+    throw new Error("Remote Job start was cancelled before submission");
+  }
   const workspacePath = normalizeWorkspacePath(request.workspacePath);
   const command = request.command;
   if (!command.trim()) {
@@ -980,6 +1180,10 @@ export const startRemoteJob = async (
   }
 
   const createdAt = existingBinding?.createdAt ?? new Date().toISOString();
+  const cancellationPolicy =
+    options?.cancellationPolicy ??
+    existingBinding?.cancellationPolicy ??
+    "cancel_remote";
   const bindingFor = (backend: RemoteJobBackendKind): RemoteJobBinding =>
     buildBinding({
       jobId,
@@ -994,6 +1198,7 @@ export const startRemoteJob = async (
         existingBinding?.jobTokenHash ??
         createHash("sha256").update(randomUUID()).digest("hex"),
       createdAt,
+      cancellationPolicy,
       conversationId:
         existingBinding?.conversationId ??
         request.conversationId?.trim() ??
@@ -1019,13 +1224,16 @@ export const startRemoteJob = async (
       recoveryBinding,
       existingBinding?.jobTokenHash
     );
-  });
+  }, { signal });
   if (recovered) {
     upsertBinding(recovered);
     return recovered;
   }
 
   const backend = await selectBackend(workspacePath, request.backend);
+  if (signal?.aborted) {
+    throw new Error("Remote Job start was cancelled before durable submission");
+  }
   const binding = bindingFor(backend.kind);
   upsertBinding(binding);
 
@@ -1056,6 +1264,7 @@ export const startRemoteJob = async (
         createdAt,
         timeoutMs,
         backend: backend.kind,
+        cancellationPolicy,
       };
       const agentRequest = {
         schemaVersion: JOB_SCHEMA_VERSION,
@@ -1089,25 +1298,25 @@ export const startRemoteJob = async (
       ).replace(/^\/([A-Za-z]:\/)/, "$1");
       const jobFiles = capabilities.platform === "windows"
         ? [
-            writeSshFile(
+            writeInternalSshFile(
               sessionId,
               `${temporaryDirectory}/command.ps1`,
               buildWindowsCommandScript(workingDirectory)
             ),
-            writeSshFile(sessionId, `${temporaryDirectory}/command.txt`, command),
-            writeSshFile(
+            writeInternalSshFile(sessionId, `${temporaryDirectory}/command.txt`, command),
+            writeInternalSshFile(
               sessionId,
               `${temporaryDirectory}/runner.ps1`,
               buildWindowsRunnerScript(jobId, createdAt)
             ),
           ]
         : [
-            writeSshFile(
+            writeInternalSshFile(
               sessionId,
               `${temporaryDirectory}/command.sh`,
               buildCommandScript(workingDirectory, command)
             ),
-            writeSshFile(
+            writeInternalSshFile(
               sessionId,
               `${temporaryDirectory}/runner.sh`,
               buildRunnerScript(jobId, createdAt)
@@ -1115,26 +1324,32 @@ export const startRemoteJob = async (
           ];
       await Promise.all([
         ...jobFiles,
-        writeSshFile(
+        writeInternalSshFile(
           sessionId,
           `${temporaryDirectory}/manifest.json`,
           `${JSON.stringify(manifest)}\n`
         ),
-        writeSshFile(
+        writeInternalSshFile(
           sessionId,
           `${temporaryDirectory}/agent-request.json`,
           `${JSON.stringify(agentRequest)}\n`
         ),
-        writeSshFile(sessionId, `${temporaryDirectory}/backend`, `${backend.kind}\n`),
-        writeSshFile(sessionId, `${temporaryDirectory}/timeout-ms`, `${timeoutMs}\n`),
-        writeSshFile(sessionId, `${temporaryDirectory}/revision`, "0\n"),
-        writeSshFile(
+        writeInternalSshFile(sessionId, `${temporaryDirectory}/backend`, `${backend.kind}\n`),
+        writeInternalSshFile(sessionId, `${temporaryDirectory}/timeout-ms`, `${timeoutMs}\n`),
+        writeInternalSshFile(sessionId, `${temporaryDirectory}/revision`, "0\n"),
+        writeInternalSshFile(
           sessionId,
           `${temporaryDirectory}/state.json`,
           `${JSON.stringify(initialState)}\n`
         ),
-        writeSshFile(sessionId, `${temporaryDirectory}/output.log`, ""),
+        writeInternalSshFile(sessionId, `${temporaryDirectory}/output.log`, ""),
       ]);
+      if (signal?.aborted) {
+        await removeRemoteJobPath(sessionId, capabilities, temporaryDirectory).catch(
+          () => undefined
+        );
+        throw new Error("Remote Job start was cancelled before durable submission");
+      }
       if (capabilities.platform === "posix") {
         await runShell(
           sessionId,
@@ -1147,6 +1362,12 @@ export const startRemoteJob = async (
             `${temporaryDirectory}/backend`
           )} ${shellQuote(`${temporaryDirectory}/timeout-ms`)}`
         );
+      }
+      if (signal?.aborted) {
+        await removeRemoteJobPath(sessionId, capabilities, temporaryDirectory).catch(
+          () => undefined
+        );
+        throw new Error("Remote Job start was cancelled before durable submission");
       }
       try {
         await moveRemoteJobDirectory(
@@ -1171,6 +1392,30 @@ export const startRemoteJob = async (
         }
         throw error;
       }
+      const cancelBeforeLaunch = async (): Promise<RemoteJobBinding> => {
+        const cancelled = await writeRemoteState(
+          sessionId,
+          jobDirectory,
+          initialState,
+          {
+            status: "cancelled",
+            reason: "cancelled before remote backend launch",
+          },
+          capabilities
+        );
+        const updated = {
+          ...binding,
+          status: cancelled.status,
+          revision: cancelled.revision,
+          updatedAt: cancelled.updatedAt,
+          lastError: cancelled.reason,
+        };
+        upsertBinding(updated);
+        return updated;
+      };
+      if (signal?.aborted) {
+        return cancelBeforeLaunch();
+      }
       if (backend.kind !== "snow-agent") {
         await createRemoteJobDirectory(
           sessionId,
@@ -1178,13 +1423,17 @@ export const startRemoteJob = async (
           `${jobDirectory}/launch.lock`
         );
       }
+      if (signal?.aborted) {
+        return cancelBeforeLaunch();
+      }
 
       try {
         const launching = await writeRemoteState(
           sessionId,
           jobDirectory,
           initialState,
-          { status: "launching", backend: backend.kind }
+          { status: "launching", backend: backend.kind },
+          capabilities
         );
         await backend.launch({
           sessionId,
@@ -1192,12 +1441,28 @@ export const startRemoteJob = async (
           jobId,
           timeoutMs,
           capabilities,
+          signal,
         });
+        if (signal?.aborted && cancellationPolicy === "cancel_remote") {
+          await writeInternalSshFile(
+            sessionId,
+            `${jobDirectory}/cancel.request`,
+            `${new Date().toISOString()}\n`
+          ).catch(() => undefined);
+        }
+        const observed = await readRemoteState(sessionId, jobDirectory, jobId).catch(
+          () => launching
+        );
         const accepted: RemoteJobBinding = {
           ...binding,
-          status: launching.status,
-          revision: launching.revision,
-          updatedAt: launching.updatedAt,
+          status: observed.status,
+          revision: observed.revision,
+          updatedAt: observed.updatedAt,
+          lastError: signal?.aborted
+            ? cancellationPolicy === "cancel_remote"
+              ? "cancellation requested after remote launch acknowledgement"
+              : "local wait detached after remote launch acknowledgement"
+            : undefined,
         };
         upsertBinding(accepted);
         return accepted;
@@ -1205,33 +1470,68 @@ export const startRemoteJob = async (
         const current = await readRemoteState(sessionId, jobDirectory, jobId).catch(
           () => initialState
         );
-        const failed = await writeRemoteState(sessionId, jobDirectory, current, {
-          status: "launch_failed",
-          reason: error instanceof Error ? error.message.slice(0, 300) : "launch failure",
-        }).catch(() => ({
+        if (signal?.aborted && cancellationPolicy === "cancel_remote") {
+          await writeInternalSshFile(
+            sessionId,
+            `${jobDirectory}/cancel.request`,
+            `${new Date().toISOString()}\n`
+          ).catch(() => undefined);
+          const updated = {
+            ...binding,
+            status: current.status,
+            revision: current.revision,
+            updatedAt: current.updatedAt,
+            lastError: "cancellation requested; awaiting remote runner confirmation",
+          };
+          upsertBinding(updated);
+          return updated;
+        }
+        const confirmedRejection = error instanceof RemoteJobLaunchRejectedError;
+        const outcome = await writeRemoteState(
+          sessionId,
+          jobDirectory,
+          current,
+          {
+            status: confirmedRejection ? "launch_failed" : "indeterminate",
+            reason:
+              confirmedRejection && error instanceof Error
+                ? error.message.slice(0, 240)
+                : error instanceof Error
+                ? `launch acknowledgement was not confirmed: ${error.message.slice(0, 240)}`
+                : "launch acknowledgement was not confirmed",
+          },
+          capabilities
+        ).catch(() => ({
           ...current,
-          status: "indeterminate" as const,
+          status: (confirmedRejection ? "launch_failed" : "indeterminate") as const,
           revision: current.revision + 1,
           updatedAt: new Date().toISOString(),
         }));
         const updated = {
           ...binding,
-          status: failed.status,
-          revision: failed.revision,
-          updatedAt: failed.updatedAt,
-          lastError: failed.reason,
+          status: outcome.status,
+          revision: outcome.revision,
+          updatedAt: outcome.updatedAt,
+          lastError: outcome.reason,
         };
         upsertBinding(updated);
-        throw error;
+        return updated;
       }
-    });
+    }, { signal });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const current = getBinding(jobId);
-    if (current?.status === "preparing" || current?.status === "launching") {
+    if (
+      !signal?.aborted &&
+      (current?.status === "preparing" || current?.status === "launching")
+    ) {
       updateBinding(jobId, {
         status: "indeterminate",
         lastError: message,
+      });
+    } else if (signal?.aborted) {
+      updateBinding(jobId, {
+        lastError: "Remote Job start was cancelled before durable submission",
       });
     }
     throw error;
@@ -1272,34 +1572,42 @@ export const getRemoteJob = async (
         })
         .catch(() => "active" as const);
       if (activity === "inactive") {
-        resolvedState = await writeRemoteState(sessionId, jobDirectory, state, {
-          status: "lost",
-          reason: "backend inactive before a terminal state was recorded",
-        });
+        resolvedState = await writeRemoteState(
+          sessionId,
+          jobDirectory,
+          state,
+          {
+            status: "lost",
+            reason: "backend inactive before a terminal state was recorded",
+          },
+          capabilities
+        );
       }
     }
-    const output = await getRemoteOutput(
+    const outputBytes = await getRemoteOutput(
       sessionId,
       `${jobDirectory}/output.log`,
       offset,
       limit
     );
+    const output = outputBytes.toString("utf8");
     const updated = {
       ...binding,
       backend: resolvedState.backend ?? binding.backend,
       status: resolvedState.status,
       revision: resolvedState.revision,
       updatedAt: resolvedState.updatedAt,
-      lastOutputOffset: offset + Buffer.byteLength(output, "utf8"),
+      lastOutputOffset: offset + outputBytes.length,
     };
     upsertBinding(updated);
     return {
       job: updated,
       state: resolvedState,
       output,
+      outputBytes,
       offset,
       nextOffset: updated.lastOutputOffset,
-      eof: Buffer.byteLength(output, "utf8") < limit,
+      eof: outputBytes.length < limit,
     };
   });
 };
@@ -1350,23 +1658,22 @@ export const cancelRemoteJob = async (jobId: string): Promise<RemoteJobBinding> 
       upsertBinding(unchanged);
       return unchanged;
     }
-    await writeSshFile(sessionId, `${jobDirectory}/cancel.request`, "");
-    await remoteBackends[state.backend ?? binding.backend].cancel({
+    // The runner owns process termination and is the only writer that can
+    // confirm `cancelled`. A request alone must not be presented as completion.
+    await writeInternalSshFile(
       sessionId,
-      jobDirectory,
-      jobId,
-      timeoutMs: DEFAULT_JOB_TIMEOUT_MS,
-      capabilities,
-    });
-    const cancelled = await writeRemoteState(sessionId, jobDirectory, state, {
-      status: "cancelled",
-      reason: "cancelled by user",
-    });
+      `${jobDirectory}/cancel.request`,
+      `${new Date().toISOString()}\n`
+    );
+    const observed = await readRemoteState(sessionId, jobDirectory, jobId);
     const updated = {
       ...binding,
-      status: cancelled.status,
-      revision: cancelled.revision,
-      updatedAt: cancelled.updatedAt,
+      status: observed.status,
+      revision: observed.revision,
+      updatedAt: observed.updatedAt,
+      lastError: TERMINAL_STATUSES.has(observed.status)
+        ? undefined
+        : "cancellation requested; awaiting remote runner confirmation",
     };
     upsertBinding(updated);
     return updated;

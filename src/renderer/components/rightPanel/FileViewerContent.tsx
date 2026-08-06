@@ -276,7 +276,7 @@ export function FileViewerContent({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState(false);
   const [saveGuarantee, setSaveGuarantee] = useState<
-    "strong_atomic" | "atomic_best_effort" | null
+    "strong_atomic" | "atomic_best_effort" | "compatibility" | null
   >(null);
   const [draftStatus, setDraftStatus] = useState<"pending" | "conflict" | null>(
     null
@@ -664,10 +664,13 @@ export function FileViewerContent({
     setSaveGuarantee(null);
     try {
       let remoteSave:
-        | { guarantee: "strong_atomic" | "atomic_best_effort"; version: NonNullable<FileContentResult["remoteVersion"]> }
+        | {
+            guarantee: "strong_atomic" | "atomic_best_effort" | "compatibility";
+            version: NonNullable<FileContentResult["remoteVersion"]>;
+          }
         | undefined;
       if (isSsh) {
-        if (!sshSessionId || !sshWorkspaceRoot || !content?.remoteVersion) {
+        if (!sshSessionId || !sshWorkspaceId || !content?.remoteVersion) {
           throw new Error("Remote file save is missing its verified workspace or version");
         }
         remoteSave = await window.snow.sshWriteFile(
@@ -675,7 +678,7 @@ export function FileViewerContent({
           filePath,
           editedContent,
           {
-            workspaceRoot: sshWorkspaceRoot,
+            workspaceId: sshWorkspaceId,
             expectedVersion: content.remoteVersion,
           }
         );
@@ -796,6 +799,7 @@ export function FileViewerContent({
         isSsh,
         sshSessionId: isSsh ? sshSessionId : undefined,
         sshWorkspaceRoot: isSsh ? sshWorkspaceRoot : undefined,
+        sshWorkspaceId: isSsh ? sshWorkspaceId : undefined,
         focusLine: resolved.line,
       });
     },
@@ -1365,6 +1369,10 @@ export function FileViewerContent({
                 : saveGuarantee === "atomic_best_effort"
                 ? t("rightPanel.fileViewerSavedAtomicBestEffort", {
                     defaultValue: "Saved (atomic best effort)",
+                  })
+                : saveGuarantee === "compatibility"
+                ? t("rightPanel.fileViewerSavedCompatibility", {
+                    defaultValue: "Saved (compatibility mode)",
                   })
                 : t("rightPanel.fileViewerSaved", {
                     defaultValue: "Saved",

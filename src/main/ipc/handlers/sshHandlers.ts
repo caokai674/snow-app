@@ -437,29 +437,37 @@ export const registerSshHandlers = (_native: NativeBridge): void => {
     }
   );
 
-  const normalizeSshFileWriteOptions = (
+  const normalizeSshFileWriteOptions = async (
     sessionId: string,
     value: unknown
-  ): { expectedVersion?: SshFileVersion; workspaceRoot: string } => {
+  ): Promise<{ expectedVersion: SshFileVersion; workspaceRoot: string }> => {
     if (typeof value !== "object" || value === null) {
       throw new Error("Atomic remote file save requires write options");
     }
     const input = value as Record<string, unknown>;
-    if (
-      typeof input.workspaceRoot !== "string" ||
-      !input.workspaceRoot.trim().startsWith("ssh://")
-    ) {
-      throw new Error("Atomic remote file save requires an SSH workspace root");
+    if (input.workspaceRoot !== undefined) {
+      throw new Error("Atomic remote file save does not accept workspaceRoot");
+    }
+    if (typeof input.workspaceId !== "string" || !input.workspaceId.trim()) {
+      throw new Error("Atomic remote file save requires a workspace ID");
+    }
+    if (input.expectedVersion === undefined) {
+      throw new Error("Atomic remote file save requires an expected file version");
+    }
+    const workspaceId = input.workspaceId.trim();
+    const workspaces = await _native.listWorkspaceDirectories();
+    const workspace = workspaces.find(
+      (directory) => directory.directoryId === workspaceId
+    );
+    if (!workspace || workspace.kind !== "ssh") {
+      throw new Error("Atomic remote file save workspace is not an SSH workspace");
     }
     return {
       workspaceRoot: resolveSshWorkspaceRoot(
         sessionId,
-        input.workspaceRoot.trim()
+        workspace.path
       ),
-      expectedVersion:
-        input.expectedVersion === undefined
-          ? undefined
-          : normalizeSshFileVersion(input.expectedVersion),
+      expectedVersion: normalizeSshFileVersion(input.expectedVersion),
     };
   };
 
@@ -781,7 +789,7 @@ export const registerSshHandlers = (_native: NativeBridge): void => {
         sessionId.trim(),
         remotePath.trim(),
         content,
-        normalizeSshFileWriteOptions(sessionId.trim(), options)
+        await normalizeSshFileWriteOptions(sessionId.trim(), options)
       );
     }
   );

@@ -76,7 +76,7 @@ export const sshApi = {
     sessionId: string,
     remotePath: string,
     content: string,
-    options?: SshFileWriteOptions
+    options: SshFileWriteOptions
   ): Promise<SshFileWriteResult> =>
     ipcRenderer.invoke("ssh:write-file", sessionId, remotePath, content, options),
   sshDeleteEntry: (sessionId: string, remotePath: string): Promise<void> =>

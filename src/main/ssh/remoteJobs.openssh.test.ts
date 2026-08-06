@@ -40,10 +40,14 @@ import {
   disconnectAllSsh,
   disconnectSsh,
   executeSshCommand,
+  probeSshCapabilities,
 } from "./sshManager";
 import {
   cancelRemoteJob,
   getRemoteJob,
+  getRemoteJobAnalysisContext,
+  getRemoteJobBackendsForTesting,
+  RemoteJobLaunchRejectedError,
   startRemoteJob,
   type RemoteJobBackendKind,
   type RemoteJobOutput,
@@ -53,6 +57,7 @@ import {
 const enabled = process.env.SNOW_SSH_TEST === "1";
 const host = process.env.SNOW_SSH_TEST_HOST ?? "127.0.0.1";
 const port = Number(process.env.SNOW_SSH_TEST_PORT ?? "0");
+const fixture = process.env.SNOW_SSH_TEST_FIXTURE ?? "full";
 const openSsh = enabled ? describe : describe.skip;
 const originalBindingsDir = process.env.SNOW_REMOTE_JOB_BINDINGS_DIR;
 let bindingsDirectory = "";
@@ -139,7 +144,13 @@ openSsh("Durable Remote Job OpenSSH fault injection", () => {
     }
   });
 
-  for (const backend of ["posix-detach", "tmux"] as const) {
+  const backends =
+    fixture === "full"
+      ? (["posix-detach", "tmux"] as const)
+      : fixture === "systemd-user"
+        ? (["systemd-user"] as const)
+        : (["posix-detach"] as const);
+  for (const backend of backends) {
     it(`${backend} survives SSH disconnection, is idempotent, and restores a deleted Binding`, async () => {
       const jobId = randomUUID();
       const executionsPath = `/home/snow/${jobId}.executions`;
@@ -192,19 +203,164 @@ openSsh("Durable Remote Job OpenSSH fault injection", () => {
     }, 30_000);
   }
 
+  it("creates and repairs the POSIX Job state root with mode 0700", async () => {
+    const sessionId = await connectSsh(passwordParams());
+    try {
+      await executeSshCommand(
+        sessionId,
+        "mkdir -p -- /home/snow/.local/state/snow-app/jobs && chmod 755 -- /home/snow/.local/state/snow-app/jobs"
+      );
+    } finally {
+      disconnectSsh(sessionId);
+    }
+
+    await startRemoteJob({
+      workspacePath: workspacePath(),
+      command: "true",
+      timeoutMs: 10_000,
+      jobId: randomUUID(),
+      backend: "posix-detach",
+    });
+
+    const verificationSession = await connectSsh(passwordParams());
+    try {
+      await expect(
+        executeSshCommand(
+          verificationSession,
+          "stat -c %a -- /home/snow/.local/state/snow-app/jobs"
+        )
+      ).resolves.toBe("700\n");
+    } finally {
+      disconnectSsh(verificationSession);
+    }
+  }, 30_000);
+
+  it("keeps a submitted Job indeterminate when its launch acknowledgement is lost", async () => {
+    const jobId = randomUUID();
+    const request: RemoteJobStartRequest = {
+      workspacePath: workspacePath(),
+      command: "printf 'ack-started\\n'; sleep 5; printf 'ack-finished\\n'",
+      timeoutMs: 10_000,
+      jobId,
+      backend: "posix-detach",
+    };
+    const backend = getRemoteJobBackendsForTesting()["posix-detach"];
+    const launch = backend.launch;
+    backend.launch = async (context) => {
+      await launch(context);
+      throw new Error("simulated SSH disconnect after launch submission");
+    };
+    try {
+      const submitted = await startRemoteJob(request);
+      expect(submitted.status).toBe("indeterminate");
+    } finally {
+      backend.launch = launch;
+    }
+
+    const result = await getRemoteJob(jobId, { offset: 0 });
+    expect(result.state.status).toBe("indeterminate");
+    expect(result.state.reason).toMatch(/acknowledgement was not confirmed/i);
+  }, 30_000);
+
+  it("records a confirmed backend rejection as launch_failed", async () => {
+    const jobId = randomUUID();
+    const backend = getRemoteJobBackendsForTesting()["posix-detach"];
+    const launch = backend.launch;
+    backend.launch = async () => {
+      throw new RemoteJobLaunchRejectedError("test backend rejected launch");
+    };
+    try {
+      const submitted = await startRemoteJob({
+        workspacePath: workspacePath(),
+        command: "printf should-not-run",
+        timeoutMs: 10_000,
+        jobId,
+        backend: "posix-detach",
+      });
+      expect(submitted.status).toBe("launch_failed");
+    } finally {
+      backend.launch = launch;
+    }
+
+    await expect(getRemoteJob(jobId, { offset: 0 })).resolves.toMatchObject({
+      state: { status: "launch_failed", reason: "test backend rejected launch" },
+    });
+  }, 30_000);
+
+  it("recovers a running Job after the main-process module is reloaded", async () => {
+    const jobId = randomUUID();
+    await startRemoteJob({
+      workspacePath: workspacePath(),
+      command: "printf 'restart-started\\n'; sleep 5; printf 'restart-finished\\n'",
+      timeoutMs: 10_000,
+      jobId,
+      backend: "posix-detach",
+    });
+    await waitFor(jobId, (result) => result.state.status === "running");
+
+    vi.resetModules();
+    const restartedRemoteJobs = await import("./remoteJobs");
+    const recovered = await restartedRemoteJobs.getRemoteJob(jobId, { offset: 0 });
+    expect(recovered.state.status).toBe("running");
+    expect(recovered.output).toContain("restart-started");
+  }, 30_000);
+
+  it("does not claim unavailable POSIX backends", async () => {
+    const sessionId = await connectSsh(passwordParams());
+    try {
+      const capabilities = await probeSshCapabilities(sessionId);
+      if (fixture === "systemd-user") {
+        expect(capabilities.systemdUser).toBe(true);
+        return;
+      }
+      if (fixture === "no-tmux") {
+        expect(capabilities.tmux).toBe(false);
+        await expect(
+          startRemoteJob({
+            workspacePath: workspacePath(),
+            command: "printf should-not-launch",
+            backend: "tmux",
+            jobId: randomUUID(),
+          })
+        ).rejects.toThrow(/tmux is unavailable|failed disconnect verification/i);
+      } else {
+        expect(capabilities.tmux).toBe(true);
+      }
+
+      if (!capabilities.systemdUser) {
+        await expect(
+          startRemoteJob({
+            workspacePath: workspacePath(),
+            command: "printf should-not-launch",
+            backend: "systemd-user",
+            jobId: randomUUID(),
+          })
+        ).rejects.toThrow(/systemd-user is unavailable|failed disconnect verification/i);
+      }
+    } finally {
+      disconnectSsh(sessionId);
+    }
+  }, 30_000);
+
   it("records cancellation and keeps prior output readable", async () => {
     const jobId = randomUUID();
     await startRemoteJob({
       workspacePath: workspacePath(),
-      command: "printf 'cancellable-start\\n'; sleep 30; printf 'must-not-complete\\n'",
+      command: [
+        "printf 'cancellable-start\\n'",
+        `sh -c 'trap "" TERM; sleep 30 & child=$!; printf "%s\\n" "$child" > /home/snow/${jobId}.child.pid; wait "$child"'`,
+        "printf 'must-not-complete\\n'",
+      ].join("; "),
       timeoutMs: 30_000,
       jobId,
       backend: "posix-detach",
     });
 
     await waitFor(jobId, (result) => result.output.includes("cancellable-start"));
-    const cancelled = await cancelRemoteJob(jobId);
-    expect(cancelled.status).toBe("cancelled");
+    const cancellationRequested = await cancelRemoteJob(jobId);
+    expect(["launching", "running", "cancelled"]).toContain(
+      cancellationRequested.status
+    );
 
     const result = await waitFor(
       jobId,
@@ -212,5 +368,107 @@ openSsh("Durable Remote Job OpenSSH fault injection", () => {
     );
     expect(result.output).toContain("cancellable-start");
     expect(result.output).not.toContain("must-not-complete");
+    const sessionId = await connectSsh(passwordParams());
+    try {
+      await expect(
+        executeSshCommand(
+          sessionId,
+          `child=$(cat /home/snow/${jobId}.child.pid); ! kill -0 "$child" 2>/dev/null`
+        )
+      ).resolves.toBe("");
+    } finally {
+      disconnectSsh(sessionId);
+    }
+  }, 30_000);
+
+  it("does not replace a runner terminal state with a stale lost snapshot", async () => {
+    const jobId = randomUUID();
+    await startRemoteJob({
+      workspacePath: workspacePath(),
+      command: "sleep 1; printf 'race-finished\\n'",
+      timeoutMs: 10_000,
+      jobId,
+      backend: "posix-detach",
+    });
+    await waitFor(jobId, (result) => result.state.status === "running");
+
+    const backend = getRemoteJobBackendsForTesting()["posix-detach"];
+    const inspect = backend.inspect;
+    backend.inspect = async (context) => {
+      await wait(1_500);
+      return "inactive";
+    };
+    try {
+      const resolved = await getRemoteJob(jobId, { offset: 0 });
+      expect(resolved.state.status).toBe("succeeded");
+      expect(resolved.output).toContain("race-finished");
+      await expect(cancelRemoteJob(jobId)).resolves.toMatchObject({
+        status: "succeeded",
+      });
+    } finally {
+      backend.inspect = inspect;
+    }
+  }, 30_000);
+
+  it("advances output offsets by bytes across a 64 KiB UTF-8 boundary", async () => {
+    const jobId = randomUUID();
+    const prefixLength = 64 * 1024 - 1;
+    await startRemoteJob({
+      workspacePath: workspacePath(),
+      command: `head -c ${prefixLength} /dev/zero | tr '\\000' x; printf '中😀\\n'`,
+      timeoutMs: 10_000,
+      jobId,
+      backend: "posix-detach",
+    });
+    await waitFor(jobId, (result) => result.state.status === "succeeded");
+
+    const first = await getRemoteJob(jobId, { offset: 0, limit: 64 * 1024 });
+    expect(first.outputBytes).toHaveLength(64 * 1024);
+    expect(first.nextOffset).toBe(64 * 1024);
+    expect(first.eof).toBe(false);
+
+    const second = await getRemoteJob(jobId, {
+      offset: first.nextOffset,
+      limit: 64 * 1024,
+    });
+    const decoder = new TextDecoder();
+    const output =
+      decoder.decode(first.outputBytes, { stream: !first.eof }) +
+      decoder.decode(second.outputBytes, { stream: !second.eof }) +
+      decoder.decode();
+    expect(output).toBe(`${"x".repeat(prefixLength)}中😀\n`);
+    expect(second.nextOffset).toBe(
+      prefixLength + Buffer.byteLength("中😀\n", "utf8")
+    );
+  }, 30_000);
+
+  it("does not persist sensitive command forms in bindings, manifests, or AI context", async () => {
+    const jobId = randomUUID();
+    const secrets = ["env-secret", "flag-secret", "header-secret", "short-secret"];
+    const job = await startRemoteJob({
+      workspacePath: workspacePath(),
+      command: `printf 'redaction-check\\n' # TOKEN=${secrets[0]} --token ${secrets[1]} -H 'Authorization: Bearer ${secrets[2]}' -p ${secrets[3]}`,
+      timeoutMs: 10_000,
+      jobId,
+      backend: "posix-detach",
+    });
+    expect(job.displayCommand).toBe("Remote command");
+
+    await waitFor(jobId, (result) => result.state.status === "succeeded");
+    const context = await getRemoteJobAnalysisContext(jobId, { offset: 0 });
+    const sessionId = await connectSsh(passwordParams());
+    try {
+      const manifest = await executeSshCommand(
+        sessionId,
+        `cat -- /home/snow/.local/state/snow-app/jobs/${jobId}/manifest.json`
+      );
+      for (const secret of secrets) {
+        expect(JSON.stringify(job)).not.toContain(secret);
+        expect(manifest).not.toContain(secret);
+        expect(context).not.toContain(secret);
+      }
+    } finally {
+      disconnectSsh(sessionId);
+    }
   }, 30_000);
 });

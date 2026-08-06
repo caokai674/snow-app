@@ -24,10 +24,12 @@ import {
   connectSsh,
   disconnectAllSsh,
   executeSshCommand,
+  isSshOperationError,
   listSshDirectory,
   readSshFile,
   setSshClientFactoryForTesting,
-  writeSshFile,
+  toSshOperationErrorResult,
+  writeInternalSshFile,
 } from "./sshManager";
 
 type ExecCallback = (
@@ -68,9 +70,47 @@ class FakeSftp {
   readonly handle = Buffer.from("fake-handle");
   handleWriteCount = 0;
   onHandleWrite: (() => void) | undefined;
+  unsupportedExtensions = false;
+  hangOperation:
+    | "lstat"
+    | "open"
+    | "write"
+    | "fsync"
+    | "close"
+    | "rename"
+    | undefined;
+  pendingOperation: string | undefined;
+  private pendingCallback: (() => void) | undefined;
+  openPaths: string[] = [];
+  renameCalls = 0;
+  sftpEndCalls = 0;
+  securityMetadata = {
+    acl: "user::rw-,group::r--,other::---",
+    xattr: "user.snow=keep",
+    securityLabel: "system_u:object_r:user_home_t:s0",
+  };
+  diskFull = false;
+  unlinkError: Error | undefined;
+  filePresent = false;
+  fileContent = Buffer.alloc(0);
   readdirCallback:
     | ((error: Error | undefined, list: Array<unknown>) => void)
     | undefined;
+
+  private hangs(operation: NonNullable<FakeSftp["hangOperation"]>, callback: () => void): boolean {
+    if (this.hangOperation !== operation) {
+      return false;
+    }
+    this.pendingOperation = operation;
+    this.pendingCallback = callback;
+    return true;
+  }
+
+  releasePendingCallback(): void {
+    const callback = this.pendingCallback;
+    this.pendingCallback = undefined;
+    callback?.();
+  }
 
   readdir(
     _path: string,
@@ -80,6 +120,12 @@ class FakeSftp {
   }
 
   createReadStream(): FakeReadStream {
+    if (this.filePresent) {
+      queueMicrotask(() => {
+        this.readStream.emit("data", this.fileContent);
+        this.readStream.emit("end");
+      });
+    }
     return this.readStream;
   }
 
@@ -87,13 +133,42 @@ class FakeSftp {
     _path: string,
     callback: (error: Error | undefined, stats: unknown) => void
   ): void {
+    const complete = (): void => {
+      if (this.filePresent) {
+        callback(undefined, {
+          size: this.fileContent.length,
+          mtime: 1,
+          mode: 0o600,
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        });
+        return;
+      }
+      const error = Object.assign(new Error("No such file"), { code: 2 });
+      callback(error, undefined);
+    };
+    if (this.hangs("lstat", complete)) {
+      return;
+    }
+    if (this.filePresent) {
+      queueMicrotask(() =>
+        callback(undefined, {
+          size: this.fileContent.length,
+          mtime: 1,
+          mode: 0o600,
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        })
+      );
+      return;
+    }
     const error = Object.assign(new Error("No such file"), { code: 2 });
     queueMicrotask(() => callback(error, undefined));
   }
 
   open(
-    _path: string,
-    _mode: string,
+    path: string,
+    mode: string,
     attributesOrCallback:
       | { mode: number }
       | ((error: Error | undefined, handle: Buffer) => void),
@@ -104,7 +179,17 @@ class FakeSftp {
     if (!done) {
       throw new Error("Missing SFTP open callback");
     }
-    queueMicrotask(() => done(undefined, this.handle));
+    this.openPaths.push(path);
+    const complete = (): void => {
+      if (mode === "w") {
+        this.filePresent = true;
+      }
+      done(undefined, this.handle);
+    };
+    if (this.hangs("open", complete)) {
+      return;
+    }
+    queueMicrotask(complete);
   }
 
   write(
@@ -115,9 +200,20 @@ class FakeSftp {
     _position: number,
     callback: (error?: Error) => void
   ): void {
-    this.handleWriteCount += 1;
-    this.onHandleWrite?.();
-    queueMicrotask(() => callback());
+    const complete = (): void => {
+      this.handleWriteCount += 1;
+      this.onHandleWrite?.();
+      if (this.diskFull) {
+        callback(Object.assign(new Error("No space left on device"), { code: "ENOSPC" }));
+        return;
+      }
+      this.fileContent = Buffer.from(_data);
+      callback();
+    };
+    if (this.hangs("write", complete)) {
+      return;
+    }
+    queueMicrotask(complete);
   }
 
   fchmod(
@@ -132,15 +228,25 @@ class FakeSftp {
     _handle: Buffer,
     callback: (error?: Error) => void
   ): void {
+    if (this.unsupportedExtensions) {
+      queueMicrotask(() => callback(Object.assign(new Error("unsupported"), { code: 8 })));
+      return;
+    }
+    if (this.hangs("fsync", () => callback())) {
+      return;
+    }
     queueMicrotask(() => callback());
   }
 
   close(_handle: Buffer, callback: (error?: Error) => void): void {
+    if (this.hangs("close", () => callback())) {
+      return;
+    }
     queueMicrotask(() => callback());
   }
 
   unlink(_path: string, callback: (error?: Error) => void): void {
-    queueMicrotask(() => callback());
+    queueMicrotask(() => callback(this.unlinkError));
   }
 
   ext_openssh_rename(
@@ -148,7 +254,24 @@ class FakeSftp {
     _newPath: string,
     callback: (error?: Error) => void
   ): void {
-    queueMicrotask(() => callback());
+    if (this.unsupportedExtensions) {
+      queueMicrotask(() => callback(Object.assign(new Error("unsupported"), { code: 8 })));
+      return;
+    }
+    const complete = (): void => {
+      this.renameCalls += 1;
+      this.filePresent = true;
+      this.securityMetadata = {
+        acl: "replaced",
+        xattr: "replaced",
+        securityLabel: "replaced",
+      };
+      callback();
+    };
+    if (this.hangs("rename", complete)) {
+      return;
+    }
+    queueMicrotask(complete);
   }
 
   rename(
@@ -156,11 +279,12 @@ class FakeSftp {
     _newPath: string,
     callback: (error?: Error) => void
   ): void {
+    this.filePresent = true;
     queueMicrotask(() => callback());
   }
 
   end(): void {
-    // No-op for the fake transport.
+    this.sftpEndCalls += 1;
   }
 }
 
@@ -300,7 +424,7 @@ describe("sshManager cancellation and host identity", () => {
     const controller = new AbortController();
     client.sftpWrapper.onHandleWrite = () => controller.abort();
 
-    const write = writeSshFile(
+    const write = writeInternalSshFile(
       sessionId,
       "/workspace/large.txt",
       Buffer.alloc(256 * 1024),
@@ -313,6 +437,172 @@ describe("sshManager cancellation and host identity", () => {
       sideEffect: "none",
     });
     expect(client.sftpWrapper.handleWriteCount).toBe(1);
+  });
+
+  it("uses visible compatibility writes when POSIX rename is unavailable", async () => {
+    setSshClientFactoryForTesting(() => {
+      const client = new FakeClient();
+      client.sftpWrapper.unsupportedExtensions = true;
+      clients.push(client);
+      return client as never;
+    });
+    const { sessionId, client } = await connectFake();
+    const originalSecurityMetadata = { ...client.sftpWrapper.securityMetadata };
+
+    await expect(writeInternalSshFile(sessionId, "/workspace/compat.txt", "compat")).resolves.toMatchObject({
+      guarantee: "compatibility",
+      durability: { fsynced: false, posixRename: false },
+      sideEffect: "committed",
+    });
+    expect(client.sftpWrapper.openPaths).toContain("/workspace/compat.txt");
+    expect(client.sftpWrapper.renameCalls).toBe(0);
+    expect(client.sftpWrapper.securityMetadata).toEqual(originalSecurityMetadata);
+  });
+
+  it("preserves inode-bound metadata when replacing an existing file", async () => {
+    setSshClientFactoryForTesting(() => {
+      const client = new FakeClient();
+      client.sftpWrapper.filePresent = true;
+      client.sftpWrapper.fileContent = Buffer.from("old");
+      clients.push(client);
+      return client as never;
+    });
+    const { sessionId, client } = await connectFake();
+    const originalSecurityMetadata = { ...client.sftpWrapper.securityMetadata };
+
+    await expect(
+      writeInternalSshFile(sessionId, "/workspace/existing.txt", "new")
+    ).resolves.toMatchObject({
+      guarantee: "compatibility",
+      durability: { fsynced: true, posixRename: false },
+      sideEffect: "committed",
+    });
+    expect(client.sftpWrapper.renameCalls).toBe(0);
+    expect(client.sftpWrapper.securityMetadata).toEqual(originalSecurityMetadata);
+  });
+
+  it.each([
+    "lstat",
+    "open",
+    "write",
+    "fsync",
+    "close",
+    "rename",
+  ] as const)("settles cancellation when SFTP %s never calls back", async (operation) => {
+    setSshClientFactoryForTesting(() => {
+      const client = new FakeClient();
+      client.sftpWrapper.hangOperation = operation;
+      clients.push(client);
+      return client as never;
+    });
+    const { sessionId, client } = await connectFake();
+    const controller = new AbortController();
+    const pending = writeInternalSshFile(
+      sessionId,
+      "/workspace/hung.txt",
+      "contents",
+      { signal: controller.signal }
+    );
+
+    await vi.waitFor(() => {
+      expect(client.sftpWrapper.pendingOperation).toBe(operation);
+    });
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({
+      code: "SSH_OPERATION_CANCELLED",
+      operation: "sftp_atomic_write",
+      sideEffect: operation === "rename" ? "possible" : "none",
+    });
+    expect(client.sftpWrapper.sftpEndCalls).toBeGreaterThan(0);
+    client.sftpWrapper.releasePendingCallback();
+  });
+
+  it("reports possible side effects when an in-place compatibility write is cancelled", async () => {
+    setSshClientFactoryForTesting(() => {
+      const client = new FakeClient();
+      client.sftpWrapper.filePresent = true;
+      client.sftpWrapper.fileContent = Buffer.from("old");
+      client.sftpWrapper.hangOperation = "write";
+      clients.push(client);
+      return client as never;
+    });
+    const { sessionId, client } = await connectFake();
+    const controller = new AbortController();
+    const pending = writeInternalSshFile(
+      sessionId,
+      "/workspace/existing.txt",
+      "new",
+      { signal: controller.signal }
+    );
+
+    await vi.waitFor(() => {
+      expect(client.sftpWrapper.pendingOperation).toBe("write");
+    });
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({
+      code: "SSH_OPERATION_CANCELLED",
+      sideEffect: "possible",
+    });
+  });
+
+  it("preserves the target side-effect boundary when SFTP reports ENOSPC", async () => {
+    setSshClientFactoryForTesting(() => {
+      const client = new FakeClient();
+      client.sftpWrapper.diskFull = true;
+      clients.push(client);
+      return client as never;
+    });
+    const { sessionId, client } = await connectFake();
+
+    await expect(writeInternalSshFile(sessionId, "/workspace/full.txt", "full")).rejects.toMatchObject({
+      code: "SSH_FILE_WRITE_FAILED",
+      sideEffect: "none",
+    });
+    expect(client.sftpWrapper.handleWriteCount).toBe(1);
+  });
+
+  it("keeps cleanup failure details on an SshOperationError", async () => {
+    setSshClientFactoryForTesting(() => {
+      const client = new FakeClient();
+      client.sftpWrapper.diskFull = true;
+      client.sftpWrapper.unlinkError = new Error("unlink denied");
+      clients.push(client);
+      return client as never;
+    });
+    const { sessionId } = await connectFake();
+    const error = await writeInternalSshFile(
+      sessionId,
+      "/workspace/full.txt",
+      "full"
+    ).then(
+      () => new Error("Expected the write to fail"),
+      (reason: unknown) => reason
+    );
+
+    if (!isSshOperationError(error)) {
+      throw error;
+    }
+    expect(error).toMatchObject({
+      code: "SSH_FILE_WRITE_FAILED",
+      operation: "sftp_atomic_write",
+      sideEffect: "none",
+      cleanup: {
+        temporaryFile: {
+          status: "failed",
+          message: expect.stringContaining("unlink denied"),
+        },
+      },
+    });
+    expect(toSshOperationErrorResult(error)).toMatchObject({
+      cleanup: {
+        temporaryFile: {
+          status: "failed",
+          message: expect.stringContaining("unlink denied"),
+        },
+      },
+    });
   });
 
   it("uses SSH_AUTH_SOCK and pins the first observed host fingerprint", async () => {

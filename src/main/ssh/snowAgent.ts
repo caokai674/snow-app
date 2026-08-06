@@ -179,19 +179,21 @@ const runSnowAgent = async (
   sessionId: string,
   capabilities: SshCapabilities,
   args: string[],
-  timeoutMs = 15_000
+  timeoutMs = 15_000,
+  signal?: AbortSignal
 ): Promise<string> => {
   if (capabilities.platform === "windows") {
     return runWindowsPowerShell(
       sessionId,
       `& snow-agent.exe @(${args.map(powerShellLiteral).join(",")})`,
-      timeoutMs
+      timeoutMs,
+      signal
     );
   }
   return executeSshCommand(
     sessionId,
     `snow-agent ${args.map(shellQuote).join(" ")}`,
-    { timeoutMs }
+    { timeoutMs, signal }
   );
 };
 
@@ -236,14 +238,16 @@ export const launchSnowAgentJob = async (
   sessionId: string,
   capabilities: SshCapabilities,
   jobDirectory: string,
-  jobId: string
+  jobId: string,
+  signal?: AbortSignal
 ): Promise<void> => {
   const receipt = parseJsonResult(
     await runSnowAgent(
       sessionId,
       capabilities,
       ["job", "launch", "--job-directory", jobDirectory],
-      15_000
+      15_000,
+      signal
     ),
     "job launch"
   );

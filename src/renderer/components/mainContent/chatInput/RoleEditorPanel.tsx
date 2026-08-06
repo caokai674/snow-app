@@ -216,7 +216,7 @@ export const RoleEditorPanel = ({
   }, []);
 
   const handleSave = async (): Promise<void> => {
-    if (!directoryInfo || !roleFilePath || isSaving) return;
+    if (!directoryInfo || !roleFilePath || !projectId || isSaving) return;
 
     setIsSaving(true);
     setError(null);
@@ -238,7 +238,7 @@ export const RoleEditorPanel = ({
           roleFilePath,
           content,
           {
-            workspaceRoot: directoryInfo.path,
+            workspaceId: projectId,
             expectedVersion: remoteRoleVersionRef.current,
           }
         );

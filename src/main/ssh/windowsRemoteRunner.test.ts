@@ -44,5 +44,7 @@ describe("Windows Remote Job runner", () => {
     expect(runner).toContain("[System.IO.File]::Replace");
     expect(runner).toContain("CreateKillOnCloseJob");
     expect(runner).toContain("AssignProcessToJobObject");
+    expect(runner).toContain("state.lock");
+    expect(runner).toContain("ConvertFrom-Json");
   });
 });

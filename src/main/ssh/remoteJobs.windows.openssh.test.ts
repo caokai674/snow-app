@@ -22,7 +22,7 @@ vi.mock("./sshHostKeys", () => ({
 }));
 
 import { connectSsh, disconnectAllSsh, disconnectSsh, executeSshCommand } from "./sshManager";
-import { getRemoteJob, startRemoteJob } from "./remoteJobs";
+import { cancelRemoteJob, getRemoteJob, startRemoteJob } from "./remoteJobs";
 
 const enabled = process.env.SNOW_WINDOWS_SSH_TEST === "1";
 const openSsh = enabled ? describe : describe.skip;
@@ -36,6 +36,19 @@ const workspacePath = (): string =>
 
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const waitForTerminal = async (jobId: string, timeoutMs = 20_000) => {
+  const deadline = Date.now() + timeoutMs;
+  let result = await getRemoteJob(jobId, { offset: 0, limit: 64 * 1024 });
+  while (Date.now() < deadline) {
+    if (result.state.status !== "preparing" && result.state.status !== "launching" && result.state.status !== "running") {
+      return result;
+    }
+    await wait(250);
+    result = await getRemoteJob(jobId, { offset: 0, limit: 64 * 1024 });
+  }
+  throw new Error(`Windows Remote Job ${jobId} did not reach a terminal state`);
+};
 
 openSsh("Durable Remote Job Windows OpenSSH", () => {
   beforeEach(async () => {
@@ -90,4 +103,79 @@ openSsh("Durable Remote Job Windows OpenSSH", () => {
     expect(result.output).toContain("started");
     expect(result.output).toContain("finished");
   }, 45_000);
+
+  it("records timeout and cancellation, then cleans up child processes", async () => {
+    const timedOut = randomUUID();
+    await startRemoteJob({
+      workspacePath: workspacePath(),
+      command: "Start-Sleep -Seconds 30",
+      timeoutMs: 500,
+      jobId: timedOut,
+      backend: "windows-job",
+    });
+    const timeoutResult = await waitForTerminal(timedOut);
+    expect(timeoutResult.state.status).toBe("timed_out");
+
+    const cancelled = randomUUID();
+    const childPidPath = `C:/Users/${user}/child-${cancelled}.pid`;
+    await startRemoteJob({
+      workspacePath: workspacePath(),
+      command: [
+        "$child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -PassThru",
+        `[System.IO.File]::WriteAllText('${childPidPath}', [string]$child.Id)`,
+        "Start-Sleep -Seconds 30",
+      ].join("; "),
+      timeoutMs: 30_000,
+      jobId: cancelled,
+      backend: "windows-job",
+    });
+
+    let childPid = "";
+    const childDeadline = Date.now() + 10_000;
+    const childSession = await connectSsh({
+      host,
+      port,
+      username: user,
+      authMethod: "password",
+      password: "snow-test-password",
+    });
+    try {
+      while (!childPid && Date.now() < childDeadline) {
+        try {
+          childPid = (
+            await executeSshCommand(
+              childSession,
+              `powershell.exe -NoProfile -NonInteractive -Command "Get-Content -LiteralPath '${childPidPath}' -Raw"`
+            )
+          ).trim();
+        } catch {
+          await wait(250);
+        }
+      }
+    } finally {
+      disconnectSsh(childSession);
+    }
+    expect(childPid).toMatch(/^\d+$/);
+    await cancelRemoteJob(cancelled);
+    const cancelledResult = await waitForTerminal(cancelled);
+    expect(cancelledResult.state.status).toBe("cancelled");
+
+    const probeSession = await connectSsh({
+      host,
+      port,
+      username: user,
+      authMethod: "password",
+      password: "snow-test-password",
+    });
+    try {
+      await expect(
+        executeSshCommand(
+          probeSession,
+          `powershell.exe -NoProfile -NonInteractive -Command "if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { Write-Output alive } else { Write-Output gone }"`
+        )
+      ).resolves.toContain("gone");
+    } finally {
+      disconnectSsh(probeSession);
+    }
+  }, 60_000);
 });

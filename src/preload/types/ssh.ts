@@ -50,7 +50,8 @@ export type SshCapabilities = {
 
 export type SshFileSaveGuarantee =
   | "strong_atomic"
-  | "atomic_best_effort";
+  | "atomic_best_effort"
+  | "compatibility";
 
 export type SshFileVersion = {
   exists: boolean;
@@ -60,9 +61,10 @@ export type SshFileVersion = {
 };
 
 export type SshFileWriteOptions = {
-  expectedVersion?: SshFileVersion;
-  /** SSH workspace URI that authorizes the target path. */
-  workspaceRoot?: string;
+  /** Stable SSH workspace record that Main resolves to the authorized root. */
+  workspaceId: string;
+  /** Required write CAS precondition for all user-reachable saves. */
+  expectedVersion: SshFileVersion;
 };
 
 export type SshFileWriteResult = {
@@ -133,6 +135,8 @@ export type RemoteJobBackendKind =
   | "posix-detach"
   | "windows-job";
 
+export type RemoteJobCancellationPolicy = "cancel_remote" | "detach_only";
+
 export type RemoteJobBinding = {
   jobId: string;
   workspacePath: string;
@@ -141,6 +145,7 @@ export type RemoteJobBinding = {
   commandHash: string;
   displayCommand: string;
   backend: RemoteJobBackendKind;
+  cancellationPolicy?: RemoteJobCancellationPolicy;
   createdAt: string;
   updatedAt: string;
   status: RemoteJobStatus;
@@ -181,6 +186,8 @@ export type RemoteJobOutput = {
   job: RemoteJobBinding;
   state: RemoteJobState;
   output: string;
+  /** Raw UTF-8 bytes. Decode incremental reads with TextDecoder stream mode. */
+  outputBytes: Uint8Array;
   offset: number;
   nextOffset: number;
   eof: boolean;

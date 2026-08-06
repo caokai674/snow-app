@@ -654,13 +654,19 @@ const executeBashCommand = async (
           : undefined,
       toolCallId:
         typeof args.toolCallId === "string" ? args.toolCallId : undefined,
-    });
+    }, { signal, cancellationPolicy: "cancel_remote" });
+    const accepted =
+      job.status === "preparing" ||
+      job.status === "launching" ||
+      job.status === "running";
     return {
-      accepted: true,
+      accepted,
       durable: true,
       job,
       message:
-        "Remote Job accepted. Use remote-job-status or remote-job-read to continue analysis.",
+        accepted
+          ? "Remote Job accepted. Use remote-job-status or remote-job-read to continue analysis."
+          : "Remote Job launch is not confirmed. Use remote-job-status before retrying.",
     };
   }
 
@@ -710,7 +716,8 @@ const remoteJobReadOptions = (
 };
 
 const executeRemoteJobStart = async (
-  args: RemoteWorkspaceCommandArgs
+  args: RemoteWorkspaceCommandArgs,
+  signal?: AbortSignal
 ): Promise<Record<string, unknown>> => {
   const workspacePath = validateSshWorkspacePath(
     args.workingDirectory,
@@ -741,8 +748,14 @@ const executeRemoteJobStart = async (
     conversationId:
       typeof args.conversationId === "string" ? args.conversationId : undefined,
     toolCallId: typeof args.toolCallId === "string" ? args.toolCallId : undefined,
-  });
-  return { accepted: true, job };
+  }, { signal, cancellationPolicy: "cancel_remote" });
+  return {
+    accepted:
+      job.status === "preparing" ||
+      job.status === "launching" ||
+      job.status === "running",
+    job,
+  };
 };
 
 const executeRemoteJobStatus = async (
@@ -819,7 +832,7 @@ export const dispatchRemoteWorkspaceCommand = async (
         result = await executeBashCommand(args, signal);
         break;
       case "remote-job-start":
-        result = await executeRemoteJobStart(args);
+        result = await executeRemoteJobStart(args, signal);
         break;
       case "remote-job-status":
         result = await executeRemoteJobStatus(args);

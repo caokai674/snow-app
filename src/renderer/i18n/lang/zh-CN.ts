@@ -2184,6 +2184,7 @@ export const zhCN = {
   "rightPanel.fileViewerSaved": "已保存",
   "rightPanel.fileViewerSavedStrongAtomic": "已保存（强原子）",
   "rightPanel.fileViewerSavedAtomicBestEffort": "已保存（尽力原子）",
+  "rightPanel.fileViewerSavedCompatibility": "已保存（兼容模式）",
   "rightPanel.fileViewerSaveConflict": "远程文件已变更。请重新加载后再保存修改。",
   "rightPanel.fileViewerDraftPending": "草稿待同步",
   "rightPanel.fileViewerDraftConflict": "草稿冲突",

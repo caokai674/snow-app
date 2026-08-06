@@ -10,6 +10,13 @@ const ssh = vi.hoisted(() => ({
   write: vi.fn(),
 }));
 
+const remoteJobs = vi.hoisted(() => ({
+  cancel: vi.fn(),
+  get: vi.fn(),
+  list: vi.fn(),
+  start: vi.fn(),
+}));
+
 const cancelled = (operation: string, sideEffect: "none" | "possible") => ({
   sshOperation: true,
   code: "SSH_OPERATION_CANCELLED",
@@ -45,6 +52,13 @@ vi.mock("./sshManager", () => ({
 vi.mock("./sshCredentials", () => ({
   getSshCredential: () => null,
   getDecryptedSecret: () => null,
+}));
+
+vi.mock("./remoteJobs", () => ({
+  cancelRemoteJob: remoteJobs.cancel,
+  getRemoteJob: remoteJobs.get,
+  listRemoteJobs: remoteJobs.list,
+  startRemoteJob: remoteJobs.start,
 }));
 
 import { dispatchRemoteWorkspaceCommand } from "./remoteWorkspaceCommand";
@@ -125,6 +139,37 @@ describe("dispatchRemoteWorkspaceCommand cancellation propagation", () => {
     expect(JSON.parse(response)).toMatchObject({
       success: false,
       error: { operation: "sftp_list", sideEffect: "none" },
+    });
+  });
+
+  it("passes cancellation into Durable Job launch before the backend can start", async () => {
+    const controller = new AbortController();
+    remoteJobs.start.mockRejectedValue(cancelled("remote_job_start", "none"));
+    controller.abort();
+
+    const response = await dispatchRemoteWorkspaceCommand(
+      {
+        operation: "bash-terminal-execute",
+        argsJson: JSON.stringify({
+          workingDirectory: "ssh://snow@example.test/workspace",
+          command: "npm test",
+          durable: true,
+        }),
+      },
+      { signal: controller.signal }
+    );
+
+    expect(remoteJobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({ command: "npm test" }),
+      {
+        signal: controller.signal,
+        cancellationPolicy: "cancel_remote",
+      }
+    );
+    expect(controller.signal.aborted).toBe(true);
+    expect(JSON.parse(response)).toMatchObject({
+      success: false,
+      error: { operation: "remote_job_start", sideEffect: "none" },
     });
   });
 

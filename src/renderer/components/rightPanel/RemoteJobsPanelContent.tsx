@@ -6,7 +6,7 @@ import {
   SquareTerminal,
   Square,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   RemoteJobBinding,
   RemoteJobOutput,
@@ -33,6 +33,12 @@ const terminalStatus = new Set([
 const statusClass = (status: RemoteJobBinding["status"]): string =>
   `remote-jobs-status remote-jobs-status-${status}`;
 
+type OutputDecoderState = {
+  decoder: TextDecoder;
+  nextOffset: number;
+  output: string;
+};
+
 export function RemoteJobsPanelContent({
   workspacePath,
   isActive,
@@ -47,6 +53,7 @@ export function RemoteJobsPanelContent({
   const [error, setError] = useState("");
   const [cancelling, setCancelling] = useState(false);
   const [attaching, setAttaching] = useState(false);
+  const outputDecodersRef = useRef(new Map<string, OutputDecoderState>());
 
   const selectedJob = useMemo(
     () => jobs.find((job) => job.jobId === selectedJobId) ?? null,
@@ -54,11 +61,28 @@ export function RemoteJobsPanelContent({
   );
 
   const loadDetail = useCallback(async (jobId: string): Promise<void> => {
+    const previous = outputDecodersRef.current.get(jobId);
     const result = await window.snow.sshGetRemoteJob(jobId, {
-      offset: 0,
+      offset: previous?.nextOffset ?? 0,
       limit: 64 * 1024,
     });
-    setDetail(result);
+    const decoderState =
+      previous && previous.nextOffset === result.offset
+        ? previous
+        : { decoder: new TextDecoder(), nextOffset: result.offset, output: "" };
+    let output = `${decoderState.output}${decoderState.decoder.decode(
+      result.outputBytes,
+      { stream: !result.eof }
+    )}`;
+    if (result.eof) {
+      output += decoderState.decoder.decode();
+    }
+    outputDecodersRef.current.set(jobId, {
+      decoder: decoderState.decoder,
+      nextOffset: result.nextOffset,
+      output,
+    });
+    setDetail({ ...result, output });
     setJobs((current) =>
       current.map((job) => (job.jobId === result.job.jobId ? result.job : job))
     );
@@ -97,6 +121,7 @@ export function RemoteJobsPanelContent({
     setLoading(true);
     setSelectedJobId(null);
     setDetail(null);
+    outputDecodersRef.current.clear();
     void refresh(false);
   }, [refresh, workspacePath]);
 
@@ -114,6 +139,7 @@ export function RemoteJobsPanelContent({
     (jobId: string): void => {
       setSelectedJobId(jobId);
       setError("");
+      outputDecodersRef.current.delete(jobId);
       void loadDetail(jobId).catch((cause: unknown) => {
         setError(cause instanceof Error ? cause.message : String(cause));
       });

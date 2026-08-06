@@ -13,6 +13,27 @@ if [ -f /run/snow-authorized-keys ]; then
   install -o snow -g snow -m 600 /run/snow-authorized-keys /home/snow/.ssh/authorized_keys
 fi
 
+if [ "$INSTALL_SYSTEMD_USER" = "1" ]; then
+  runtime_dir="/run/user/$(id -u snow)"
+  install -d -o snow -g snow -m 700 "$runtime_dir"
+  runuser -u snow -- env \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+    sh -c 'dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --fork --nopidfile && exec systemd --user' &
+  ready=0
+  for _ in $(seq 1 40); do
+    if runuser -u snow -- env \
+      XDG_RUNTIME_DIR="$runtime_dir" \
+      DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+      systemctl --user show-environment >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 0.1
+  done
+  [ "$ready" = "1" ] || exit 1
+fi
+
 exec /usr/sbin/sshd -D -e -p 2222 \
   -h "$host_key" \
   -o PasswordAuthentication=yes \

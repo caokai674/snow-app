@@ -2308,6 +2308,7 @@ export const en = {
   "rightPanel.fileViewerSaved": "Saved",
   "rightPanel.fileViewerSavedStrongAtomic": "Saved (strong atomic)",
   "rightPanel.fileViewerSavedAtomicBestEffort": "Saved (atomic best effort)",
+  "rightPanel.fileViewerSavedCompatibility": "Saved (compatibility mode)",
   "rightPanel.fileViewerSaveConflict": "The remote file changed. Reload it before saving your changes.",
   "rightPanel.fileViewerDraftPending": "Draft pending",
   "rightPanel.fileViewerDraftConflict": "Draft conflict",

@@ -10,12 +10,13 @@ const encodePowerShell = (script: string): string =>
 export const runWindowsPowerShell = (
   sessionId: string,
   script: string,
-  timeoutMs = 15_000
+  timeoutMs = 15_000,
+  signal?: AbortSignal
 ): Promise<string> =>
   executeSshCommand(
     sessionId,
     `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${encodePowerShell(script)}`,
-    { timeoutMs }
+    { timeoutMs, signal }
   );
 
 export const isWindowsRemote = (capabilities: SshCapabilities): boolean =>
@@ -94,17 +95,24 @@ export const buildWindowsRunnerScript = (jobId: string, createdAt: string): stri
     "$timeoutMs = [int64](Get-Content -LiteralPath (Join-Path $jobDirectory 'timeout-ms') -Raw)",
     "$backend = 'windows-job'",
     "$runnerPid = $PID",
+    "$stateLockPath = Join-Path $jobDirectory 'state.lock'",
     "[System.IO.File]::WriteAllText((Join-Path $jobDirectory 'runner.pid'), [string]$runnerPid, [System.Text.Encoding]::ASCII)",
+    "function Enter-StateLock() { for ($i = 0; $i -lt 400; $i++) { try { New-Item -ItemType Directory -Path $stateLockPath -ErrorAction Stop | Out-Null; return } catch { Start-Sleep -Milliseconds 25 } }; throw 'Remote Job state lock timed out' }",
+    "function Exit-StateLock() { Remove-Item -LiteralPath $stateLockPath -Force -Recurse -ErrorAction SilentlyContinue }",
     "function Write-State([string]$status, [Nullable[int]]$exitCode, [string]$reason) {",
-    "  $revision = 1 + [int](Get-Content -LiteralPath $revisionPath -Raw)",
-    "  [System.IO.File]::WriteAllText($revisionPath, [string]$revision, [System.Text.Encoding]::ASCII)",
-    "  $now = [DateTime]::UtcNow.ToString('o')",
-    "  $state = [ordered]@{ schemaVersion = 1; jobId = $jobId; status = $status; revision = $revision; backend = $backend; runnerPid = $runnerPid; createdAt = $createdAt; updatedAt = $now; exitCode = $exitCode }",
-    "  if ($status -in @('succeeded','failed','timed_out','cancelled','lost','launch_failed','indeterminate')) { $state.completedAt = $now }",
-    "  if ($reason) { $state.reason = $reason }",
-    "  $temporary = \"$statePath.$([Guid]::NewGuid().ToString('N')).tmp\"",
-    "  [System.IO.File]::WriteAllText($temporary, ($state | ConvertTo-Json -Compress), [System.Text.Encoding]::UTF8)",
-    "  if (Test-Path -LiteralPath $statePath) { [System.IO.File]::Replace($temporary, $statePath, $null, $true) } else { [System.IO.File]::Move($temporary, $statePath) }",
+    "  Enter-StateLock",
+    "  try {",
+    "    if (Test-Path -LiteralPath $statePath) { $currentState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json; if ($currentState.status -in @('succeeded','failed','timed_out','cancelled','lost','launch_failed','indeterminate')) { return } }",
+    "    $revision = 1 + [int](Get-Content -LiteralPath $revisionPath -Raw)",
+    "    [System.IO.File]::WriteAllText($revisionPath, [string]$revision, [System.Text.Encoding]::ASCII)",
+    "    $now = [DateTime]::UtcNow.ToString('o')",
+    "    $state = [ordered]@{ schemaVersion = 1; jobId = $jobId; status = $status; revision = $revision; backend = $backend; runnerPid = $runnerPid; createdAt = $createdAt; updatedAt = $now; exitCode = $exitCode }",
+    "    if ($status -in @('succeeded','failed','timed_out','cancelled','lost','launch_failed','indeterminate')) { $state.completedAt = $now }",
+    "    if ($reason) { $state.reason = $reason }",
+    "    $temporary = \"$statePath.$([Guid]::NewGuid().ToString('N')).tmp\"",
+    "    [System.IO.File]::WriteAllText($temporary, ($state | ConvertTo-Json -Compress), [System.Text.Encoding]::UTF8)",
+    "    if (Test-Path -LiteralPath $statePath) { [System.IO.File]::Replace($temporary, $statePath, $null, $true) } else { [System.IO.File]::Move($temporary, $statePath) }",
+    "  } finally { Exit-StateLock }",
     "}",
     "Add-Type @'",
     "using System;",
@@ -143,14 +151,16 @@ export const buildWindowsRunnerScript = (jobId: string, createdAt: string): stri
 
 export const launchWindowsRemoteJob = async (
   sessionId: string,
-  runnerPath: string
+  runnerPath: string,
+  signal?: AbortSignal
 ): Promise<void> => {
   const output = await runWindowsPowerShell(
     sessionId,
     `$process = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',${powerShellQuote(
       runnerPath
     )}) -WindowStyle Hidden -PassThru; [Console]::Out.Write($process.Id)`,
-    15_000
+    15_000,
+    signal
   );
   if (!/^\d+$/.test(output.trim())) {
     throw new Error("Windows Job backend did not return a runner PID");

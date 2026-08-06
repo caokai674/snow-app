@@ -214,6 +214,9 @@ export const ProjectRoleEditor = ({
 
     try {
       if (directoryInfo.isSsh) {
+        if (!activeDirectory?.directoryId) {
+          throw new Error("Remote project rule save is missing its workspace ID");
+        }
         if (!sshSessionIdRef.current) {
           const connectParams = await buildSshConnectParams(directoryInfo.path);
           if (!connectParams) {
@@ -233,7 +236,7 @@ export const ProjectRoleEditor = ({
           roleFilePath,
           content,
           {
-            workspaceRoot: directoryInfo.path,
+            workspaceId: activeDirectory.directoryId,
             expectedVersion: remoteRoleVersionRef.current,
           }
         );
@@ -254,7 +257,7 @@ export const ProjectRoleEditor = ({
             settingsFilePath,
             nextSettings,
             {
-              workspaceRoot: directoryInfo.path,
+              workspaceId: activeDirectory.directoryId,
               expectedVersion: remoteSettingsVersionRef.current,
             }
           );

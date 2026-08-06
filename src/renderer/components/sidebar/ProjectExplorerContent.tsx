@@ -864,7 +864,15 @@ export function ProjectExplorerContent({
       setSelectedPath(result.path);
       setSelectedLines(new Map());
       lineSelectAnchorRef.current = null;
-      onOpenFile?.(result.path, result.name);
+      onOpenFile?.(
+        result.path,
+        result.name,
+        isSsh,
+        sshProfileIdRef.current,
+        undefined,
+        rootPath ?? undefined,
+        explorerDirectoryId ?? undefined
+      );
     },
     [onOpenFile]
   );
@@ -922,7 +930,15 @@ export function ProjectExplorerContent({
       setSelectedLines(single);
       lineSelectAnchorRef.current = { path: result.path, line };
       setSelectedPath(result.path);
-      onOpenFile?.(result.path, result.name, undefined, undefined, line);
+      onOpenFile?.(
+        result.path,
+        result.name,
+        isSsh,
+        sshProfileIdRef.current,
+        line,
+        rootPath ?? undefined,
+        explorerDirectoryId ?? undefined
+      );
     },
     [onOpenFile]
   );

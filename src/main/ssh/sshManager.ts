@@ -24,12 +24,19 @@ export type SshConnectParams = {
 
 export type SshOperationSideEffect = "none" | "possible";
 export type RemoteProcessTermination = "not_requested" | "unconfirmed";
+export type SshCleanupResult = {
+  temporaryFile: {
+    status: "failed";
+    message: string;
+  };
+};
 
 export class SshOperationError extends Error {
   readonly code: string;
   readonly operation: string;
   readonly sideEffect: SshOperationSideEffect;
   readonly remoteProcessTermination?: RemoteProcessTermination;
+  readonly cleanup?: SshCleanupResult;
 
   constructor(params: {
     code: string;
@@ -37,6 +44,7 @@ export class SshOperationError extends Error {
     message: string;
     sideEffect?: SshOperationSideEffect;
     remoteProcessTermination?: RemoteProcessTermination;
+    cleanup?: SshCleanupResult;
   }) {
     super(`[${params.code}] ${params.message}`);
     this.name = "SshOperationError";
@@ -44,6 +52,7 @@ export class SshOperationError extends Error {
     this.operation = params.operation;
     this.sideEffect = params.sideEffect ?? "none";
     this.remoteProcessTermination = params.remoteProcessTermination;
+    this.cleanup = params.cleanup;
   }
 }
 
@@ -58,6 +67,7 @@ export const toSshOperationErrorResult = (
   operation: error.operation,
   sideEffect: error.sideEffect,
   remoteProcessTermination: error.remoteProcessTermination,
+  cleanup: error.cleanup,
   message: error.message.replace(/^\[[^\]]+\]\s*/, ""),
 });
 
@@ -89,7 +99,8 @@ export type SshCapabilities = {
 
 export type SshFileSaveGuarantee =
   | "strong_atomic"
-  | "atomic_best_effort";
+  | "atomic_best_effort"
+  | "compatibility";
 
 /** A content-addressed remote file version used as the write CAS precondition. */
 export type SshFileVersion = {
@@ -102,8 +113,18 @@ export type SshFileVersion = {
 export type SshFileWriteOptions = {
   signal?: AbortSignal;
   /** Required by user-facing write paths to prevent a stale editor overwrite. */
+  expectedVersion: SshFileVersion;
+  /** Absolute remote workspace path resolved by Main from a bound workspace ID. */
+  workspaceRoot: string;
+};
+
+/**
+ * Internal writes are limited to Snow-managed remote-job files. They bypass
+ * user-file CAS because the job service owns those paths and their lifecycle.
+ */
+export type SshInternalFileWriteOptions = {
+  signal?: AbortSignal;
   expectedVersion?: SshFileVersion;
-  /** Absolute remote workspace path, already bound to the active SSH profile. */
   workspaceRoot?: string;
 };
 
@@ -625,7 +646,8 @@ const POSIX_CAPABILITY_PROBE_COMMAND = [
   '    printf "%s=0\\n" "$capability"',
   "  fi",
   "done",
-  'if systemctl --user show-environment >/dev/null 2>&1; then printf "systemd_user=1\\n"; else printf "systemd_user=0\\n"; fi',
+  'runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
+  'if XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$runtime_dir/bus}" systemctl --user show-environment >/dev/null 2>&1; then printf "systemd_user=1\\n"; else printf "systemd_user=0\\n"; fi',
 ].join("\n");
 
 const WINDOWS_CAPABILITY_PROBE_COMMAND =
@@ -805,30 +827,104 @@ const isUnsupportedOpenSshExtension = (error: unknown): boolean => {
   );
 };
 
-const sftpVoid = (
-  run: (callback: (error?: Error | null) => void) => void
-): Promise<void> =>
+type SftpAbortOptions = {
+  signal?: AbortSignal;
+  operation: string;
+  message: string;
+  sideEffect?: SshOperationSideEffect;
+};
+
+const atomicWriteAbortOptions = (
+  signal: AbortSignal | undefined,
+  sideEffect: SshOperationSideEffect = "none"
+): SftpAbortOptions => ({
+  signal,
+  operation: "sftp_atomic_write",
+  message: "Remote file save cancelled while waiting for SFTP",
+  sideEffect,
+});
+
+const abortSftpChannel = (sftp: import("ssh2").SFTPWrapper): void => {
+  try {
+    // SFTP callbacks have no cancellation API. Ending this channel makes the
+    // pending request settle and prevents a late callback from reviving it.
+    sftp.end();
+  } catch {
+    // The channel may already be closed by the transport.
+  }
+};
+
+const withSftpAbort = <T>(
+  sftp: import("ssh2").SFTPWrapper,
+  options: SftpAbortOptions | undefined,
+  run: (
+    resolvePromise: (value: T) => void,
+    rejectPromise: (reason?: unknown) => void
+  ) => void
+): Promise<T> =>
   new Promise((resolvePromise, rejectPromise) => {
-    try {
-      run((error?: Error | null) => {
-        if (error) {
-          rejectPromise(error);
-          return;
-        }
-        resolvePromise();
-      });
-    } catch (error) {
-      rejectPromise(error);
+    let settled = false;
+    const signal = options?.signal;
+    const cleanup = (): void => signal?.removeEventListener("abort", onAbort);
+    const resolveOnce = (value: T): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolvePromise(value);
+    };
+    const rejectOnce = (reason?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectPromise(reason);
+    };
+    const onAbort = (): void => {
+      abortSftpChannel(sftp);
+      rejectOnce(
+        new SshOperationError({
+          code: "SSH_OPERATION_CANCELLED",
+          operation: options?.operation ?? "sftp",
+          message: options?.message ?? "SFTP operation cancelled",
+          sideEffect: options?.sideEffect,
+        })
+      );
+    };
+
+    if (signal?.aborted) {
+      onAbort();
+      return;
     }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      run(resolveOnce, rejectOnce);
+    } catch (error) {
+      rejectOnce(error);
+    }
+  });
+
+const sftpVoid = (
+  sftp: import("ssh2").SFTPWrapper,
+  run: (callback: (error?: Error | null) => void) => void,
+  options?: SftpAbortOptions
+): Promise<void> =>
+  withSftpAbort(sftp, options, (resolvePromise, rejectPromise) => {
+    run((error?: Error | null) => {
+      if (error) {
+        rejectPromise(error);
+        return;
+      }
+      resolvePromise();
+    });
   });
 
 const sftpOpen = (
   sftp: import("ssh2").SFTPWrapper,
   path: string,
   mode: string,
-  attributes?: { mode: number }
+  attributes?: { mode: number },
+  options?: SftpAbortOptions
 ): Promise<Buffer> =>
-  new Promise((resolvePromise, rejectPromise) => {
+  withSftpAbort(sftp, options, (resolvePromise, rejectPromise) => {
     const callback = (error: Error | undefined, handle: Buffer): void => {
       if (error) {
         rejectPromise(error);
@@ -849,9 +945,10 @@ const sftpOpen = (
 
 const sftpLstat = async (
   sftp: import("ssh2").SFTPWrapper,
-  path: string
+  path: string,
+  options?: SftpAbortOptions
 ): Promise<import("ssh2").Stats | null> =>
-  new Promise((resolvePromise, rejectPromise) => {
+  withSftpAbort(sftp, options, (resolvePromise, rejectPromise) => {
     try {
       sftp.lstat(path, (error, stats) => {
         if (error) {
@@ -871,9 +968,10 @@ const sftpLstat = async (
 
 const sftpRealpath = (
   sftp: import("ssh2").SFTPWrapper,
-  path: string
+  path: string,
+  options?: SftpAbortOptions
 ): Promise<string> =>
-  new Promise((resolvePromise, rejectPromise) => {
+  withSftpAbort(sftp, options, (resolvePromise, rejectPromise) => {
     try {
       sftp.realpath(path, (error, resolvedPath) => {
         if (error) {
@@ -991,7 +1089,8 @@ const isWithinRemoteRoot = (path: string, root: string): boolean => {
 const assertWorkspaceBoundary = async (
   sftp: import("ssh2").SFTPWrapper,
   remotePath: string,
-  workspaceRoot: string | undefined
+  workspaceRoot: string | undefined,
+  signal?: AbortSignal
 ): Promise<void> => {
   if (!workspaceRoot) {
     return;
@@ -1008,8 +1107,12 @@ const assertWorkspaceBoundary = async (
   }
 
   const [resolvedRoot, resolvedParent] = await Promise.all([
-    sftpRealpath(sftp, normalizedRoot),
-    sftpRealpath(sftp, dirname(normalizedPath)),
+    sftpRealpath(sftp, normalizedRoot, atomicWriteAbortOptions(signal)),
+    sftpRealpath(
+      sftp,
+      dirname(normalizedPath),
+      atomicWriteAbortOptions(signal)
+    ),
   ]);
   if (!isWithinRemoteRoot(resolvedParent, resolvedRoot)) {
     throw new SshOperationError({
@@ -1033,20 +1136,31 @@ const assertNotAborted = (signal: AbortSignal | undefined): void => {
 
 const closeHandle = async (
   sftp: import("ssh2").SFTPWrapper,
-  handle: Buffer | undefined
+  handle: Buffer | undefined,
+  signal?: AbortSignal,
+  sideEffect: SshOperationSideEffect = "none"
 ): Promise<void> => {
   if (!handle) {
     return;
   }
-  await sftpVoid((callback) => sftp.close(handle, callback));
+  await sftpVoid(
+    sftp,
+    (callback) => sftp.close(handle, callback),
+    atomicWriteAbortOptions(signal, sideEffect)
+  );
 };
 
 const cleanupTemporaryFile = async (
   sftp: import("ssh2").SFTPWrapper,
-  temporaryPath: string
+  temporaryPath: string,
+  signal?: AbortSignal
 ): Promise<string | null> => {
   try {
-    await sftpVoid((callback) => sftp.unlink(temporaryPath, callback));
+    await sftpVoid(
+      sftp,
+      (callback) => sftp.unlink(temporaryPath, callback),
+      atomicWriteAbortOptions(signal)
+    );
     return null;
   } catch (error) {
     return isSftpNotFound(error) ? null : errorMessage(error);
@@ -1062,8 +1176,10 @@ const writeHandle = async (
   for (let offset = 0; offset < data.length; offset += SFTP_WRITE_CHUNK_SIZE) {
     assertNotAborted(signal);
     const length = Math.min(SFTP_WRITE_CHUNK_SIZE, data.length - offset);
-    await sftpVoid((callback) =>
-      sftp.write(handle, data, offset, length, offset, callback)
+    await sftpVoid(
+      sftp,
+      (callback) => sftp.write(handle, data, offset, length, offset, callback),
+      atomicWriteAbortOptions(signal)
     );
   }
   assertNotAborted(signal);
@@ -1071,10 +1187,16 @@ const writeHandle = async (
 
 const tryFsync = async (
   sftp: import("ssh2").SFTPWrapper,
-  handle: Buffer
+  handle: Buffer,
+  signal?: AbortSignal,
+  sideEffect: SshOperationSideEffect = "none"
 ): Promise<boolean> => {
   try {
-    await sftpVoid((callback) => sftp.ext_openssh_fsync(handle, callback));
+    await sftpVoid(
+      sftp,
+      (callback) => sftp.ext_openssh_fsync(handle, callback),
+      atomicWriteAbortOptions(signal, sideEffect)
+    );
     return true;
   } catch (error) {
     if (isUnsupportedOpenSshExtension(error)) {
@@ -1084,14 +1206,17 @@ const tryFsync = async (
   }
 };
 
-const atomicRename = async (
+const tryPosixRename = async (
   sftp: import("ssh2").SFTPWrapper,
   temporaryPath: string,
-  remotePath: string
+  remotePath: string,
+  signal?: AbortSignal
 ): Promise<boolean> => {
   try {
-    await sftpVoid((callback) =>
-      sftp.ext_openssh_rename(temporaryPath, remotePath, callback)
+    await sftpVoid(
+      sftp,
+      (callback) => sftp.ext_openssh_rename(temporaryPath, remotePath, callback),
+      atomicWriteAbortOptions(signal, "possible")
     );
     return true;
   } catch (error) {
@@ -1099,8 +1224,38 @@ const atomicRename = async (
       throw error;
     }
   }
-  await sftpVoid((callback) => sftp.rename(temporaryPath, remotePath, callback));
   return false;
+};
+
+const writeCompatibilityFile = async (
+  sftp: import("ssh2").SFTPWrapper,
+  remotePath: string,
+  data: Buffer,
+  targetExists: boolean,
+  signal: AbortSignal | undefined
+): Promise<boolean> => {
+  let handle: Buffer | undefined;
+  try {
+    // Opening an existing file in place preserves its inode-bound ACLs,
+    // xattrs, and security labels. This is intentionally visible as a
+    // compatibility write because truncation is not atomic.
+    handle = await sftpOpen(
+      sftp,
+      remotePath,
+      "w",
+      targetExists ? undefined : { mode: 0o600 },
+      atomicWriteAbortOptions(signal, "possible")
+    );
+    await writeHandle(sftp, handle, data, signal);
+    const fsynced = await tryFsync(sftp, handle, signal, "possible");
+    await closeHandle(sftp, handle, signal, "possible");
+    handle = undefined;
+    return fsynced;
+  } finally {
+    if (handle) {
+      await closeHandle(sftp, handle, signal, "possible").catch(() => undefined);
+    }
+  }
 };
 
 const createTemporaryPath = (remotePath: string): string => {
@@ -1120,7 +1275,11 @@ export const readSshFileWithVersion = async (
     throw new Error("SSH session not found. Please reconnect.");
   }
 
-  const before = await sftpLstat(session.sftp, remotePath);
+  const before = await sftpLstat(
+    session.sftp,
+    remotePath,
+    atomicWriteAbortOptions(options?.signal)
+  );
   if (!before) {
     throw new SshOperationError({
       code: "SSH_FILE_NOT_FOUND",
@@ -1130,7 +1289,11 @@ export const readSshFileWithVersion = async (
   }
   assertRegularFile(remotePath, before);
   const content = await readSshFile(sessionId, remotePath, options);
-  const after = await sftpLstat(session.sftp, remotePath);
+  const after = await sftpLstat(
+    session.sftp,
+    remotePath,
+    atomicWriteAbortOptions(options?.signal)
+  );
   if (!after || !sameMetadata(before, after)) {
     throw new SshOperationError({
       code: "SSH_FILE_CHANGED_DURING_READ",
@@ -1142,11 +1305,49 @@ export const readSshFileWithVersion = async (
   return { content, version: toFileVersion(after, content) };
 };
 
-export const writeSshFile = async (
+const completeCompatibilityWrite = async (
+  sessionId: string,
+  sftp: import("ssh2").SFTPWrapper,
+  remotePath: string,
+  data: Buffer,
+  targetExists: boolean,
+  signal: AbortSignal | undefined
+): Promise<SshFileWriteResult> => {
+  const fsynced = await writeCompatibilityFile(
+    sftp,
+    remotePath,
+    data,
+    targetExists,
+    signal
+  );
+  const version = (await readSshFileWithVersion(sessionId, remotePath, { signal }))
+    .version;
+  if (
+    !version.exists ||
+    version.size !== data.length ||
+    version.sha256 !== sha256(data)
+  ) {
+    throw new SshOperationError({
+      code: "SSH_FILE_VERIFY_FAILED",
+      operation: "sftp_compatibility_write",
+      message: "Remote compatibility save completed but content verification failed",
+      sideEffect: "possible",
+    });
+  }
+  return {
+    guarantee: "compatibility",
+    sideEffect: "committed",
+    bytes: data.length,
+    version,
+    durability: { fsynced, posixRename: false },
+  };
+};
+
+const writeSshFileWithOptions = async (
   sessionId: string,
   remotePath: string,
   content: string | Buffer,
-  options?: SshFileWriteOptions
+  options?: SshInternalFileWriteOptions
 ): Promise<SshFileWriteResult> => {
   const session = getSshSession(sessionId);
   if (!session) {
@@ -1161,12 +1362,22 @@ export const writeSshFile = async (
   let temporaryCreated = false;
   let renameAttempted = false;
   let renamed = false;
+  let compatibilityWriteStarted = false;
 
   try {
     assertNotAborted(signal);
-    await assertWorkspaceBoundary(session.sftp, normalizedPath, options?.workspaceRoot);
+    await assertWorkspaceBoundary(
+      session.sftp,
+      normalizedPath,
+      options?.workspaceRoot,
+      signal
+    );
 
-    const initialStats = await sftpLstat(session.sftp, normalizedPath);
+    const initialStats = await sftpLstat(
+      session.sftp,
+      normalizedPath,
+      atomicWriteAbortOptions(signal)
+    );
     if (initialStats) {
       assertRegularFile(normalizedPath, initialStats);
     }
@@ -1184,21 +1395,45 @@ export const writeSshFile = async (
       }
     }
 
-    const mode = initialStats?.mode ? initialStats.mode & 0o777 : 0o600;
-    handle = await sftpOpen(session.sftp, temporaryPath, "wx", { mode });
+    if (initialStats) {
+      compatibilityWriteStarted = true;
+      return await completeCompatibilityWrite(
+        sessionId,
+        session.sftp,
+        normalizedPath,
+        data,
+        true,
+        signal
+      );
+    }
+
+    const mode = 0o600;
+    handle = await sftpOpen(
+      session.sftp,
+      temporaryPath,
+      "wx",
+      { mode },
+      atomicWriteAbortOptions(signal)
+    );
     temporaryCreated = true;
     await writeHandle(session.sftp, handle, data, signal);
-    if (initialStats?.mode && session.capabilities?.platform !== "windows") {
-      await sftpVoid((callback) => session.sftp.fchmod(handle as Buffer, mode, callback));
-    }
-    const fsynced = await tryFsync(session.sftp, handle);
-    await closeHandle(session.sftp, handle);
+    const fsynced = await tryFsync(session.sftp, handle, signal);
+    await closeHandle(session.sftp, handle, signal);
     handle = undefined;
 
     assertNotAborted(signal);
-    await assertWorkspaceBoundary(session.sftp, normalizedPath, options?.workspaceRoot);
+    await assertWorkspaceBoundary(
+      session.sftp,
+      normalizedPath,
+      options?.workspaceRoot,
+      signal
+    );
     if (options?.expectedVersion) {
-      const currentStats = await sftpLstat(session.sftp, normalizedPath);
+      const currentStats = await sftpLstat(
+        session.sftp,
+        normalizedPath,
+        atomicWriteAbortOptions(signal)
+      );
       const currentVersion = currentStats
         ? (await readSshFileWithVersion(sessionId, normalizedPath, { signal })).version
         : { exists: false };
@@ -1212,11 +1447,37 @@ export const writeSshFile = async (
     }
 
     renameAttempted = true;
-    const usedPosixRename = await atomicRename(
+    const usedPosixRename = await tryPosixRename(
       session.sftp,
       temporaryPath,
-      normalizedPath
+      normalizedPath,
+      signal
     );
+    if (!usedPosixRename) {
+      const cleanupFailure = await cleanupTemporaryFile(
+        session.sftp,
+        temporaryPath,
+        signal
+      );
+      if (cleanupFailure) {
+        throw new SshOperationError({
+          code: "SSH_FILE_TEMPORARY_CLEANUP_FAILED",
+          operation: "sftp_atomic_write",
+          message: `Cannot safely fall back to compatibility save; temporary cleanup failed: ${cleanupFailure}`,
+        });
+      }
+      temporaryCreated = false;
+      assertNotAborted(signal);
+      compatibilityWriteStarted = true;
+      return await completeCompatibilityWrite(
+        sessionId,
+        session.sftp,
+        normalizedPath,
+        data,
+        false,
+        signal
+      );
+    }
     renamed = true;
     const version = (
       await readSshFileWithVersion(sessionId, normalizedPath, { signal })
@@ -1247,23 +1508,42 @@ export const writeSshFile = async (
     let cleanupFailure: string | null = null;
     if (!renamed) {
       try {
-        await closeHandle(session.sftp, handle);
+        await closeHandle(session.sftp, handle, signal, "possible");
       } catch (closeError) {
         cleanupFailure = `close failed: ${errorMessage(closeError)}`;
       }
       if (temporaryCreated) {
-        const unlinkFailure = await cleanupTemporaryFile(session.sftp, temporaryPath);
+        const unlinkFailure = await cleanupTemporaryFile(
+          session.sftp,
+          temporaryPath,
+          signal
+        );
         cleanupFailure = cleanupFailure ?? unlinkFailure;
       }
     }
 
     if (error instanceof SshOperationError) {
-      if (renameAttempted && error.sideEffect === "none") {
+      const sideEffect =
+        (renameAttempted || compatibilityWriteStarted) && error.sideEffect === "none"
+          ? "possible"
+          : error.sideEffect;
+      if (cleanupFailure || sideEffect !== error.sideEffect) {
         throw new SshOperationError({
           code: error.code,
           operation: error.operation,
-          message: error.message.replace(/^\[[^\]]+\]\s*/, ""),
-          sideEffect: "possible",
+          message: `${error.message.replace(/^\[[^\]]+\]\s*/, "")}${
+            cleanupFailure ? `; temporary cleanup ${cleanupFailure}` : ""
+          }`,
+          sideEffect,
+          remoteProcessTermination: error.remoteProcessTermination,
+          cleanup: cleanupFailure
+            ? {
+                temporaryFile: {
+                  status: "failed",
+                  message: cleanupFailure,
+                },
+              }
+            : undefined,
         });
       }
       throw error;
@@ -1274,10 +1554,35 @@ export const writeSshFile = async (
       message: `Atomic remote file save failed: ${errorMessage(error)}${
         cleanupFailure ? `; temporary cleanup ${cleanupFailure}` : ""
       }`,
-      sideEffect: renameAttempted ? "possible" : "none",
+      sideEffect:
+        renameAttempted || compatibilityWriteStarted ? "possible" : "none",
+      cleanup: cleanupFailure
+        ? {
+            temporaryFile: {
+              status: "failed",
+              message: cleanupFailure,
+            },
+          }
+        : undefined,
     });
   }
 };
+
+export const writeSshFile = (
+  sessionId: string,
+  remotePath: string,
+  content: string | Buffer,
+  options: SshFileWriteOptions
+): Promise<SshFileWriteResult> =>
+  writeSshFileWithOptions(sessionId, remotePath, content, options);
+
+export const writeInternalSshFile = (
+  sessionId: string,
+  remotePath: string,
+  content: string | Buffer,
+  options?: SshInternalFileWriteOptions
+): Promise<SshFileWriteResult> =>
+  writeSshFileWithOptions(sessionId, remotePath, content, options);
 
 export const deleteSshFile = (
   sessionId: string,

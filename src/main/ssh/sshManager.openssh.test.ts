@@ -28,6 +28,7 @@ import {
   executeSshCommand,
   readSshFile,
   readSshFileWithVersion,
+  writeInternalSshFile,
   writeSshFile,
 } from "./sshManager";
 
@@ -36,6 +37,7 @@ const host = process.env.SNOW_SSH_TEST_HOST ?? "127.0.0.1";
 const port = Number(process.env.SNOW_SSH_TEST_PORT ?? "0");
 const container = process.env.SNOW_SSH_TEST_CONTAINER;
 const hostKeyPath = process.env.SNOW_SSH_TEST_HOST_KEY;
+const privateKeyPath = process.env.SNOW_SSH_TEST_PRIVATE_KEY;
 
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -89,12 +91,25 @@ openSsh("OpenSSH regression environment", () => {
     expect(port).toBeGreaterThan(0);
     expect(container).toBeTruthy();
     expect(hostKeyPath && existsSync(hostKeyPath)).toBe(true);
+    expect(privateKeyPath && existsSync(privateKeyPath)).toBe(true);
 
     const sessionId = await connectSsh(passwordParams());
-    await writeSshFile(sessionId, "/home/snow/phase0.txt", "phase-0");
+    await writeInternalSshFile(sessionId, "/home/snow/phase0.txt", "phase-0");
     await expect(readSshFile(sessionId, "/home/snow/phase0.txt")).resolves.toEqual(
       Buffer.from("phase-0")
     );
+
+    const privateKeySession = await connectSsh({
+      host,
+      port,
+      username: "snow",
+      authMethod: "privateKey",
+      privateKeyPath,
+    });
+    await expect(executeSshCommand(privateKeySession, "printf private-key-ok")).resolves.toBe(
+      "private-key-ok"
+    );
+    disconnectSsh(privateKeySession);
 
     const cancelled = new AbortController();
     const cancelledCommand = executeSshCommand(sessionId, "sleep 30", {
@@ -152,7 +167,7 @@ openSsh("OpenSSH regression environment", () => {
     );
   }, 60_000);
 
-  it("uses a verified atomic replacement without overwriting links or concurrent edits", async () => {
+  it("uses a verified compatibility update without overwriting links or concurrent edits", async () => {
     expect(port).toBeGreaterThan(0);
     const sessionId = await connectSsh(passwordParams());
     const root = "/home/snow/phase2";
@@ -169,8 +184,8 @@ openSsh("OpenSSH regression environment", () => {
       workspaceRoot: root,
       expectedVersion: loaded.version,
     });
-    expect(saved.guarantee).toBe("atomic_best_effort");
-    expect(saved.durability).toEqual({ fsynced: true, posixRename: true });
+    expect(saved.guarantee).toBe("compatibility");
+    expect(saved.durability).toEqual({ fsynced: true, posixRename: false });
     expect(saved.sideEffect).toBe("committed");
     await expect(
       executeSshCommand(sessionId, `cat ${filePath}; stat -c %a ${filePath}`)

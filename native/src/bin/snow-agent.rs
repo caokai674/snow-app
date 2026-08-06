@@ -23,6 +23,7 @@ const TERMINAL_STATUSES: &[&str] = &[
     "launch_failed",
     "indeterminate",
 ];
+const STATE_LOCK_ATTEMPTS: usize = 400;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -166,6 +167,30 @@ fn next_revision(directory: &Path) -> u64 {
     next
 }
 
+struct StateLock {
+    path: PathBuf,
+}
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
+    }
+}
+
+fn acquire_state_lock(directory: &Path) -> Result<StateLock, String> {
+    let path = directory.join("state.lock");
+    for _ in 0..STATE_LOCK_ATTEMPTS {
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(StateLock { path }),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(format!("failed to acquire state lock: {error}")),
+        }
+    }
+    Err("remote job state lock timed out".to_string())
+}
+
 fn timestamp() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -181,6 +206,12 @@ fn write_state(
     exit_code: Option<i32>,
     reason: Option<&str>,
 ) -> Result<(), String> {
+    let _state_lock = acquire_state_lock(directory)?;
+    if let Some(current) = read_state(directory) {
+        if state_is_terminal(&current) {
+            return Ok(());
+        }
+    }
     let now = timestamp();
     let mut state = json!({
         "schemaVersion": PROTOCOL_VERSION,

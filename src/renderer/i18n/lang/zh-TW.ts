@@ -2157,6 +2157,7 @@ export const zhTW = {
   "rightPanel.fileViewerSaved": "已儲存",
   "rightPanel.fileViewerSavedStrongAtomic": "已儲存（強原子）",
   "rightPanel.fileViewerSavedAtomicBestEffort": "已儲存（盡力原子）",
+  "rightPanel.fileViewerSavedCompatibility": "已儲存（相容模式）",
   "rightPanel.fileViewerSaveConflict": "遠端檔案已變更。請重新載入後再儲存修改。",
   "rightPanel.fileViewerDraftPending": "草稿待同步",
   "rightPanel.fileViewerDraftConflict": "草稿衝突",
