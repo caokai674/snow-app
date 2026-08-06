@@ -52,6 +52,7 @@ const MAX_OUTPUT_READ_BYTES = 64 * 1024;
 const SUCCESS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const FAILURE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const BACKEND_PROBE_CACHE_MS = 10 * 60 * 1000;
+const BACKEND_PROBE_FAILURES = new Map<string, string>();
 const STATE_LOCK_ATTEMPTS = 400;
 const POSIX_CANCEL_GRACE_SECONDS = 5;
 const POSIX_RUNNER_POLL_SECONDS = 0.2;
@@ -950,13 +951,18 @@ const buildRunnerScript = (jobId: string, createdAt: string): string => [
 const backendProbeScript = (markerPath: string): string =>
   `sleep 1; printf ok > ${shellQuote(markerPath)}`;
 
-const windowsBackendProbeScript = (markerPath: string): string =>
+const windowsBackendProbeScript = (
+  startedMarkerPath: string,
+  markerPath: string
+): string =>
   // Avoid first-use PowerShell module loading in a probe that runs as a new
   // OpenSSH user. The test still writes only after the launching session ends.
-  `[System.Threading.Thread]::Sleep(500); [System.IO.File]::WriteAllText('${markerPath.replace(
-    /'/g,
-    "''"
-  )}', 'ok', [System.Text.Encoding]::ASCII)`;
+  [
+    "[System.Threading.Thread]::Sleep(750)",
+    `[System.IO.File]::WriteAllText('${startedMarkerPath.replace(/'/g, "''")}', \"$PID|$env:USERNAME\", [System.Text.Encoding]::ASCII)`,
+    "[System.Threading.Thread]::Sleep(1000)",
+    `[System.IO.File]::WriteAllText('${markerPath.replace(/'/g, "''")}', 'ok', [System.Text.Encoding]::ASCII)`,
+  ].join("; ");
 
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -988,6 +994,7 @@ const verifyBackendLiveness = async (
     await withSshSession(workspacePath, async (sessionId) => {
       const root = await getRemoteJobRoot(sessionId, capabilities);
       const marker = `${root}/.backend-probe-${probeId}`;
+      const startedMarker = `${marker}.started`;
       const probeScript = backendProbeScript(marker);
       if (backend.kind === "systemd-user") {
         await runShell(
@@ -1010,7 +1017,7 @@ const verifyBackendLiveness = async (
       } else if (backend.kind === "windows-job") {
         const output = await launchWindowsDetachedPowerShell(
           sessionId,
-          windowsBackendProbeScript(marker)
+          windowsBackendProbeScript(startedMarker, marker)
         );
         if (!/^\d+$/.test(output.trim())) {
           throw new Error("Windows backend probe did not return a process ID");
@@ -1027,6 +1034,7 @@ const verifyBackendLiveness = async (
     await withSshSession(workspacePath, async (sessionId) => {
       const root = await getRemoteJobRoot(sessionId, capabilities);
       const marker = `${root}/.backend-probe-${probeId}`;
+      const startedMarker = `${marker}.started`;
       const deadline =
         Date.now() +
         (backend.kind === "windows-job"
@@ -1038,6 +1046,9 @@ const verifyBackendLiveness = async (
           if (content.toString("utf8") === "ok") {
             if (capabilities.platform === "windows") {
               await removeWindowsRemotePath(sessionId, marker);
+              await removeWindowsRemotePath(sessionId, startedMarker).catch(
+                () => undefined
+              );
             } else {
               await runShell(sessionId, `rm -f -- ${shellQuote(marker)}`);
             }
@@ -1048,11 +1059,33 @@ const verifyBackendLiveness = async (
           backend.kind === "windows-job" ? WINDOWS_BACKEND_PROBE_POLL_MS : 125
         );
       }
-      throw new Error("Remote backend did not survive the SSH disconnect");
+      let diagnostic = "detached process did not start after the SSH disconnect";
+      if (
+        backend.kind === "windows-job" &&
+        (await remotePathExists(sessionId, startedMarker))
+      ) {
+        const started = (await readSshFile(sessionId, startedMarker))
+          .toString("utf8")
+          .trim();
+        await removeWindowsRemotePath(sessionId, startedMarker).catch(
+          () => undefined
+        );
+        diagnostic = `detached process started after disconnect (${started || "identity unavailable"}) but did not finish`;
+      }
+      throw new Error(
+        `Remote backend did not survive the SSH disconnect: ${diagnostic}`
+      );
     });
     BACKEND_PROBE_CACHE.set(cacheKey, Date.now() + BACKEND_PROBE_CACHE_MS);
+    BACKEND_PROBE_FAILURES.delete(cacheKey);
     return true;
-  } catch {
+  } catch (error) {
+    const reason =
+      error instanceof Error ? error.message.slice(0, 240) : String(error).slice(0, 240);
+    BACKEND_PROBE_FAILURES.set(
+      cacheKey,
+      reason
+    );
     return false;
   }
 };
@@ -1079,9 +1112,14 @@ const selectBackend = async (
       return backend;
     }
   }
+  const probeFailure = requested
+    ? BACKEND_PROBE_FAILURES.get(`${workspacePath}|${requested}`)
+    : undefined;
   throw new Error(
     requested
-      ? `Remote Job backend ${requested} is unavailable or failed disconnect verification`
+      ? `Remote Job backend ${requested} is unavailable or failed disconnect verification${
+          probeFailure ? `: ${probeFailure}` : ""
+        }`
       : "No Remote Job backend passed disconnect verification"
   );
 };
