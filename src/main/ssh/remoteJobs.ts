@@ -52,6 +52,8 @@ const FAILURE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const BACKEND_PROBE_CACHE_MS = 10 * 60 * 1000;
 const STATE_LOCK_ATTEMPTS = 400;
 const POSIX_CANCEL_GRACE_SECONDS = 5;
+const POSIX_RUNNER_POLL_SECONDS = 0.2;
+const INACTIVE_RUNNER_SETTLE_MS = 750;
 
 export type RemoteJobCancellationPolicy = "cancel_remote" | "detach_only";
 
@@ -880,12 +882,28 @@ const buildRunnerScript = (jobId: string, createdAt: string): string => [
   '  exit 0',
   "fi",
   'timeout_seconds=$(( (timeout_ms + 999) / 1000 ))',
+  "signal_command_group() {",
+  '  signal="$1"',
+  '  if [ -x /bin/kill ]; then',
+  '    /bin/kill -"$signal" -- "-$command_pgid" 2>/dev/null || true',
+  '  elif [ -x /usr/bin/kill ]; then',
+  '    /usr/bin/kill -"$signal" -- "-$command_pgid" 2>/dev/null || true',
+  '  else',
+  '    kill -"$signal" "-$command_pgid" 2>/dev/null || true',
+  '  fi',
+  "}",
   "terminate_command_group() {",
   '  signal="$1"',
-  '  kill -"$signal" -- "-$command_pgid" 2>/dev/null || kill -"$signal" "$command_pid" 2>/dev/null || true',
+  '  signal_command_group "$signal"',
   "}",
   "command_group_active() {",
-  '  kill -0 -- "-$command_pgid" 2>/dev/null || kill -0 "$command_pid" 2>/dev/null',
+  '  if [ -x /bin/kill ]; then',
+  '    /bin/kill -0 -- "-$command_pgid" 2>/dev/null',
+  '  elif [ -x /usr/bin/kill ]; then',
+  '    /usr/bin/kill -0 -- "-$command_pgid" 2>/dev/null',
+  '  else',
+  '    kill -0 "-$command_pgid" 2>/dev/null',
+  '  fi',
   "}",
   'setsid /bin/sh "$job_dir/command.sh" >> "$log_path" 2>&1 &',
   'command_pid="$!"',
@@ -910,7 +928,7 @@ const buildRunnerScript = (jobId: string, createdAt: string): string => [
   '    terminate_command_group KILL',
   '    termination_deadline=$(( $(date +%s) + 1 ))',
   "  fi",
-  "  sleep 1",
+  `  sleep ${POSIX_RUNNER_POLL_SECONDS}`,
   "done",
   'wait "$command_pid" || command_exit_code="$?"',
   'command_exit_code="${command_exit_code:-0}"',
@@ -1572,16 +1590,23 @@ export const getRemoteJob = async (
         })
         .catch(() => "active" as const);
       if (activity === "inactive") {
-        resolvedState = await writeRemoteState(
-          sessionId,
-          jobDirectory,
-          state,
-          {
-            status: "lost",
-            reason: "backend inactive before a terminal state was recorded",
-          },
-          capabilities
-        );
+        // A runner writes its terminal state just before it exits. Re-read it
+        // after a short settle period so an inactive probe cannot turn that
+        // terminal update into a stale `lost` state.
+        await wait(INACTIVE_RUNNER_SETTLE_MS);
+        const settledState = await readRemoteState(sessionId, jobDirectory, jobId);
+        resolvedState = TERMINAL_STATUSES.has(settledState.status)
+          ? settledState
+          : await writeRemoteState(
+              sessionId,
+              jobDirectory,
+              settledState,
+              {
+                status: "lost",
+                reason: "backend inactive before a terminal state was recorded",
+              },
+              capabilities
+            );
       }
     }
     const outputBytes = await getRemoteOutput(

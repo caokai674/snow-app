@@ -163,12 +163,25 @@ jobs:
             New-LocalUser -Name snowssh -Password $password -PasswordNeverExpires | Out-Null
           }
           $config = 'C:\ProgramData\ssh\sshd_config'
+          if (-not (Test-Path -LiteralPath $config)) {
+            $sshd = (Get-Command sshd.exe -ErrorAction Stop).Source
+            $defaultConfig = Join-Path (Split-Path -Parent $sshd) 'sshd_config_default'
+            if (-not (Test-Path -LiteralPath $defaultConfig)) {
+              throw "OpenSSH default configuration was not installed: $defaultConfig"
+            }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $config) | Out-Null
+            Copy-Item -LiteralPath $defaultConfig -Destination $config -Force
+          }
           $configLines = Get-Content -LiteralPath $config | Where-Object {
             $_ -notmatch '^\s*(PasswordAuthentication|Subsystem\s+sftp)\b'
           }
           $configLines += 'PasswordAuthentication yes'
           $configLines += 'Subsystem sftp sftp-server.exe'
           Set-Content -LiteralPath $config -Value $configLines
+          & (Get-Command sshd.exe -ErrorAction Stop).Source -t
+          if ($LASTEXITCODE -ne 0) {
+            throw "OpenSSH configuration validation failed with exit code $LASTEXITCODE"
+          }
           Set-Service -Name sshd -StartupType Manual
           Restart-Service -Name sshd
 
