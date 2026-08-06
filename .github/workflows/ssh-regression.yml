@@ -175,9 +175,17 @@ jobs:
             throw "OpenSSH host-key generation failed with exit code $LASTEXITCODE"
           }
           $hostKeyPath = Join-Path $env:ProgramData 'ssh\ssh_host_ed25519_key'
-          & icacls.exe $hostKeyPath /inheritance:r /setowner '*S-1-5-18' /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null
+          & icacls.exe $hostKeyPath /inheritance:r | Out-Null
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to restrict OpenSSH host-key permissions with exit code $LASTEXITCODE"
+            throw "Failed to remove inherited OpenSSH host-key permissions with exit code $LASTEXITCODE"
+          }
+          & icacls.exe $hostKeyPath /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to grant OpenSSH host-key permissions with exit code $LASTEXITCODE"
+          }
+          & icacls.exe $hostKeyPath /setowner '*S-1-5-18' | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to set the OpenSSH host-key owner with exit code $LASTEXITCODE"
           }
           $hostKey = $hostKeyPath.Replace('\', '/')
           $sftpServer = (Join-Path (Split-Path -Parent $sshd) 'sftp-server.exe').Replace('\', '/')
