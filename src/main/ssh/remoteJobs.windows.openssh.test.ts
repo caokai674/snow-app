@@ -25,8 +25,9 @@ vi.mock("./sshHostKeys", () => ({
   }),
 }));
 
-import { connectSsh, disconnectAllSsh, disconnectSsh, executeSshCommand } from "./sshManager";
+import { connectSsh, disconnectAllSsh, disconnectSsh } from "./sshManager";
 import { cancelRemoteJob, getRemoteJob, startRemoteJob } from "./remoteJobs";
+import { runWindowsPowerShell } from "./windowsRemoteRunner";
 
 const enabled = process.env.SNOW_WINDOWS_SSH_TEST === "1";
 const openSsh = enabled ? describe : describe.skip;
@@ -65,9 +66,9 @@ openSsh("Durable Remote Job Windows OpenSSH", () => {
       password: windowsTestPassword,
     });
     try {
-      await executeSshCommand(
+      await runWindowsPowerShell(
         sessionId,
-        `powershell.exe -NoProfile -NonInteractive -Command "New-Item -ItemType Directory -Force -Path 'C:/Users/${user}/workspace' | Out-Null; Remove-Item -Force -Recurse -ErrorAction SilentlyContinue (Join-Path $env:LOCALAPPDATA 'SnowApp/jobs')"`
+        `New-Item -ItemType Directory -Force -Path 'C:/Users/${user}/workspace' | Out-Null; Remove-Item -Force -Recurse -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'SnowApp/jobs')`,
       );
     } finally {
       disconnectSsh(sessionId);
@@ -147,9 +148,9 @@ openSsh("Durable Remote Job Windows OpenSSH", () => {
       while (!childPid && Date.now() < childDeadline) {
         try {
           childPid = (
-            await executeSshCommand(
+            await runWindowsPowerShell(
               childSession,
-              `powershell.exe -NoProfile -NonInteractive -Command "Get-Content -LiteralPath '${childPidPath}' -Raw"`
+              `Get-Content -LiteralPath '${childPidPath}' -Raw`,
             )
           ).trim();
         } catch {
@@ -173,9 +174,9 @@ openSsh("Durable Remote Job Windows OpenSSH", () => {
     });
     try {
       await expect(
-        executeSshCommand(
+        runWindowsPowerShell(
           probeSession,
-          `powershell.exe -NoProfile -NonInteractive -Command "if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { Write-Output alive } else { Write-Output gone }"`
+          `if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { [Console]::Out.Write('alive') } else { [Console]::Out.Write('gone') }`,
         )
       ).resolves.toContain("gone");
     } finally {
