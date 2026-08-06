@@ -83,7 +83,9 @@ describe("Windows Remote Job runner", () => {
     expect(runner).toContain("ProcessTerminate");
     expect(runner).toContain("AssignProcessToJobObject");
     expect(runner).toContain("TerminateJobObject");
+    expect(runner).toContain("$child.WaitForExit(250)");
     expect(runner).toContain("$child.WaitForExit(5000)");
+    expect(runner).not.toContain("$child.Refresh()");
     expect(runner).not.toContain("AssignProcessToJobObject($job, [IntPtr]$child.Id)");
     expect(runner).toContain("state.lock");
     expect(runner).toContain("ConvertFrom-Json");
