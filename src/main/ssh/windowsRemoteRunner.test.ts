@@ -73,7 +73,11 @@ describe("Windows Remote Job runner", () => {
     expect(runner).toContain("$runnerErrorPath = Join-Path $jobDirectory 'runner-error.log'");
     expect(runner).toContain("WriteAllText($runnerErrorPath, $_.Exception.ToString(), $utf8NoBom)");
     expect(runner).toContain("CreateKillOnCloseJob");
+    expect(runner).toContain("OpenProcess");
+    expect(runner).toContain("ProcessSetQuota");
+    expect(runner).toContain("ProcessTerminate");
     expect(runner).toContain("AssignProcessToJobObject");
+    expect(runner).not.toContain("AssignProcessToJobObject($job, [IntPtr]$child.Id)");
     expect(runner).toContain("state.lock");
     expect(runner).toContain("ConvertFrom-Json");
     expect(runner).toContain("runner-error.log");
