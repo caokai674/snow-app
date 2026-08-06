@@ -40,9 +40,9 @@ export const buildWindowsScheduledTaskLauncherScript = (
     `$taskCommand = ${powerShellQuote(taskCommand)}`,
     "$taskArguments = @('/Create', '/TN', $taskName, '/SC', 'ONCE', '/ST', '23:59', '/SD', '12/31/2099', '/TR', $taskCommand, '/RL', 'LIMITED', '/F')",
     "$createOutput = & schtasks.exe @taskArguments 2>&1",
-    "if ($LASTEXITCODE -ne 0) { throw \"Failed to create detached Windows task $taskName with exit code $LASTEXITCODE: $($createOutput | Out-String)\" }",
+    "if ($LASTEXITCODE -ne 0) { throw \"Failed to create detached Windows task $taskName with exit code $($LASTEXITCODE): $($createOutput | Out-String)\" }",
     "$runOutput = & schtasks.exe /Run /TN $taskName 2>&1",
-    "if ($LASTEXITCODE -ne 0) { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null; throw \"Failed to start detached Windows task $taskName with exit code $LASTEXITCODE: $($runOutput | Out-String)\" }",
+    "if ($LASTEXITCODE -ne 0) { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null; throw \"Failed to start detached Windows task $taskName with exit code $($LASTEXITCODE): $($runOutput | Out-String)\" }",
     "",
   ].join("\r\n");
 };

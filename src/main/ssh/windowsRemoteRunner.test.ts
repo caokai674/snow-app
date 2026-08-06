@@ -71,6 +71,7 @@ describe("Windows Remote Job runner", () => {
     expect(launcher).toContain("& schtasks.exe /Run /TN $taskName");
     expect(launcher).toContain("'/RL', 'LIMITED'");
     expect(launcher).toContain("'12/31/2099'");
+    expect(launcher).toContain("exit code $($LASTEXITCODE):");
     expect(launcher).not.toContain("Start-Process");
 
     executeSshCommandMock.mockClear();
