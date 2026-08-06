@@ -182,12 +182,13 @@ jobs:
             'PasswordAuthentication yes'
             "Subsystem sftp $sftpServer"
             'PermitRootLogin no'
+            'LogLevel DEBUG3'
           ) | Set-Content -LiteralPath $config -Encoding ascii
           & $sshd -t -f $config
           if ($LASTEXITCODE -ne 0) {
             throw "OpenSSH configuration validation failed with exit code $LASTEXITCODE"
           }
-          $server = Start-Process -FilePath $sshd -ArgumentList @('-D', '-f', $config, '-E', $log) -PassThru -WindowStyle Hidden
+          $server = Start-Process -FilePath $sshd -ArgumentList @('-D', '-ddd', '-f', $config, '-E', $log) -PassThru -WindowStyle Hidden
           $ready = $false
           for ($attempt = 0; $attempt -lt 50; $attempt++) {
             $probe = [System.Net.Sockets.TcpClient]::new()
@@ -226,8 +227,12 @@ jobs:
         if: failure()
         shell: pwsh
         run: |
+          if ($env:SNOW_WINDOWS_SSH_TEST_SSHD_PID) {
+            Stop-Process -Id $env:SNOW_WINDOWS_SSH_TEST_SSHD_PID -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 500
+          }
           if ($env:SNOW_WINDOWS_SSH_TEST_LOG -and (Test-Path -LiteralPath $env:SNOW_WINDOWS_SSH_TEST_LOG)) {
-            Get-Content -LiteralPath $env:SNOW_WINDOWS_SSH_TEST_LOG
+            Get-Content -LiteralPath $env:SNOW_WINDOWS_SSH_TEST_LOG -ErrorAction Continue
           }
 
       - name: Stop isolated Windows OpenSSH test server
