@@ -3,9 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("./sshManager", () => ({
   executeSshCommand: vi.fn(),
+  getSshSession: vi.fn(),
 }));
 
-import { executeSshCommand } from "./sshManager";
+import { executeSshCommand, getSshSession } from "./sshManager";
 import {
   buildWindowsCommandScript,
   buildWindowsRunnerScript,
@@ -17,6 +18,15 @@ import {
 } from "./windowsRemoteRunner";
 
 const executeSshCommandMock = vi.mocked(executeSshCommand);
+const getSshSessionMock = vi.mocked(getSshSession);
+
+const passwordSession = {
+  params: {
+    username: "snowssh",
+    authMethod: "password" as const,
+    password: "test-password",
+  },
+};
 
 describe("Windows Remote Job runner", () => {
   it("requires a PowerShell host with Job Object support", () => {
@@ -65,18 +75,24 @@ describe("Windows Remote Job runner", () => {
     const taskName = "SnowAppRemoteJob-018f5f17-5d18-7bd1-9210-117f17d50001";
     const launcher = buildWindowsScheduledTaskLauncherScript(
       taskName,
-      "C:/Users/snow/AppData/Local/SnowApp/jobs/probe.ps1"
+      "C:/Users/snow/AppData/Local/SnowApp/jobs/probe.ps1",
+      passwordSession.params
     );
     expect(launcher).toContain("& schtasks.exe @taskArguments");
     expect(launcher).toContain("& schtasks.exe /Run /TN $taskName");
     expect(launcher).toContain("'/RL', 'LIMITED'");
     expect(launcher).toContain("'12/31/2099'");
-    expect(launcher).toContain("exit code $($LASTEXITCODE):");
+    expect(launcher).toContain("'/RU', $taskUsername, '/RP', $taskPassword");
+    expect(launcher).toContain("$taskUsername = 'snowssh'");
+    expect(launcher).toContain("exit code $($LASTEXITCODE)\"");
+    expect(launcher).not.toContain("$createOutput");
+    expect(launcher).not.toContain("$runOutput");
     expect(launcher).toContain("-File \"C:/Users/snow/AppData/Local/SnowApp/jobs/probe.ps1\"");
     expect(launcher).not.toContain("-EncodedCommand");
     expect(launcher).not.toContain("Start-Process");
 
     executeSshCommandMock.mockClear();
+    getSshSessionMock.mockReturnValue(passwordSession as never);
     executeSshCommandMock.mockResolvedValueOnce("");
     await launchWindowsRemoteJob(
       "session",
@@ -89,7 +105,26 @@ describe("Windows Remote Job runner", () => {
     const decoded = Buffer.from(encoded, "base64").toString("utf16le");
     expect(decoded).toContain("schtasks.exe @taskArguments");
     expect(decoded).toContain(taskName);
+    expect(decoded).toContain("'/RU', $taskUsername, '/RP', $taskPassword");
     expect(decoded).not.toContain("Start-Process");
+  });
+
+  it("rejects non-password sessions without exposing a credential", async () => {
+    executeSshCommandMock.mockClear();
+    getSshSessionMock.mockReturnValue({
+      params: { username: "snowssh", authMethod: "privateKey" },
+    } as never);
+
+    await expect(
+      launchWindowsRemoteJob(
+        "session",
+        "C:/Users/snow/AppData/Local/SnowApp/jobs/runner.ps1",
+        "018f5f17-5d18-7bd1-9210-117f17d50001"
+      )
+    ).rejects.toThrow(
+      "Windows durable jobs require password authentication for detached scheduling"
+    );
+    expect(executeSshCommandMock).not.toHaveBeenCalled();
   });
 
   it("suppresses first-use PowerShell progress for every encoded command", async () => {

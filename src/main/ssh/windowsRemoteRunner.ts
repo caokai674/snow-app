@@ -1,5 +1,9 @@
 import { Buffer } from "node:buffer";
-import { executeSshCommand, type SshCapabilities } from "./sshManager";
+import {
+  executeSshCommand,
+  getSshSession,
+  type SshCapabilities,
+} from "./sshManager";
 
 const powerShellQuote = (value: string): string =>
   `'${value.replace(/'/g, "''")}'`;
@@ -30,9 +34,25 @@ export const runWindowsPowerShell = (
 
 const getWindowsTaskName = (id: string): string => `SnowAppRemoteJob-${id}`;
 
+type WindowsTaskCredentials = {
+  username: string;
+  password: string;
+};
+
+const getWindowsTaskCredentials = (sessionId: string): WindowsTaskCredentials => {
+  const params = getSshSession(sessionId)?.params;
+  if (params?.authMethod !== "password" || !params.password) {
+    throw new Error(
+      "Windows durable jobs require password authentication for detached scheduling"
+    );
+  }
+  return { username: params.username, password: params.password };
+};
+
 export const buildWindowsScheduledTaskLauncherScript = (
   taskName: string,
-  scriptPath: string
+  scriptPath: string,
+  credentials: WindowsTaskCredentials
 ): string => {
   const taskCommand =
     "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " +
@@ -41,11 +61,13 @@ export const buildWindowsScheduledTaskLauncherScript = (
     "$ErrorActionPreference = 'Stop'",
     `$taskName = ${powerShellQuote(taskName)}`,
     `$taskCommand = ${powerShellQuote(taskCommand)}`,
-    "$taskArguments = @('/Create', '/TN', $taskName, '/SC', 'ONCE', '/ST', '23:59', '/SD', '12/31/2099', '/TR', $taskCommand, '/RL', 'LIMITED', '/F')",
-    "$createOutput = & schtasks.exe @taskArguments 2>&1",
-    "if ($LASTEXITCODE -ne 0) { throw \"Failed to create detached Windows task $taskName with exit code $($LASTEXITCODE): $($createOutput | Out-String)\" }",
-    "$runOutput = & schtasks.exe /Run /TN $taskName 2>&1",
-    "if ($LASTEXITCODE -ne 0) { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null; throw \"Failed to start detached Windows task $taskName with exit code $($LASTEXITCODE): $($runOutput | Out-String)\" }",
+    `$taskUsername = ${powerShellQuote(credentials.username)}`,
+    `$taskPassword = ${powerShellQuote(credentials.password)}`,
+    "$taskArguments = @('/Create', '/TN', $taskName, '/SC', 'ONCE', '/ST', '23:59', '/SD', '12/31/2099', '/TR', $taskCommand, '/RU', $taskUsername, '/RP', $taskPassword, '/RL', 'LIMITED', '/F')",
+    "& schtasks.exe @taskArguments 2>$null | Out-Null",
+    "if ($LASTEXITCODE -ne 0) { throw \"Failed to create detached Windows task $taskName with exit code $($LASTEXITCODE)\" }",
+    "& schtasks.exe /Run /TN $taskName 2>$null | Out-Null",
+    "if ($LASTEXITCODE -ne 0) { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null; throw \"Failed to start detached Windows task $taskName with exit code $($LASTEXITCODE)\" }",
     "",
   ].join("\r\n");
 };
@@ -59,7 +81,11 @@ export const launchWindowsDetachedPowerShell = (
 ): Promise<string> =>
   runWindowsPowerShell(
     sessionId,
-    buildWindowsScheduledTaskLauncherScript(taskName, scriptPath),
+    buildWindowsScheduledTaskLauncherScript(
+      taskName,
+      scriptPath,
+      getWindowsTaskCredentials(sessionId)
+    ),
     timeoutMs,
     signal
   );
