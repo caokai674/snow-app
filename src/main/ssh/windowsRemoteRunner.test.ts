@@ -64,7 +64,10 @@ describe("Windows Remote Job runner", () => {
       "018f5f17-5d18-7bd1-9210-117f17d50001",
       "2026-08-05T00:00:00.000Z"
     );
-    expect(runner).toContain("[System.IO.File]::Replace");
+    expect(runner).toContain("MoveFileEx");
+    expect(runner).toContain("MoveFileReplaceExisting");
+    expect(runner).toContain("MoveFileWriteThrough");
+    expect(runner).not.toContain("[System.IO.File]::Replace");
     expect(runner).toContain("CreateKillOnCloseJob");
     expect(runner).toContain("AssignProcessToJobObject");
     expect(runner).toContain("state.lock");
