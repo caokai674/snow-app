@@ -25,35 +25,44 @@ export const runWindowsPowerShell = (
     { timeoutMs, signal }
   );
 
-export const buildWindowsDetachedProcessLauncherScript = (
+const getWindowsTaskName = (id: string): string => `SnowAppRemoteJob-${id}`;
+
+export const buildWindowsScheduledTaskLauncherScript = (
+  taskName: string,
   payload: string
 ): string => {
-  const commandLine =
+  const taskCommand =
     "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " +
     encodeWindowsPowerShell(payload);
   return [
     "$ErrorActionPreference = 'Stop'",
-    `$commandLine = ${powerShellQuote(commandLine)}`,
-    "$startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ CreateFlags = 16777216; ShowWindow = 0 }",
-    "$result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine; ProcessStartupInformation = $startup }",
-    "if ($result.ReturnValue -ne 0) { throw \"Windows WMI process creation failed with return value $($result.ReturnValue)\" }",
-    "[Console]::Out.Write($result.ProcessId)",
+    `$taskName = ${powerShellQuote(taskName)}`,
+    `$taskCommand = ${powerShellQuote(taskCommand)}`,
+    "$taskArguments = @('/Create', '/TN', $taskName, '/SC', 'ONCE', '/ST', '23:59', '/SD', '12/31/2099', '/TR', $taskCommand, '/RL', 'LIMITED', '/F')",
+    "$createOutput = & schtasks.exe @taskArguments 2>&1",
+    "if ($LASTEXITCODE -ne 0) { throw \"Failed to create detached Windows task $taskName with exit code $LASTEXITCODE: $($createOutput | Out-String)\" }",
+    "$runOutput = & schtasks.exe /Run /TN $taskName 2>&1",
+    "if ($LASTEXITCODE -ne 0) { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null; throw \"Failed to start detached Windows task $taskName with exit code $LASTEXITCODE: $($runOutput | Out-String)\" }",
     "",
   ].join("\r\n");
 };
 
 export const launchWindowsDetachedPowerShell = (
   sessionId: string,
+  taskName: string,
   payload: string,
   timeoutMs = 15_000,
   signal?: AbortSignal
 ): Promise<string> =>
   runWindowsPowerShell(
     sessionId,
-    buildWindowsDetachedProcessLauncherScript(payload),
+    buildWindowsScheduledTaskLauncherScript(taskName, payload),
     timeoutMs,
     signal
   );
+
+export const getWindowsRemoteJobTaskName = (jobId: string): string =>
+  getWindowsTaskName(jobId);
 
 export const isWindowsRemote = (capabilities: SshCapabilities): boolean =>
   capabilities.platform === "windows" &&
@@ -125,6 +134,7 @@ export const buildWindowsRunnerScript = (jobId: string, createdAt: string): stri
     "$ErrorActionPreference = 'Stop'",
     "$jobDirectory = $PSScriptRoot",
     `$jobId = ${powerShellQuote(jobId)}`,
+    "$scheduledTaskName = 'SnowAppRemoteJob-' + $jobId",
     `$createdAt = ${powerShellQuote(createdAt)}`,
     "$statePath = Join-Path $jobDirectory 'state.json'",
     "$revisionPath = Join-Path $jobDirectory 'revision'",
@@ -181,24 +191,23 @@ export const buildWindowsRunnerScript = (jobId: string, createdAt: string): stri
     "  elseif ($child.ExitCode -eq 0) { Write-State 'succeeded' 0 '' }",
     "  else { Write-State 'failed' $child.ExitCode 'exit' }",
     "} catch { Write-State 'launch_failed' $null $_.Exception.Message }",
-    "finally { if ($job -and $job -ne [IntPtr]::Zero) { [SnowWindowsJob]::CloseHandle($job) | Out-Null } }",
+    "finally { if ($job -and $job -ne [IntPtr]::Zero) { [SnowWindowsJob]::CloseHandle($job) | Out-Null }; & schtasks.exe /Delete /TN $scheduledTaskName /F 2>$null | Out-Null }",
     "",
   ].join("\r\n");
 
 export const launchWindowsRemoteJob = async (
   sessionId: string,
   runnerPath: string,
+  jobId: string,
   signal?: AbortSignal
 ): Promise<void> => {
-  const output = await launchWindowsDetachedPowerShell(
+  await launchWindowsDetachedPowerShell(
     sessionId,
+    getWindowsTaskName(jobId),
     `& ${powerShellQuote(runnerPath)}`,
     15_000,
     signal
   );
-  if (!/^\d+$/.test(output.trim())) {
-    throw new Error("Windows Job backend did not return a runner PID");
-  }
 };
 
 export const inspectWindowsRemoteJob = async (
