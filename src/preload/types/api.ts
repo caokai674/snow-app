@@ -66,7 +66,15 @@ export type ResponsesApiRequest = {
   directoryId?: string | null;
   checkpointId?: string | null;
   contextCompaction?: boolean | null;
+  /**
+   * Internal auto-compaction resume mode: the compaction handoff is already
+   * persisted as the latest `context_compaction` boundary, so `messages` is a
+   * placeholder that must not be re-injected into the payload nor persisted
+   * as normal user messages.
+   */
+  resumeAfterCompaction?: boolean | null;
   subAgentToolsJson?: string | null;
+  subAgentSystemPrompt?: string | null;
   subAgentConfigProfile?: string | null;
   skipContext?: boolean | null;
   planMode?: boolean | null;
@@ -103,4 +111,9 @@ export type ResponsesApiStreamChunk = {
   streamTokenCount: number;
   elapsedMs: number;
   ttftMs: number;
+  /** External-vision textify progress event. Present only while the backend
+   *  describes user images with the external vision model; payload is a JSON
+   *  string like {"phase":"describing","index":1,"total":2,"model":"..."}.
+   *  The renderer shows an intermediate status card for it. */
+  visionStatus?: string;
 };

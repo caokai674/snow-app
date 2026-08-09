@@ -14,9 +14,12 @@ struct PresetSensitiveCommand {
 }
 
 const PRESET_SENSITIVE_COMMANDS: &[PresetSensitiveCommand] = &[
+    // rm 必须是独立命令词（前一个字符不是 `-` 或词字符），且后跟至少一个
+    // 参数，才可能产生删除行为。旧规则 "rm " 无词边界，会误匹配 arm64、
+    // warm、--rm、--format 等任意包含 rm 的子串。
     PresetSensitiveCommand {
         command_id: "rm",
-        pattern: "rm ",
+        pattern: r"(?:^|[^-\w])rm\s+\S",
         description: "Delete files or directories (rm, rm -rf, etc.)",
         enabled: true,
     },
@@ -50,9 +53,12 @@ const PRESET_SENSITIVE_COMMANDS: &[PresetSensitiveCommand] = &[
         description: "Change file ownership",
         enabled: false,
     },
+    // dd 与 rm 同理：必须是独立命令词（前一个字符不是 `-` 或词字符），
+    // 且后跟至少一个参数，才可能产生实际的复制/覆写行为。旧规则 "dd "
+    // 无词边界，会误匹配 git add、address、--add 等任意包含 "dd " 的子串。
     PresetSensitiveCommand {
         command_id: "dd",
-        pattern: "dd ",
+        pattern: r"(?:^|[^-\w])dd\s+\S",
         description: "Low-level data copy (disk operations)",
         enabled: true,
     },
@@ -301,6 +307,32 @@ pub fn delete_sensitive_command_config(database_path: &Path, command_id: &str) -
 }
 
 fn seed_defaults_with_connection(connection: &Connection) -> rusqlite::Result<()> {
+    // 迁移：旧版内置 rm 规则的正则 "rm " 无词边界，会误匹配 arm64、warm、
+    // --rm、--format 等任意包含 "rm " 的子串。仅当该预设行仍保留旧 pattern
+    // （即用户未手动编辑过 pattern）时才升级，用户自定义的 pattern 不受影响。
+    connection.execute(
+        "UPDATE sensitive_command_configs
+            SET pattern = ?2,
+                updated_at = datetime('now', 'localtime')
+          WHERE command_id = ?1
+            AND is_preset = 1
+            AND pattern = ?3",
+        params!["rm", r"(?:^|[^-\w])rm\s+\S", "rm "],
+    )?;
+
+    // 迁移：旧版内置 dd 规则的正则 "dd " 无词边界，会误匹配 git add、
+    // address、--add 等任意包含 "dd " 的子串。仅当该预设行仍保留旧 pattern
+    // （即用户未手动编辑过 pattern）时才升级，用户自定义的 pattern 不受影响。
+    connection.execute(
+        "UPDATE sensitive_command_configs
+            SET pattern = ?2,
+                updated_at = datetime('now', 'localtime')
+          WHERE command_id = ?1
+            AND is_preset = 1
+            AND pattern = ?3",
+        params!["dd", r"(?:^|[^-\w])dd\s+\S", "dd "],
+    )?;
+
     for (index, command) in PRESET_SENSITIVE_COMMANDS.iter().enumerate() {
         connection.execute(
             "INSERT OR IGNORE INTO sensitive_command_configs (

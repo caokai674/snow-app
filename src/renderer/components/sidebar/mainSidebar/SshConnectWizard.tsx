@@ -1,4 +1,5 @@
 import {
+  AlertCircle,
   ArrowLeft,
   ArrowRight,
   Check,
@@ -19,14 +20,34 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useI18n } from "../../../i18n";
+import { localizeSshError } from "../../../utils/sshErrorMessages";
 import type {
   SshAuthMethod,
+  SshConfigHost,
+  SshConnectErrorCode,
   SshConnectParams,
   SshCredentialRecord,
   SshDirectoryEntry,
 } from "../../../../preload";
 
 type WizardStep = "connect" | "browse";
+
+/** 连接失败展示状态：code 决定本地化文案，detail 展示原始技术原因。 */
+type ConnectErrorState = {
+  code: SshConnectErrorCode | null;
+  message: string;
+  detail?: string;
+};
+
+/** 错误码 -> i18n key 的映射，文案按当前界面语言展示。 */
+const SSH_ERROR_I18N_KEYS: Record<SshConnectErrorCode, string> = {
+  network: "sidebar.sshErrorNetwork",
+  timeout: "sidebar.sshErrorTimeout",
+  auth: "sidebar.sshErrorAuth",
+  sftp: "sidebar.sshErrorSftp",
+  invalid: "sidebar.sshErrorInvalid",
+  unknown: "sidebar.sshErrorUnknown",
+};
 
 type SshConnectWizardProps = {
   onConfirm: (sshUrl: string) => void;
@@ -76,7 +97,9 @@ export function SshConnectWizard({
   const [rememberCredential, setRememberCredential] = useState(true);
 
   const [isConnecting, setIsConnecting] = useState(false);
-  const [connectError, setConnectError] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState<ConnectErrorState | null>(
+    null
+  );
   const [hostKeyChanged, setHostKeyChanged] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
 
@@ -84,13 +107,18 @@ export function SshConnectWizard({
   const [pathHistory, setPathHistory] = useState<string[]>(["/"]);
   const [entries, setEntries] = useState<SshDirectoryEntry[]>([]);
   const [isLoadingEntries, setIsLoadingEntries] = useState(false);
-  const [entriesError, setEntriesError] = useState<string | null>(null);
+  const [entriesError, setEntriesError] = useState<ConnectErrorState | null>(
+    null
+  );
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
   const [savedCredentials, setSavedCredentials] = useState<CredentialOption[]>(
     []
   );
   const [showSavedList, setShowSavedList] = useState(false);
+  // 本地 ~/.ssh/config 中解析出的主机条目，点击后自动填充表单
+  const [configHosts, setConfigHosts] = useState<SshConfigHost[]>([]);
+  const [showConfigList, setShowConfigList] = useState(false);
   const directoryRequestIdRef = useRef(0);
   const pendingNavigationPathRef = useRef<string | null>(null);
   const wizardRef = useRef<HTMLDivElement | null>(null);
@@ -109,6 +137,26 @@ export function SshConnectWizard({
       setSavedCredentials(options);
     });
   }, []);
+
+  useEffect(() => {
+    void window.snow.sshListConfigHosts().then(setConfigHosts);
+  }, []);
+
+  /** 点击 SSH config 条目：用解析出的字段填充表单（保留用户已填内容）。 */
+  const handleLoadConfigHost = (entry: SshConfigHost): void => {
+    setHost(entry.host);
+    setPort(entry.port);
+    setUsername(entry.user ?? username);
+    if (entry.identityFile) {
+      setAuthMethod("privateKey");
+      setPrivateKeyPath(entry.identityFile);
+    } else {
+      setAuthMethod("agent");
+    }
+    setPassword("");
+    setPassphrase("");
+    setShowConfigList(false);
+  };
 
   const loadEntries = useCallback(
     async (path: string): Promise<boolean> => {
@@ -139,13 +187,12 @@ export function SshConnectWizard({
         if (requestId !== directoryRequestIdRef.current) {
           return false;
         }
-        setEntriesError(
-          err instanceof Error
-            ? err.message
-            : t("sidebar.sshBrowseError", {
-                defaultValue: "Failed to list remote directory",
-              })
-        );
+        const localized = localizeSshError(err, t);
+        setEntriesError({
+          code: null,
+          message: localized.message,
+          detail: localized.detail,
+        });
         setEntries([]);
         return false;
       } finally {
@@ -250,7 +297,22 @@ export function SshConnectWizard({
     }
 
     try {
-      const id = await window.snow.sshConnect(params);
+      // 使用 sshConnectDetailed 直接消费结构化结果：contextBridge 序列化
+      // Error 会丢弃自定义属性（code/detail），不能在失败时依赖 err.code。
+      const result = await window.snow.sshConnectDetailed(params);
+      if (!result.ok) {
+        setHostKeyChanged(result.detail.includes("Host key changed"));
+        setConnectError({
+          code: result.code,
+          message: t(SSH_ERROR_I18N_KEYS[result.code], {
+            defaultValue: result.message,
+          }),
+          detail: result.detail,
+        });
+        return;
+      }
+
+      const id = result.sessionId;
       setSessionId(id);
       setHostKeyChanged(false);
 
@@ -269,14 +331,21 @@ export function SshConnectWizard({
 
       setStep("browse");
     } catch (err) {
+      // 后续操作（如保存凭证）仍可能抛异常，兜底展示原始消息。
       const message =
         err instanceof Error
           ? err.message
           : t("sidebar.sshConnectError", {
               defaultValue: "Failed to connect to SSH server",
             });
-      setConnectError(message);
-      setHostKeyChanged(message.startsWith("[SSH_HOST_KEY_CHANGED]"));
+      setHostKeyChanged(
+        message.includes("Host key changed") ||
+          message.startsWith("[SSH_HOST_KEY_CHANGED]")
+      );
+      setConnectError({
+        code: null,
+        message,
+      });
     } finally {
       setIsConnecting(false);
     }
@@ -487,6 +556,57 @@ export function SshConnectWizard({
                         <span>{cred.label}</span>
                         <span className="ssh-wizard-saved-method">
                           {cred.authMethod}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {configHosts.length > 0 ? (
+              <div className="ssh-wizard-saved-section">
+                <button
+                  className="ssh-wizard-saved-toggle"
+                  onClick={() => setShowConfigList((v) => !v)}
+                  type="button"
+                >
+                  <Key size={13} />
+                  <span>
+                    {t("sidebar.sshConfigSection", {
+                      defaultValue: "Hosts from SSH config ({{count}})",
+                      values: { count: configHosts.length },
+                    })}
+                  </span>
+                  <ChevronRight
+                    size={13}
+                    style={{
+                      transform: showConfigList ? "rotate(90deg)" : "none",
+                      transition: "transform 0.15s",
+                    }}
+                  />
+                </button>
+                {showConfigList ? (
+                  <div className="ssh-wizard-saved-list">
+                    {configHosts.map((entry) => (
+                      <button
+                        className="ssh-wizard-saved-item"
+                        key={entry.alias}
+                        onClick={() => handleLoadConfigHost(entry)}
+                        type="button"
+                        title={
+                          entry.identityFile
+                            ? `IdentityFile: ${entry.identityFile}`
+                            : undefined
+                        }
+                      >
+                        <Server size={12} />
+                        <span className="ssh-wizard-saved-name">
+                          {entry.alias}
+                        </span>
+                        <span className="ssh-wizard-saved-method">
+                          {entry.user ? `${entry.user}@` : ""}
+                          {entry.host}:{entry.port}
                         </span>
                       </button>
                     ))}
@@ -707,7 +827,18 @@ export function SshConnectWizard({
 
             {connectError ? (
               <div className="ssh-wizard-error" role="alert">
-                <span>{connectError}</span>
+                <AlertCircle size={13} className="ssh-wizard-error-icon" />
+                <div className="ssh-wizard-error-content">
+                  <span>{connectError.message}</span>
+                  {connectError.detail ? (
+                    <span className="ssh-wizard-error-detail">
+                      {t("sidebar.sshErrorDetail", {
+                        defaultValue: "Reason",
+                      })}
+                      : {connectError.detail}
+                    </span>
+                  ) : null}
+                </div>
                 {hostKeyChanged ? (
                   <button
                     className="ssh-wizard-host-key-confirm"
@@ -756,7 +887,20 @@ export function SshConnectWizard({
             </div>
 
             {entriesError ? (
-              <span className="ssh-wizard-error">{entriesError}</span>
+              <div className="ssh-wizard-error" role="alert">
+                <AlertCircle size={13} className="ssh-wizard-error-icon" />
+                <div className="ssh-wizard-error-content">
+                  <span>{entriesError.message}</span>
+                  {entriesError.detail ? (
+                    <span className="ssh-wizard-error-detail">
+                      {t("sidebar.sshErrorDetail", {
+                        defaultValue: "Reason",
+                      })}
+                      : {entriesError.detail}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
             ) : null}
 
             <div className="ssh-wizard-entries">

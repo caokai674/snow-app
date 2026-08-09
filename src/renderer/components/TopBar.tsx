@@ -13,14 +13,8 @@ import {
   Terminal,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion } from "motion/react";
 import type { WorkspaceDirectoryRecord } from "../../preload";
 import { useI18n } from "../i18n";
-import {
-  appleLayoutTransition,
-  appleSurfaceTransition,
-  useAppleThemeMotion,
-} from "../hooks/useAppleThemeMotion";
 import { useChatConversationContext } from "./mainContent/chatMessages";
 import { CodebaseSyncIndicator } from "./TopBar/CodebaseSyncIndicator";
 import { TodoPanelButton } from "./TopBar/TodoPanelButton";
@@ -53,9 +47,6 @@ export const TopBar = ({
   onOpenCodebase,
 }: TopBarProps): React.JSX.Element => {
   const { t } = useI18n();
-  const { enabled: appleMotionEnabled, reducedMotion } = useAppleThemeMotion();
-  const layoutTransition = appleLayoutTransition(reducedMotion);
-  const popoverTransition = appleSurfaceTransition(reducedMotion);
   const {
     handleNewChat,
     summary,
@@ -63,10 +54,22 @@ export const TopBar = ({
     activeConversationId,
     messages,
     isStreaming,
+    subAgentSessionEvents,
   } = useChatConversationContext();
   const [conversationDirectoryName, setConversationDirectoryName] = useState<
     string | undefined
   >(undefined);
+  // Sub-agent conversation meta (persisted record) for the active conversation
+  // plus the title of the parent conversation it was launched from. Used to
+  // render the header as the sub-agent's stage name instead of the project
+  // name when viewing a read-only sub-agent conversation.
+  const [activeConversationMeta, setActiveConversationMeta] = useState<{
+    conversationType: string;
+    title: string;
+    subAgentName: string;
+    parentConversationId: string;
+  } | null>(null);
+  const [parentConversationTitle, setParentConversationTitle] = useState("");
   const [isPlusMenuOpen, setIsPlusMenuOpen] = useState(false);
   const [isTodoPanelOpen, setIsTodoPanelOpen] = useState(false);
   const [isTodoPanelPinned, setIsTodoPanelPinned] = useState(false);
@@ -298,6 +301,50 @@ export const TopBar = ({
     };
   }, [conversationDirectoryId, activeDirectory]);
 
+  // Fetch the active conversation's persisted meta (conversation type, sub-agent
+  // fields, parent id) and, when it is a sub-agent conversation, the parent
+  // conversation's title so the header can show where the run came from.
+  useEffect(() => {
+    if (!activeConversationId) {
+      setActiveConversationMeta(null);
+      setParentConversationTitle("");
+      return;
+    }
+
+    let cancelled = false;
+    void window.snow
+      .getChatConversation(activeConversationId)
+      .then((record) => {
+        if (cancelled || !record) {
+          return null;
+        }
+        setActiveConversationMeta({
+          conversationType: record.conversationType,
+          title: record.title,
+          subAgentName: record.subAgentName,
+          parentConversationId: record.parentConversationId,
+        });
+        return record.parentConversationId
+          ? window.snow.getChatConversation(record.parentConversationId)
+          : null;
+      })
+      .then((parentRecord) => {
+        if (cancelled) {
+          return;
+        }
+        setParentConversationTitle(
+          parentRecord?.title || parentRecord?.summary || ""
+        );
+      })
+      .catch(() => {
+        // Best effort — the header falls back to the project name.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeConversationId]);
+
   const SidebarToggleIcon = isSidebarCollapsed ? SidebarOpen : SidebarClose;
   const sidebarToggleLabel = isSidebarCollapsed
     ? "Expand sidebar"
@@ -317,8 +364,31 @@ export const TopBar = ({
     ? conversationDirectoryName
     : activeDirectory?.name;
 
-  const headerTitle = summary || displayDirectoryName || "New Chat";
-  const headerSubtitle = displayDirectoryName || "";
+  // Sub-agent conversations: the header shows the stage name (the prompt
+  // truncated at activation) as the title and the launching parent
+  // conversation as the subtitle — the project name alone says nothing about
+  // what the run was doing.
+  const liveSubAgentEvent = activeConversationId
+    ? subAgentSessionEvents[activeConversationId]
+    : undefined;
+  const isSubAgentConversation =
+    Boolean(liveSubAgentEvent) ||
+    activeConversationMeta?.conversationType === "sub_agent";
+  const subAgentDisplayName =
+    liveSubAgentEvent?.agentName ?? activeConversationMeta?.subAgentName ?? "";
+
+  const headerTitle = isSubAgentConversation
+    ? activeConversationMeta?.title ||
+      (summary || displayDirectoryName || "New Chat")
+    : summary || displayDirectoryName || "New Chat";
+  const headerSubtitle = isSubAgentConversation
+    ? parentConversationTitle
+      ? t("chat.subAgentInfo.launchedBy", {
+          defaultValue: 'Launched by parent "{{title}}"',
+          values: { title: parentConversationTitle },
+        })
+      : subAgentDisplayName
+    : displayDirectoryName || "";
 
   useEffect(() => {
     if (!isPlusMenuOpen) {
@@ -446,18 +516,12 @@ export const TopBar = ({
   const isTodoPanelInteractive = isTodoPanelOpen && !isTodoPanelPinned;
 
   return (
-    <motion.header
+    <header
       className={`top-bar${isPlusMenuOpen ? " plus-menu-open" : ""}${
         isTodoPanelOpen ? " todo-panel-open" : ""
       }${isTodoPanelInteractive ? " todo-panel-interactive" : ""}`}
-      layout={appleMotionEnabled}
-      transition={appleMotionEnabled ? layoutTransition : undefined}
     >
-      <motion.div
-        className="top-bar-left"
-        layout={appleMotionEnabled}
-        transition={appleMotionEnabled ? layoutTransition : undefined}
-      >
+      <div className="top-bar-left">
         <div className="top-bar-sidebar-actions" aria-label="Sidebar actions">
           <button
             className="icon-btn sidebar-toggle-btn"
@@ -478,13 +542,9 @@ export const TopBar = ({
             <SquarePen size={16} strokeWidth={1.8} />
           </button>
         </div>
-      </motion.div>
+      </div>
 
-      <motion.div
-        className="top-bar-main"
-        layout={appleMotionEnabled}
-        transition={appleMotionEnabled ? layoutTransition : undefined}
-      >
+      <div className="top-bar-main">
         <div className="header-title-group">
           <h2 className="header-title">{headerTitle}</h2>
           {headerSubtitle ? (
@@ -514,11 +574,10 @@ export const TopBar = ({
             }
           }}
         />
-      </motion.div>
+      </div>
 
-      <motion.div
+      <div
         className="top-bar-right"
-        layout={appleMotionEnabled}
         onContextMenu={(event) => {
           // 右侧圆角卡片（项目标签 + 新建/面板/全屏按钮）任意位置右键：
           // 提供针对当前项目的快捷操作。容器已整体脱离窗口 drag 区域，
@@ -526,7 +585,6 @@ export const TopBar = ({
           event.preventDefault();
           setBranchContextMenu({ x: event.clientX, y: event.clientY });
         }}
-        transition={appleMotionEnabled ? layoutTransition : undefined}
       >
         <div className="top-bar-branch-info">
           {activeDirectory && (
@@ -553,34 +611,9 @@ export const TopBar = ({
             >
               <Plus size={16} strokeWidth={1.8} />
             </button>
-            <AnimatePresence initial={false}>
-              {isPlusMenuOpen && (
-                <motion.div
-                  animate={
-                    appleMotionEnabled
-                      ? reducedMotion
-                        ? { opacity: 1 }
-                        : { opacity: 1, scale: 1, y: 0, filter: "blur(0px)" }
-                      : undefined
-                  }
-                  className="top-bar-plus-dropdown"
-                  exit={
-                    appleMotionEnabled
-                      ? reducedMotion
-                        ? { opacity: 0 }
-                        : { opacity: 0, scale: 0.98, y: -4, filter: "blur(1px)" }
-                      : undefined
-                  }
-                  initial={
-                    appleMotionEnabled
-                      ? reducedMotion
-                        ? { opacity: 0 }
-                        : { opacity: 0, scale: 0.98, y: -4, filter: "blur(1px)" }
-                      : false
-                  }
-                  transition={appleMotionEnabled ? popoverTransition : undefined}
-                >
-                  {plusMenuItems.map((item) => {
+            {isPlusMenuOpen && (
+              <div className="top-bar-plus-dropdown">
+                {plusMenuItems.map((item) => {
                     const ItemIcon = item.icon;
                     return (
                       <button
@@ -594,9 +627,8 @@ export const TopBar = ({
                       </button>
                     );
                   })}
-                </motion.div>
-              )}
-            </AnimatePresence>
+                </div>
+            )}
           </div>
           {!isRightPanelFullscreen && (
             <button
@@ -619,7 +651,7 @@ export const TopBar = ({
             <FullscreenToggleIcon size={16} strokeWidth={1.8} />
           </button>
         </div>
-      </motion.div>
+      </div>
       {branchContextMenu && (
         <ContextMenu
           x={branchContextMenu.x}
@@ -628,6 +660,6 @@ export const TopBar = ({
           onClose={() => setBranchContextMenu(null)}
         />
       )}
-    </motion.header>
+    </header>
   );
 };

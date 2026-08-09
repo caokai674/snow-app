@@ -108,11 +108,12 @@ pub fn is_retriable_error(error: &Error) -> bool {
         return true;
     }
 
-    // Server errors (5xx)
+    // Server errors (5xx and terminal Responses API server failures)
     if message.contains("500")
         || message.contains("502")
         || message.contains("503")
         || message.contains("504")
+        || message.contains("server_error")
         || message.contains("internal server error")
         || message.contains("bad gateway")
         || message.contains("service unavailable")

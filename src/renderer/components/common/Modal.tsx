@@ -7,11 +7,6 @@ import {
   useRef,
 } from "react";
 import { createPortal } from "react-dom";
-import { AnimatePresence, motion } from "motion/react";
-import {
-  appleSurfaceTransition,
-  useAppleThemeMotion,
-} from "../../hooks/useAppleThemeMotion";
 
 type ModalProps = {
   open: boolean;
@@ -50,8 +45,6 @@ export function Modal({
   const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const descriptionId = useId();
-  const { enabled: appleMotionEnabled, reducedMotion } = useAppleThemeMotion();
-  const transition = appleSurfaceTransition(reducedMotion);
 
   useEffect(() => {
     if (!open) return;
@@ -100,45 +93,18 @@ export function Modal({
     .join(" ");
 
   return createPortal(
-    <AnimatePresence initial={false}>
-      {open && (
-        <motion.div
-          animate={appleMotionEnabled ? { opacity: 1 } : undefined}
-          className="app-modal-overlay"
-          exit={appleMotionEnabled ? { opacity: 0 } : undefined}
-          initial={appleMotionEnabled ? { opacity: 0 } : false}
-          transition={appleMotionEnabled ? { duration: 0.16 } : undefined}
+    open && (
+      <div className="app-modal-overlay">
+        <div
+          aria-describedby={description ? descriptionId : undefined}
+          aria-labelledby={titleId}
+          aria-modal="true"
+          className={dialogClassName}
+          onKeyDown={handleKeyDown}
+          ref={dialogRef}
+          role="dialog"
+          tabIndex={-1}
         >
-          <motion.div
-            animate={
-              appleMotionEnabled
-                ? { opacity: 1, scale: 1, y: 0, filter: "blur(0px)" }
-                : undefined
-            }
-            aria-describedby={description ? descriptionId : undefined}
-            aria-labelledby={titleId}
-            aria-modal="true"
-            className={dialogClassName}
-            exit={
-              appleMotionEnabled
-                ? reducedMotion
-                  ? { opacity: 0 }
-                  : { opacity: 0, scale: 0.985, y: -4, filter: "blur(1px)" }
-                : undefined
-            }
-            initial={
-              appleMotionEnabled
-                ? reducedMotion
-                  ? { opacity: 0 }
-                  : { opacity: 0, scale: 0.985, y: -4, filter: "blur(1px)" }
-                : false
-            }
-            onKeyDown={handleKeyDown}
-            ref={dialogRef}
-            role="dialog"
-            tabIndex={-1}
-            transition={appleMotionEnabled ? transition : undefined}
-          >
             <div className="app-modal-header">
               <div className="app-modal-title-group">
                 <strong id={titleId}>{title}</strong>
@@ -157,10 +123,9 @@ export function Modal({
             </div>
             <div className="app-modal-body">{children}</div>
             {footer && <div className="app-modal-footer">{footer}</div>}
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>,
+          </div>
+        </div>
+    ),
     document.body
   );
 }

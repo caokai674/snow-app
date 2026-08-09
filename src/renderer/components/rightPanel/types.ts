@@ -28,12 +28,14 @@ export type DiffTabData = {
 export type TerminalOpenOptions = {
   ptyId?: string;
   shellPath?: string;
+  sessionId?: string;
 };
 
 export type TerminalTabData = {
   cwd: string;
   ptyId?: string;
   shellPath?: string;
+  sessionId?: string;
 };
 
 export type BrowserTabData = {

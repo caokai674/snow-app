@@ -11,11 +11,17 @@ import {
   formatMcpToolResultForModel,
   formatToolResultsContent,
   getErrorMessage,
+  isResponseErrorStatus,
   parseToolCalls,
   updateFirstMatchingToolCall,
 } from "../utils/conversationHelpers";
 import { appendHookExecutionToMessage, runHook } from "./hookOutcome";
 import { extractFileChangeFromTool } from "./fileChangeTracking";
+import { injectSessionIdIntoToolArgs } from "../utils/toolSessionMetadata";
+import {
+  parseSubAgentTools,
+  resolveSubAgentRuntimeConfig,
+} from "./subAgentRuntimeConfig";
 import {
   PARENT_PLAN_APPROVAL_REQUIRED,
   beginStreamMetricsIteration,
@@ -35,7 +41,8 @@ export type SubAgentActivationDeps = {
     conversationId: string,
     projectId?: string
   ) => Promise<ToolAuthorizationDecision[]>;
-  model: string | undefined;
+  parentApiProfile: string | undefined;
+  parentModel: string | undefined;
   planApprovedSessionKeysRef: { current: Set<string> };
 };
 
@@ -44,8 +51,13 @@ export type SubAgentActivationDeps = {
 // ---------------------------------------------------------------------------
 
 export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
-  const { ctx, requestToolAuthorizations, model, planApprovedSessionKeysRef } =
-    deps;
+  const {
+    ctx,
+    requestToolAuthorizations,
+    parentApiProfile,
+    parentModel,
+    planApprovedSessionKeysRef,
+  } = deps;
 
   return async (
     argsJson: string,
@@ -118,6 +130,14 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
         });
       }
 
+      const runtimeConfig = resolveSubAgentRuntimeConfig({
+        config,
+        apiConfigs: await window.snow.listApiConfigs(),
+        parentApiProfile,
+        parentModel,
+      });
+      const allowedTools = parseSubAgentTools(runtimeConfig.toolsJson);
+
       subConversationId = `sub-${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 10)}`;
@@ -128,7 +148,7 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
       try {
         const beforeSubAgentContext = JSON.stringify({
           agentId,
-          agentName: config.name,
+          agentName: runtimeConfig.agentName,
           prompt,
           parentConversationId,
           cwd: directoryIdToPath(dirId) ?? ctx.directoryPath ?? "",
@@ -140,7 +160,12 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
         );
         if (subHookResult) {
           ctx.updateSessionMessages(parentConversationId, (currentMessages) =>
-            appendHookExecutionToMessage(currentMessages, subHookResult.record)
+            appendHookExecutionToMessage(currentMessages, {
+              ...subHookResult.record,
+              // Bind to the sub-agent tool call so the hook renders attached
+              // to the sub-agent card ("启动前" step), not the message footer.
+              toolCallInteractionId,
+            })
           );
           if (subHookResult.outcome.kind === "abort") {
             return JSON.stringify({
@@ -156,10 +181,11 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
       await window.snow.createSubAgentSession(
         subConversationId,
         parentConversationId,
-        agentId,
-        config.name,
+        runtimeConfig.agentId,
+        runtimeConfig.agentName,
         dirId,
-        model ?? "",
+        runtimeConfig.apiProfile,
+        runtimeConfig.model,
         title
       );
 
@@ -173,16 +199,14 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
         parentConversationId,
         conversationId: subConversationId,
         agentId,
-        agentName: config.name,
+        agentName: runtimeConfig.agentName,
         status: "running",
         timestamp: Date.now(),
         toolCallInteractionId,
       });
 
-      const allowedTools = JSON.parse(config.toolsJson) as string[];
-      const subAgentToolsJson = config.toolsJson;
-      const subAgentConfigProfile = config.configProfile.trim();
-      subAgentName = config.name;
+      const subAgentToolsJson = runtimeConfig.toolsJson;
+      subAgentName = runtimeConfig.agentName;
 
       const subConvId = subConversationId!;
       ctx.ensureSession(subConvId, dirId);
@@ -230,7 +254,8 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
         subMessages: {
           role: "user" | "assistant" | "system" | "developer" | "tool";
           content: string;
-        }[]
+        }[],
+        resumeAfterCompaction = false
       ): Promise<string> => {
         if (ctx.sessionsRefData.current.get(subConvId)?.isAbortRequested) {
           return "Sub-agent interrupted by user";
@@ -256,8 +281,11 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
             messages: subMessages,
             conversationId: subConvId,
             directoryId: dirId,
+            apiProfile: runtimeConfig.apiProfile,
+            model: runtimeConfig.model,
+            resumeAfterCompaction,
             subAgentToolsJson,
-            subAgentConfigProfile: subAgentConfigProfile || undefined,
+            subAgentSystemPrompt: runtimeConfig.systemPrompt || undefined,
             // Sub-agents always use their own normal-mode prompt and tool set.
             // Parent Plan Mode is enforced separately at Rust tool execution.
             planMode: false,
@@ -276,6 +304,7 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
         }
 
         const subResponse = await subStreamPromise;
+        const subResponseFailed = isResponseErrorStatus(subResponse.status);
 
         const subRef = ctx.sessionsRefData.current.get(subConvId);
         if (subRef) {
@@ -300,7 +329,7 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
           return "Sub-agent interrupted by user";
         }
 
-        if (subResponse.tokenUsage && subResponse.status !== "error") {
+        if (subResponse.tokenUsage && !subResponseFailed) {
           ctx.updateSessionField(
             subConvId,
             "tokenUsage",
@@ -308,17 +337,50 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
           );
         }
 
+        const subToolCalls = parseToolCalls(subResponse.toolCallsJson);
+
+        if (subResponseFailed) {
+          const failureContent =
+            subResponse.content || "Sub-agent request failed. Please retry.";
+          ctx.updateSessionMessages(subConvId, (currentMessages) =>
+            currentMessages.map((currentMessage) =>
+              currentMessage.id === subAssistantMessageId
+                ? {
+                    ...currentMessage,
+                    content: failureContent,
+                    thinking: subResponse.thinking || undefined,
+                    timestamp: formatMessageTime(),
+                    status: "error" as const,
+                    responseId: subResponse.id || undefined,
+                    model: subResponse.model || undefined,
+                    isRetrying: false,
+                  }
+                : currentMessage
+            )
+          );
+          return failureContent;
+        }
+
         // Auto-compaction for sub-agents: mirrors the main agent loop. When the
-        // sub-agent's effective API config has enableAutoCompress=true and the
-        // total token usage crosses the configured threshold, finalize the
-        // assistant message, compact the sub-conversation, and continue the
-        // sub-agent loop from the compacted context. The threshold is read from
-        // the sub-agent's configured profile (falling back to the active config)
-        // so it matches the sub-agent's real context window, and is fetched
-        // fresh on every check so user edits apply without a restart.
-        if (subResponse.tokenUsage && subResponse.status !== "error") {
-          const subApiConfig = await ctx.getActiveApiConfig(
-            subAgentConfigProfile || undefined
+        // resolved API profile has enableAutoCompress=true and the total token
+        // usage crosses its configured threshold, finalize the assistant
+        // message, compact the sub-conversation, and continue the sub-agent loop
+        // from the compacted context. The fixed profile name is reused for every
+        // check, while its latest non-secret settings are read so threshold edits
+        // apply without a restart.
+        //
+        // Only runs while the sub-agent loop is still alive (tool calls to
+        // process). When the sub-agent is finishing naturally (no tool calls),
+        // compaction must NOT fire even over the threshold — it would force
+        // another subAgentRunLoop iteration and wake the sub-agent back up
+        // after it completed.
+        if (
+          subToolCalls.length > 0 &&
+          subResponse.tokenUsage &&
+          !subResponseFailed
+        ) {
+          const subApiConfig = (await window.snow.listApiConfigs()).find(
+            (item) => item.profileName.trim() === runtimeConfig.apiProfile
           );
           if (subApiConfig?.enableAutoCompress) {
             // autoCompressThreshold is stored in TOKENS — compare directly (see
@@ -359,9 +421,12 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
                 const subCompactionSummary =
                   await ctx.performCompactionRef.current(
                     subConvId,
-                    subResponse.model || undefined,
+                    runtimeConfig.model,
                     true,
-                    subAgentConfigProfile || undefined
+                    undefined,
+                    runtimeConfig.apiProfile,
+                    runtimeConfig.toolsJson,
+                    runtimeConfig.systemPrompt || undefined
                   );
 
                 if (subCompactionSummary) {
@@ -382,16 +447,15 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
                   // Continue the sub-agent loop from the compacted context. The
                   // Rust backend rebuilds context from the compaction boundary
                   // stored in the database for this sub-conversation.
-                  return subAgentRunLoop([
-                    { role: "user", content: subCompactionSummary },
-                  ]);
+                  return subAgentRunLoop(
+                    [{ role: "user", content: subCompactionSummary }],
+                    true
+                  );
                 }
               }
             }
           }
         }
-
-        const subToolCalls = parseToolCalls(subResponse.toolCallsJson);
 
         if (subToolCalls.length === 0) {
           ctx.updateSessionMessages(subConvId, (currentMessages) =>
@@ -519,6 +583,11 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
             continue;
           }
 
+          const subToolArgs = injectSessionIdIntoToolArgs(
+            subToolCall.name,
+            subToolCall.arguments,
+            subConvId
+          );
           let subSensitiveAuthorizationToken: string | undefined;
           if (
             (subToolCall.name === "bash-terminal-execute" ||
@@ -527,9 +596,10 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
             subAuthorizationDecision.sensitiveCommandConfirmed === true
           ) {
             try {
-              const subParsedArgs = JSON.parse(
-                subToolCall.arguments || "{}"
-              ) as Record<string, unknown>;
+              const subParsedArgs = JSON.parse(subToolArgs) as Record<
+                string,
+                unknown
+              >;
               if (typeof subParsedArgs.command !== "string") {
                 throw new Error("Sensitive command argument is missing");
               }
@@ -568,7 +638,7 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
           try {
             subResult = await window.snow.callMcpTool(
               subToolCall.name,
-              subToolCall.arguments,
+              subToolArgs,
               dirId,
               parentCheckpointIds,
               subCheckpointWorkDir,
@@ -719,7 +789,7 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
           if (!subToolErrored && subResult !== undefined) {
             const subFileChange = extractFileChangeFromTool(
               subToolCall.name,
-              subToolCall.arguments,
+              subToolArgs,
               subResult
             );
             if (subFileChange) {
@@ -873,10 +943,12 @@ export const createSubAgentActivation = (deps: SubAgentActivationDeps) => {
         );
         if (onCompleteResult) {
           ctx.updateSessionMessages(parentConversationId, (currentMessages) =>
-            appendHookExecutionToMessage(
-              currentMessages,
-              onCompleteResult.record
-            )
+            appendHookExecutionToMessage(currentMessages, {
+              ...onCompleteResult.record,
+              // Bind to the sub-agent tool call so the hook renders attached
+              // to the sub-agent card ("完成" step), not the message footer.
+              toolCallInteractionId,
+            })
           );
           if (onCompleteResult.outcome.kind === "abort") {
             effectiveSummary = onCompleteResult.outcome.message;

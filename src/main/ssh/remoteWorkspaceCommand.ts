@@ -22,6 +22,7 @@ import {
   listRemoteJobs,
   startRemoteJob,
   type RemoteJobBackendKind,
+  type RemoteJobMode,
 } from "./remoteJobs";
 
 const REMOTE_SEARCH_MAX_DEPTH = 15;
@@ -55,6 +56,7 @@ type RemoteWorkspaceCommandArgs = {
   timeout?: unknown;
   durable?: unknown;
   backend?: unknown;
+  mode?: unknown;
   jobId?: unknown;
   offset?: unknown;
   limit?: unknown;
@@ -631,8 +633,7 @@ const executeBashCommand = async (
     args.backend === "snow-agent" ||
     args.backend === "systemd-user" ||
     args.backend === "tmux" ||
-    args.backend === "posix-detach" ||
-    args.backend === "windows-job"
+    args.backend === "posix-detach"
       ? (args.backend as RemoteJobBackendKind)
       : undefined;
   if (args.backend !== undefined && !backend) {
@@ -640,6 +641,7 @@ const executeBashCommand = async (
   }
 
   if (durable) {
+    const mode = remoteJobMode(args.mode);
     const job = await startRemoteJob({
       workspacePath,
       workspaceId:
@@ -647,6 +649,7 @@ const executeBashCommand = async (
       command,
       timeoutMs: timeout,
       backend,
+      mode,
       jobId: typeof args.jobId === "string" ? args.jobId : undefined,
       conversationId:
         typeof args.conversationId === "string"
@@ -697,6 +700,16 @@ const ensureRemoteJobId = (value: unknown): string => {
   return value.trim();
 };
 
+const remoteJobMode = (value: unknown): RemoteJobMode | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === "batch" || value === "interactive") {
+    return value;
+  }
+  throw new Error("Unsupported Remote Job mode");
+};
+
 const remoteJobReadOptions = (
   args: RemoteWorkspaceCommandArgs
 ): { offset?: number; limit?: number } => {
@@ -737,6 +750,7 @@ const executeRemoteJobStart = async (
   if (args.backend !== undefined && !backend) {
     throw new Error("Unsupported Remote Job backend");
   }
+  const mode = remoteJobMode(args.mode);
   const job = await startRemoteJob({
     workspacePath,
     workspaceId:
@@ -744,6 +758,7 @@ const executeRemoteJobStart = async (
     command,
     timeoutMs: timeout,
     backend,
+    mode,
     jobId: typeof args.jobId === "string" ? args.jobId : undefined,
     conversationId:
       typeof args.conversationId === "string" ? args.conversationId : undefined,

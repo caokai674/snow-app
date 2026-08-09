@@ -28,6 +28,8 @@ import {
   initBrowserDialogHandler,
   initBrowserNetworkRecorder,
 } from "../ipc/handlers/browserNetworkRecorder";
+import { installWebviewContextMenu } from "../utils/webviewContextMenu";
+import { initBrowserPopupHandler } from "../browser/browserPopupWindow";
 
 export const bootstrapApplication = (): void => {
   // ─── Chromium 启动加速开关（必须在 whenReady 之前）─────────────────────
@@ -93,9 +95,9 @@ export const bootstrapApplication = (): void => {
     // 注册 theme-bg:// 自定义协议处理器，使渲染进程能加载本地背景图。
     // 必须在 createWindow 之前调用，确保窗口加载时协议已就绪。
     registerThemeBgProtocol();
-    // 注册 img-proxy:// 协议处理器，代理渲染进程请求的外部 http(s) 图片，
-    // 使 markdown 图片能绕过 CSP 限制安全加载。
-    registerImageProxyProtocol();
+    // 注册 img-proxy:// 协议处理器：代理外部 http(s) 图片，并直接读取本地
+    // image/、upload/ 图片文件返回，使 markdown 图片能绕过 CSP 限制安全加载。
+    registerImageProxyProtocol(native);
 
     if (isMacOS && app.dock) {
       app.dock.setIcon(nativeImage.createFromPath(APP_ICON_PATH));
@@ -110,8 +112,9 @@ export const bootstrapApplication = (): void => {
     // 初始化系统托盘（黑白脱色图标 + 悬停快速信息 + 右键菜单）。
     initTray(native);
 
-    // 首次启动安装内置 skills 并同步内置文档（供 snow-app-docs 技能阅读），
-    // 均为幂等操作。
+    // 安装/同步内置 skills 与内置文档（供 snow-app-docs 技能阅读）：
+    // 首次安装、应用升级或开发模式下自动推送官方版本；内置 skill 的
+    // 用户启用/禁用开关会在同步时保留。
     ensureBuiltinSkills();
     ensureBuiltinDocs();
 
@@ -129,6 +132,11 @@ export const bootstrapApplication = (): void => {
     // 需在 app ready 且 defaultSession 可用后初始化。
     initBrowserNetworkRecorder();
     initBrowserDialogHandler();
+    // 浏览器弹出窗口：webview 内 window.open / target=_blank 创建真实窗体
+    // （Google 登录等 OAuth 弹窗依赖 window.opener 关系，不能转交系统浏览器）。
+    initBrowserPopupHandler();
+    // 浏览器右键菜单：Electron webview 默认无右键菜单，需主进程手动弹出。
+    installWebviewContextMenu();
 
     // 渲染进程保存代理设置后通知主进程重新应用会话代理。
     ipcMain.handle("proxy-browser-settings:apply", () =>

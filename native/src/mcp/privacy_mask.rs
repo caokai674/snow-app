@@ -645,7 +645,10 @@ async fn mask_with_api(text: &str, settings: &PrivacySettings) -> ApiResult<Stri
         }
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent(crate::api::http_client::app_user_agent())
+        .build()
+        .map_err(|e| e.to_string())?;
     let body = json!({
         "text": text,
         "aggregation_strategy": "simple",

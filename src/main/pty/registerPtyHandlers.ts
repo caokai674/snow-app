@@ -17,15 +17,19 @@ const normalizePtySessionOptions = (value: unknown): PtySessionOptions => {
   const rows = typeof obj.rows === "number" ? obj.rows : 24;
   const shellPath =
     typeof obj.shellPath === "string" ? obj.shellPath : undefined;
-  return { cwd, cols, rows, shellPath };
+  const sessionId =
+    typeof obj.sessionId === "string" && obj.sessionId.trim()
+      ? obj.sessionId.trim()
+      : undefined;
+  return { cwd, cols, rows, shellPath, sessionId };
 };
 
 export const registerPtyHandlers = (): void => {
   ipcMain.handle(
     "pty:create",
-    (event: IpcMainInvokeEvent, options: unknown) => {
+    async (event: IpcMainInvokeEvent, options: unknown) => {
       const opts = normalizePtySessionOptions(options);
-      return createPtySession(event.sender, opts);
+      return await createPtySession(event.sender, opts);
     }
   );
 

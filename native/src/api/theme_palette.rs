@@ -35,7 +35,7 @@ const PALETTE_SYSTEM_PROMPT: &str = "You are a senior UI/UX color designer. Base
 The palette must work well when the image is used as a translucent, blurred window background. \
 Analyze the dominant colors, mood, and contrast of the image, then derive a palette that keeps text readable and UI elements distinguishable. \
 \n\nRespond with ONLY a JSON object (no markdown fences, no explanation) using exactly this schema:\n\
-{\n  \"light\": { \"bgPrimary\": \"#hex\", \"bgSecondary\": \"#hex\", \"bgTertiary\": \"#hex\", \"bgHover\": \"#hex\", \"bgActive\": \"#hex\", \"chromeBg\": \"#hex\", \"appBg\": \"#hex\", \"borderColor\": \"#hex\", \"borderLight\": \"#hex\", \"borderSubtle\": \"#hex\", \"textPrimary\": \"#hex\", \"textSecondary\": \"#hex\", \"textTertiary\": \"#hex\", \"textMuted\": \"#hex\", \"accentGreen\": \"#hex\", \"accentGreenBg\": \"#hex\", \"accentGreenText\": \"#hex\", \"accentRed\": \"#hex\", \"accentRedBg\": \"#hex\", \"accentRedText\": \"#hex\", \"accentBlue\": \"#hex\", \"accentBlueBg\": \"#hex\", \"accentBlueText\": \"#hex\", \"onSolid\": \"#hex\", \"selectionBg\": \"#hex\", \"focusRing\": \"#hex\" },\n  \"dark\": { ...same fields... }\n\
+{\n  \"light\": { \"bgPrimary\": \"#hex\", \"bgSecondary\": \"#hex\", \"bgTertiary\": \"#hex\", \"bgHover\": \"#hex\", \"bgActive\": \"#hex\", \"chromeBg\": \"#hex\", \"appBg\": \"#hex\", \"borderColor\": \"#hex\", \"borderLight\": \"#hex\", \"borderSubtle\": \"#hex\", \"textPrimary\": \"#hex\", \"textSecondary\": \"#hex\", \"textTertiary\": \"#hex\", \"textMuted\": \"#hex\", \"accentGreen\": \"#hex\", \"accentGreenBg\": \"#hex\", \"accentGreenText\": \"#hex\", \"accentRed\": \"#hex\", \"accentRedBg\": \"#hex\", \"accentRedText\": \"#hex\", \"accentBlue\": \"#hex\", \"accentBlueBg\": \"#hex\", \"accentBlueText\": \"#hex\", \"accentColor\": \"#hex\", \"onSolid\": \"#hex\", \"selectionBg\": \"#hex\", \"focusRing\": \"#hex\" },\n  \"dark\": { ...same fields... }\n\
 }\n\nRules:\n\
 1. All color values must be 6-digit hex strings starting with '#'.\n\
 2. The \"light\" palette should feel bright and airy, with dark text on light backgrounds.\n\
@@ -75,9 +75,11 @@ fn build_request(image_data_url: &str) -> ResponsesApiRequest {
         directory_id: None,
         checkpoint_id: None,
         context_compaction: None,
+        resume_after_compaction: None,
         // Empty tool whitelist: palette generation is a pure vision→JSON task
         // and must not carry any MCP/builtin tools in the payload.
         sub_agent_tools_json: Some("[]".to_string()),
+        sub_agent_system_prompt: None,
         sub_agent_config_profile: None,
         // Keep skip_context unset (false) so providers parse the @@image:...@@
         // tag into their native multimodal payloads. An empty conversation_id

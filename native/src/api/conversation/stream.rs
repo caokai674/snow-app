@@ -18,17 +18,37 @@ use crate::storage::services::chat_conversations::{
 };
 use crate::storage::services::usage_records::{record_usage, UsageRecordInput};
 
+fn normalize_non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn resolve_sub_agent_profile(
+    explicit_api_profile: Option<&str>,
+    deprecated_config_profile: Option<&str>,
+) -> Result<String> {
+    normalize_non_empty(explicit_api_profile)
+        .or_else(|| normalize_non_empty(deprecated_config_profile))
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Error::from_reason(
+                "Sub-agent API profile snapshot is required; refusing to fall back to the global active profile",
+            )
+        })
+}
+
+fn resolve_sub_agent_model(requested_model: Option<&str>, advanced_model: &str) -> Result<String> {
+    normalize_non_empty(requested_model)
+        .or_else(|| normalize_non_empty(Some(advanced_model)))
+        .map(str::to_owned)
+        .ok_or_else(|| Error::from_reason("Sub-agent model snapshot is not available"))
+}
+
 pub async fn create_response_stream(
     mut request: ResponsesApiRequest,
     on_chunk: ResponsesApiStreamCallback,
     stream_id: String,
 ) -> Result<ResponsesApiResult> {
-    let is_sub_agent = request
-        .sub_agent_tools_json
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some();
+    let is_sub_agent = request.is_sub_agent_request();
     if is_sub_agent {
         // Plan Mode and Goal Mode belong exclusively to the main conversation.
         // Keep the provider prompt and request-scoped tool injection in normal
@@ -37,33 +57,27 @@ pub async fn create_response_stream(
         request.plan_mode = Some(false);
         request.goal_mode = Some(false);
     }
-    let sub_agent_config_profile = request
-        .sub_agent_config_profile
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-    let explicit_api_profile = request
-        .api_profile
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-    let request_conversation_id = request
-        .conversation_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
+    let deprecated_sub_agent_profile =
+        normalize_non_empty(request.sub_agent_config_profile.as_deref()).map(str::to_owned);
+    let explicit_api_profile =
+        normalize_non_empty(request.api_profile.as_deref()).map(str::to_owned);
+    let strict_sub_agent_profile = if is_sub_agent {
+        Some(resolve_sub_agent_profile(
+            explicit_api_profile.as_deref(),
+            deprecated_sub_agent_profile.as_deref(),
+        )?)
+    } else {
+        None
+    };
+    let request_conversation_id =
+        normalize_non_empty(request.conversation_id.as_deref()).map(str::to_owned);
 
     let context = tokio::task::spawn_blocking(move || {
-        // A sub-agent request (non-empty sub_agent_tools_json) always resolves
-        // its configured profile. A context-compaction request carries no tools
-        // but may still target a sub-agent profile, so honour an explicit
-        // profile here too — otherwise the handoff would wrongly fall back to
-        // the active config instead of the sub-agent's own API configuration.
-        if is_sub_agent || sub_agent_config_profile.is_some() {
-            get_api_request_context_for_profile(sub_agent_config_profile.as_deref())
+        if let Some(profile) = strict_sub_agent_profile {
+            // Sub-agent snapshots are strict: credentials are reloaded by the
+            // fixed profile name on every request, but a deleted profile must
+            // fail instead of silently switching providers.
+            get_api_request_context_for_profile(Some(&profile))
         } else {
             // Conversation-scoped profile resolution with graceful fallback:
             //   1. explicit apiProfile on the request (first message of a
@@ -91,15 +105,11 @@ pub async fn create_response_stream(
     .map_err(|join_error| {
         Error::from_reason(format!("Failed to resolve API configuration: {join_error}"))
     })??;
-    if is_sub_agent
-        && request
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none()
-    {
-        request.model = Some(context.api_config.advanced_model.clone());
+    if is_sub_agent {
+        request.model = Some(resolve_sub_agent_model(
+            request.model.as_deref(),
+            &context.api_config.advanced_model,
+        )?);
     }
 
     let failure_messages = request
@@ -123,6 +133,7 @@ pub async fn create_response_stream(
         .unwrap_or_else(|| context.api_config.advanced_model.clone());
     let failure_directory_id = request.directory_id.clone().unwrap_or_default();
     let failure_context_compaction = request.context_compaction.unwrap_or(false);
+    let failure_resume_after_compaction = request.resume_after_compaction.unwrap_or(false);
     let failure_database_path = context.database_path.clone();
     // The profile that actually served this request. Persisted on failed
     // exchanges too so a conversation created by a failed first message is
@@ -279,6 +290,7 @@ pub async fn create_response_stream(
             let persisted_failure_model = failure_model.clone();
             let failure_dir_id = failure_directory_id.clone();
             let persisted_failure_api_profile = failure_api_profile.clone();
+            let persisted_failure_resume = failure_resume_after_compaction;
             let conversation_id = tokio::task::spawn_blocking(move || {
                 store_failed_chat_exchange(
                     &failure_database_path,
@@ -289,6 +301,7 @@ pub async fn create_response_stream(
                     &persisted_failure_model,
                     &persisted_failure_api_profile,
                     &failure_directory_id,
+                    persisted_failure_resume,
                     &persisted_error_message,
                 )
             })

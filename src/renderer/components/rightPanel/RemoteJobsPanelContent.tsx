@@ -1,12 +1,21 @@
 import {
   AlertCircle,
+  ChevronDown,
   Clipboard,
   LoaderCircle,
   RefreshCw,
+  Send,
   SquareTerminal,
   Square,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import type {
   RemoteJobBinding,
   RemoteJobOutput,
@@ -53,6 +62,9 @@ export function RemoteJobsPanelContent({
   const [error, setError] = useState("");
   const [cancelling, setCancelling] = useState(false);
   const [attaching, setAttaching] = useState(false);
+  const [startFormOpen, setStartFormOpen] = useState(false);
+  const [draftCommand, setDraftCommand] = useState("");
+  const [starting, setStarting] = useState(false);
   const outputDecodersRef = useRef(new Map<string, OutputDecoderState>());
 
   const selectedJob = useMemo(
@@ -182,7 +194,11 @@ export function RemoteJobsPanelContent({
   }, [selectedJob]);
 
   const attachJob = useCallback(async (): Promise<void> => {
-    if (!selectedJob || terminalStatus.has(selectedJob.status)) {
+    if (
+      !selectedJob ||
+      selectedJob.mode !== "interactive" ||
+      detail?.state.status !== "running"
+    ) {
       return;
     }
     setAttaching(true);
@@ -198,7 +214,45 @@ export function RemoteJobsPanelContent({
     } finally {
       setAttaching(false);
     }
-  }, [onAttach, selectedJob]);
+  }, [detail?.state.status, onAttach, selectedJob]);
+
+  const startInteractiveJob = useCallback(
+    async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+      event.preventDefault();
+      const command = draftCommand.trim();
+      if (!command) {
+        return;
+      }
+      setStarting(true);
+      setError("");
+      try {
+        const job = await window.snow.sshStartRemoteJob({
+          workspacePath,
+          command,
+          mode: "interactive",
+        });
+        outputDecodersRef.current.delete(job.jobId);
+        setJobs((current) => [
+          job,
+          ...current.filter((currentJob) => currentJob.jobId !== job.jobId),
+        ]);
+        setSelectedJobId(job.jobId);
+        setDetail(null);
+        setDraftCommand("");
+        setStartFormOpen(false);
+        try {
+          await loadDetail(job.jobId);
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setStarting(false);
+      }
+    },
+    [draftCommand, loadDetail, workspacePath]
+  );
 
   return (
     <section className="remote-jobs-panel">
@@ -209,17 +263,77 @@ export function RemoteJobsPanelContent({
             {workspacePath.replace(/^ssh:\/\/[^/]+/, "") || "/"}
           </span>
         </div>
-        <button
-          type="button"
-          className="remote-jobs-icon-button"
-          onClick={() => void refresh()}
-          disabled={refreshing}
-          title={t("remoteJobs.refresh")}
-          aria-label={t("remoteJobs.refresh")}
-        >
-          <RefreshCw size={15} className={refreshing ? "is-spinning" : ""} />
-        </button>
+        <div className="remote-jobs-header-actions">
+          <button
+            type="button"
+            className={`remote-jobs-start-button${
+              startFormOpen ? " is-open" : ""
+            }`}
+            onClick={() => {
+              setError("");
+              setStartFormOpen((open) => !open);
+            }}
+            aria-expanded={startFormOpen}
+            title={t("remoteJobs.startInteractive")}
+          >
+            <SquareTerminal size={15} />
+            <span>{t("remoteJobs.startInteractive")}</span>
+            <ChevronDown
+              size={13}
+              className="remote-jobs-start-chevron"
+              aria-hidden="true"
+            />
+          </button>
+          <button
+            type="button"
+            className="remote-jobs-icon-button"
+            onClick={() => void refresh()}
+            disabled={refreshing}
+            title={t("remoteJobs.refresh")}
+            aria-label={t("remoteJobs.refresh")}
+          >
+            <RefreshCw size={15} className={refreshing ? "is-spinning" : ""} />
+          </button>
+        </div>
       </header>
+
+      {startFormOpen ? (
+        <form className="remote-jobs-start-form" onSubmit={startInteractiveJob}>
+          <label htmlFor="remote-jobs-interactive-command">
+            {t("remoteJobs.command")}
+          </label>
+          <textarea
+            id="remote-jobs-interactive-command"
+            value={draftCommand}
+            onChange={(event) => setDraftCommand(event.target.value)}
+            placeholder={t("remoteJobs.commandPlaceholder")}
+            autoFocus
+            disabled={starting}
+            rows={3}
+          />
+          <div className="remote-jobs-start-actions">
+            <button
+              type="button"
+              className="remote-jobs-form-button"
+              onClick={() => {
+                setStartFormOpen(false);
+                setDraftCommand("");
+              }}
+              disabled={starting}
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              type="submit"
+              className="remote-jobs-form-button primary"
+              disabled={starting || !draftCommand.trim()}
+            >
+              <Send size={13} />
+              <span>{t("remoteJobs.send")}</span>
+            </button>
+          </div>
+        </form>
+      ) : null}
 
       {error && (
         <div className="remote-jobs-error" role="alert">
@@ -279,21 +393,19 @@ export function RemoteJobsPanelContent({
                   >
                     <Clipboard size={15} />
                   </button>
-                  <button
-                    type="button"
-                    className="remote-jobs-icon-button"
-                    onClick={() => void attachJob()}
-                    disabled={
-                      attaching ||
-                      terminalStatus.has(detail.state.status) ||
-                      (selectedJob.backend !== "tmux" &&
-                        selectedJob.backend !== "snow-agent")
-                    }
-                    title={t("remoteJobs.attach")}
-                    aria-label={t("remoteJobs.attach")}
-                  >
-                    <SquareTerminal size={15} />
-                  </button>
+                  {selectedJob.mode === "interactive" &&
+                  detail.state.status === "running" ? (
+                    <button
+                      type="button"
+                      className="remote-jobs-icon-button"
+                      onClick={() => void attachJob()}
+                      disabled={attaching}
+                      title={t("remoteJobs.attach")}
+                      aria-label={t("remoteJobs.attach")}
+                    >
+                      <SquareTerminal size={15} />
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="remote-jobs-icon-button danger"

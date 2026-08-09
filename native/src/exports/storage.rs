@@ -17,12 +17,12 @@ use crate::storage::{
     ImportResourceRelease, ImportResourceReleaseInput, McpServerConfigInput, McpServerConfigRecord,
     MemoCountSummary, MemoPage, MemoRecord, PluginInput, PluginMarketplaceInput,
     PluginMarketplaceRecord, PluginRecord, ProjectMcpServerConfigRecord,
-    ProjectSensitiveCommandConfigInput, ProjectSensitiveCommandConfigRecord, RemoteDraftInput,
-    RemoteDraftRecord, SensitiveCommandConfigInput, SensitiveCommandConfigRecord,
-    SensitiveCommandMatchResult, SubAgentConfigInput, SubAgentConfigRecord, SystemPromptItemInput,
-    SystemPromptItemRecord, UserMessageSummary, WorkspaceDirectoryInput, WorkspaceDirectoryRecord,
+    ProjectSensitiveCommandConfigInput, ProjectSensitiveCommandConfigRecord,
+    RemoteDraftInput, RemoteDraftRecord,
+    SensitiveCommandConfigInput, SensitiveCommandConfigRecord, SensitiveCommandMatchResult,
+    SubAgentConfigInput, SubAgentConfigRecord, SystemPromptItemInput, SystemPromptItemRecord,
+    UserMessageSummary, WorkspaceDirectoryInput, WorkspaceDirectoryRecord,
 };
-
 // ============================================================================
 // 所有 storage NAPI 函数均使用 async + spawn_blocking 模式，
 // 确保 SQLite I/O 和文件系统操作不会阻塞 Node.js 主线程。
@@ -428,48 +428,6 @@ pub async fn save_theme_stream_cursor_svg(source_path: String) -> napi::Result<S
 #[napi]
 pub async fn delete_theme_stream_cursor_svg(svg_path: String) -> napi::Result<()> {
     tokio::task::spawn_blocking(move || crate::storage::delete_theme_stream_cursor_svg(svg_path))
-        .await
-        .map_err(map_spawn_error)?
-}
-
-#[napi]
-pub async fn get_plan_mode() -> napi::Result<bool> {
-    tokio::task::spawn_blocking(crate::storage::get_plan_mode)
-        .await
-        .map_err(map_spawn_error)?
-}
-
-#[napi]
-pub async fn set_plan_mode(enabled: bool) -> napi::Result<()> {
-    tokio::task::spawn_blocking(move || crate::storage::set_plan_mode(enabled))
-        .await
-        .map_err(map_spawn_error)?
-}
-
-#[napi]
-pub async fn get_goal_mode() -> napi::Result<bool> {
-    tokio::task::spawn_blocking(crate::storage::get_goal_mode)
-        .await
-        .map_err(map_spawn_error)?
-}
-
-#[napi]
-pub async fn set_goal_mode(enabled: bool) -> napi::Result<()> {
-    tokio::task::spawn_blocking(move || crate::storage::set_goal_mode(enabled))
-        .await
-        .map_err(map_spawn_error)?
-}
-
-#[napi]
-pub async fn get_goal_mode_token_budget() -> napi::Result<i64> {
-    tokio::task::spawn_blocking(crate::storage::get_goal_mode_token_budget)
-        .await
-        .map_err(map_spawn_error)?
-}
-
-#[napi]
-pub async fn set_goal_mode_token_budget(budget: i64) -> napi::Result<()> {
-    tokio::task::spawn_blocking(move || crate::storage::set_goal_mode_token_budget(budget))
         .await
         .map_err(map_spawn_error)?
 }
@@ -1116,6 +1074,18 @@ pub async fn list_chat_conversations_paginated(
     .map_err(map_spawn_error)?
 }
 
+/// 跨项目按会话 ID 查询会话记录（供「跨项目通知」使用）。
+#[napi]
+pub async fn list_chat_conversations_by_ids(
+    conversation_ids: Vec<String>,
+) -> napi::Result<Vec<ChatConversationRecord>> {
+    tokio::task::spawn_blocking(move || {
+        crate::storage::list_chat_conversations_by_ids(conversation_ids)
+    })
+    .await
+    .map_err(map_spawn_error)?
+}
+
 #[napi]
 pub async fn list_pinned_conversations(
     directory_id: String,
@@ -1172,6 +1142,7 @@ pub async fn create_sub_agent_session(
     agent_id: String,
     agent_name: String,
     directory_id: String,
+    api_profile_name: String,
     model: String,
     title: String,
 ) -> napi::Result<()> {
@@ -1182,6 +1153,7 @@ pub async fn create_sub_agent_session(
             agent_id,
             agent_name,
             directory_id,
+            api_profile_name,
             model,
             title,
         )

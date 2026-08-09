@@ -9,33 +9,38 @@ import {
   ClipboardList,
   Command,
   Target,
+  File,
+  Folder,
   Keyboard,
   Loader2,
-  Paperclip,
+  Radio,
   RefreshCw,
+  Search,
+  Send,
   Square,
+  X,
+  Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AnimatePresence, motion } from "motion/react";
 import { useI18n } from "../../../i18n";
-import {
-  appleSurfaceTransition,
-  useAppleThemeMotion,
-} from "../../../hooks/useAppleThemeMotion";
 import { Modal } from "../../common/Modal";
 import type { ChatInputViewProps } from "./types";
 import { TEXT_SNIPPET_THRESHOLD } from "./constants";
 import { TokenUsageRing } from "./TokenUsageRing";
 import {
   CHIPS_CLIPBOARD_TYPE,
+  INSERT_ELEMENT_TAG_EVENT,
+  base64ToUtf8,
   buildSegmentsHtml,
   buildTextSnippetSummary,
   createChangeChipHtml,
   createChipHtml,
   createCommitChipHtml,
+  createElementChipHtml,
   createImageChipHtml,
   createTextSnippetChipHtml,
+  createWebTagChipHtml,
   insertHtmlAtSelection,
   insertLineBreak,
   parseContentSegments,
@@ -45,9 +50,11 @@ import {
   type ChangeTag,
   type CommitTag,
   type ContentSegment,
+  type ElementTag,
   type FileTag,
   type ImageTag,
   type TextSnippetTag,
+  type WebTag,
 } from "./fileTagUtils";
 import {
   FileMentionPopup,
@@ -66,10 +73,23 @@ import { useChatConversationContext } from "../chatMessages";
 import { directoryIdToPath } from "../chatMessages/utils/conversationHelpers";
 import { collectConversationFileChanges } from "../chatMessages/hooks/fileChangeTracking";
 import { useConversationFileChanges } from "./useConversationFileChanges";
+import {
+  TERMINAL_DRAG_MIME,
+  TERMINAL_INSERT_TEXT_EVENT,
+  startTerminalMonitor,
+  stopTerminalMonitor,
+  type TerminalDragPayload,
+  type TerminalInsertTextPayload,
+} from "../../rightPanel/terminal/terminalMonitor";
+import { rightPanelEvents } from "../../rightPanel/rightPanelEvents";
 import { CommandPanel, type CommandPanelHandle } from "./commands/CommandPanel";
 import { createChatCommands } from "./commands/commandRegistry";
 import { FileChangesPanel } from "./commands/FileChangesPanel";
+import { ReviewPanel } from "./commands/ReviewPanel";
 import type { ChatCommand } from "./commands/types";
+
+/** 终端监控日志预览保留的最大行数 */
+const MAX_MONITORED_LINES = 1000;
 
 export const ChatInputView = ({
   placeholder,
@@ -99,6 +119,9 @@ export const ChatInputView = ({
   isLoadingApiConfig,
   isSavingThinking,
   thinkingError,
+  responsesFastModeEnabled,
+  isSavingFastMode,
+  fastModeError,
   labels,
   isStreaming,
   isAborting,
@@ -139,13 +162,13 @@ export const ChatInputView = ({
   handleToggleModelMenu,
   handleSelectApiProfile,
   handleSelectThinking,
+  handleToggleResponsesFastMode,
   restoreContent,
 }: ChatInputViewProps): React.JSX.Element => {
   const { t } = useI18n();
-  const { enabled: appleMotionEnabled, reducedMotion } = useAppleThemeMotion();
-  const popoverTransition = appleSurfaceTransition(reducedMotion);
   const {
     handleNewChat,
+    handleSendMessage,
     messages,
     activeConversationId,
     conversationDirectoryId,
@@ -194,8 +217,16 @@ export const ChatInputView = ({
   const [isProjectCodebaseOpen, setIsProjectCodebaseOpen] = useState(false);
   const [isRoleEditorOpen, setIsRoleEditorOpen] = useState(false);
   const [isFileChangesOpen, setIsFileChangesOpen] = useState(false);
+  // 稳定引用：供 StreamMetricsWorkSummary memo 使用，避免父组件重渲染时
+  // 传入新的 inline lambda 导致文件统计区域失效重绘（P0-1 性能优化）。
+  const handleOpenFileChanges = useCallback(() => {
+    setIsFileChangesOpen(true);
+  }, []);
+  const [isReviewOpen, setIsReviewOpen] = useState(false);
   const [isCustomThinkingMode, setIsCustomThinkingMode] = useState(false);
   const [customThinkingValue, setCustomThinkingValue] = useState("");
+  // 模型列表搜索关键词，仅 model 视图生效
+  const [modelSearchQuery, setModelSearchQuery] = useState("");
 
   // 菜单关闭时退出自定义思考强度输入
   useEffect(() => {
@@ -203,6 +234,18 @@ export const ChatInputView = ({
       setIsCustomThinkingMode(false);
     }
   }, [isModelMenuOpen]);
+
+  // 关闭菜单或离开模型列表视图时清空搜索词
+  useEffect(() => {
+    if (!isModelMenuOpen || modelMenuView !== "model") {
+      setModelSearchQuery("");
+    }
+  }, [isModelMenuOpen, modelMenuView]);
+
+  // review 指令只在新建会话（尚未绑定历史会话）时开放，审查对象是
+  // 当前项目目录的 Git 状态，而不是某个历史会话绑定的目录。
+  const isNewChat = !activeConversationId;
+  const reviewWorkDir = directoryIdToPath(projectId);
 
   const commands = useMemo(
     () =>
@@ -257,11 +300,21 @@ export const ChatInputView = ({
           setIsFileChangesOpen(false);
           setIsProjectCodebaseOpen(true);
         },
+        onOpenReviewPanel: () => {
+          setIsProjectMcpOpen(false);
+          setIsProjectSensitiveCommandsOpen(false);
+          setIsProjectSkillsOpen(false);
+          setIsProjectCodebaseOpen(false);
+          setIsRoleEditorOpen(false);
+          setIsFileChangesOpen(false);
+          setIsReviewOpen(true);
+        },
         model: selectedModel || undefined,
         apiProfile: selectedApiProfile || undefined,
         compactDisabled: messages.length === 0 || isCompacting,
         fileChangesDisabled: !activeConversationId,
         mcpDisabled: !projectId,
+        reviewDisabled: !isNewChat || !reviewWorkDir,
         roleDisabled: !projectId,
         sensitiveCommandsDisabled: !projectId,
         skillsDisabled: !projectId,
@@ -284,16 +337,24 @@ export const ChatInputView = ({
             : t("chatCommand.skillsNoProject"),
           codebaseDescription: t("chatCommand.codebaseDescription"),
           codebaseNoProject: t("chatCommand.codebaseNoProject"),
+          reviewDescription: !isNewChat
+            ? t("chatCommand.reviewNewChatOnly")
+            : reviewWorkDir
+              ? t("chatCommand.reviewDescription")
+              : t("chatCommand.reviewNoProject"),
+          reviewNoProject: t("chatCommand.reviewNoProject"),
         },
       }),
     [
       activeConversationId,
       handleNewChat,
       isCompacting,
+      isNewChat,
       isStreaming,
       messages.length,
       onCompactConversation,
       projectId,
+      reviewWorkDir,
       selectedApiProfile,
       selectedModel,
       t,
@@ -326,10 +387,73 @@ export const ChatInputView = ({
     summary: string;
   } | null>(null);
 
+  // ------------------------------------------------------------------
+  // 终端监控模式：拖拽终端到输入框后，实时订阅该终端的日志流
+  // ------------------------------------------------------------------
+
+  /** 当前监控的终端（null = 未监控） */
+  const [monitoredTerminal, setMonitoredTerminal] = useState<{
+    tabId: string;
+    cwd: string;
+  } | null>(null);
+  /** 监控到的日志行（环形保留最近 MAX_MONITORED_LINES 行） */
+  const [monitoredLines, setMonitoredLines] = useState<string[]>([]);
+  /** 监控条日志预览是否展开 */
+  const [monitorExpanded, setMonitorExpanded] = useState(false);
+  /** 监控日志预览滚动容器（新行到达时自动滚到底部） */
+  const monitorScrollRef = useRef<HTMLDivElement | null>(null);
+
+  /** 停止监控当前终端 */
+  const handleStopMonitor = useCallback((): void => {
+    setMonitoredTerminal((prev) => {
+      if (prev) {
+        stopTerminalMonitor(prev.tabId);
+      }
+      return null;
+    });
+    setMonitoredLines([]);
+    setMonitorExpanded(false);
+  }, []);
+
+  /** 监控日志预览展开时自动滚动到底部 */
+  useEffect(() => {
+    if (!monitorExpanded) {
+      return;
+    }
+    const el = monitorScrollRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [monitoredLines.length, monitorExpanded]);
+
+  // 通用 chip 详情悬停预览（file / commit / change / review / element）
+  const [chipDetails, setChipDetails] = useState<{
+    rows: { label: string; value: string }[];
+    content?: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const chipDetailsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+
   const modelDropdownDir = useDropdownDirection(dropdownRef, isModelMenuOpen);
   const isCustomThinkingValue = !thinkingOptions.some(
     (option) => option.value === thinkingValue
   );
+
+  // 模型列表模糊过滤：关键词对 id / ownedBy 做不区分大小写的包含匹配
+  const filteredModels = useMemo(() => {
+    const query = modelSearchQuery.trim().toLowerCase();
+    if (!query) {
+      return models;
+    }
+    return models.filter(
+      (model) =>
+        model.id.toLowerCase().includes(query) ||
+        model.ownedBy.toLowerCase().includes(query)
+    );
+  }, [models, modelSearchQuery]);
 
   const renumberImageChips = useCallback(() => {
     const el = textareaRef.current;
@@ -359,6 +483,34 @@ export const ChatInputView = ({
     [syncContent, textareaRef]
   );
 
+  /** 终端工具栏「添加到输入框」事件：把日志编码为 text-snippet 小组件（chip）插入输入框 */
+  useEffect(() => {
+    const onInsertText = (event: Event): void => {
+      const detail = (event as CustomEvent<TerminalInsertTextPayload>).detail;
+      if (!detail?.text) {
+        return;
+      }
+      const el = textareaRef.current;
+      if (!el) {
+        return;
+      }
+      el.focus();
+      // 大段终端日志以 chip 形式存入输入框：避免文字铺开占满输入区，
+      // 点击 chip 可展开查看完整内容，发送时序列化为摘要文本。
+      const summary = buildTextSnippetSummary(detail.text, 36);
+      const tag: TextSnippetTag = {
+        content: detail.text,
+        summary,
+        charCount: detail.text.length,
+      };
+      insertHtmlAtSelection(createTextSnippetChipHtml(tag));
+      syncContent();
+    };
+    window.addEventListener(TERMINAL_INSERT_TEXT_EVENT, onInsertText);
+    return () =>
+      window.removeEventListener(TERMINAL_INSERT_TEXT_EVENT, onInsertText);
+  }, [syncContent, textareaRef]);
+
   const insertFileTags = useCallback(
     (tags: FileTag[]) => {
       if (textareaRef.current) {
@@ -370,6 +522,26 @@ export const ChatInputView = ({
     },
     [syncContent, textareaRef]
   );
+
+  // 监听浏览器面板元素选择器派发的 element 标签事件，将选取的页面元素
+  // 以 element chip 形式插入编辑区（与 @ 文件 / 拖拽标签同一套编码体系）。
+  useEffect(() => {
+    const handleInsertElementTag = (event: Event) => {
+      const tag = (event as CustomEvent<ElementTag>).detail;
+      if (!tag) {
+        return;
+      }
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+      }
+      insertHtmlAtSelection(createElementChipHtml(tag));
+      syncContent();
+    };
+    window.addEventListener(INSERT_ELEMENT_TAG_EVENT, handleInsertElementTag);
+    return () => {
+      window.removeEventListener(INSERT_ELEMENT_TAG_EVENT, handleInsertElementTag);
+    };
+  }, [syncContent, textareaRef]);
 
   const deleteMentionQuery = useCallback(() => {
     const el = textareaRef.current;
@@ -509,6 +681,64 @@ export const ChatInputView = ({
     [syncContent, textareaRef]
   );
 
+  /**
+   * 将外部文件（拖入或粘贴，均为 File 对象）解析为真实磁盘路径，
+   * 图片文件插入 image chip（读取 dataUrl），其余文件/文件夹插入
+   * file chip（携带路径）。contextIsolation 下渲染进程无法直接读取
+   * 真实路径，由 preload 的 resolveDroppedFiles 解析。
+   */
+  const insertExternalFiles = useCallback(
+    (files: File[]) => {
+      if (!files || files.length === 0) {
+        return;
+      }
+      void window.snow
+        .resolveDroppedFiles(files)
+        .then((entries) => {
+          if (entries.length === 0) {
+            return;
+          }
+          const imageFiles: File[] = [];
+          const fileTags: FileTag[] = [];
+          // entries 顺序与 files 顺序一一对应；以 File.type 优先判断
+          // 图片，路径扩展名兜底（某些系统 File.type 可能为空）。
+          entries.forEach((entry, idx) => {
+            const matchedFile = files[idx];
+            const isImage =
+              !entry.isDirectory &&
+              ((matchedFile && matchedFile.type.startsWith("image/")) ||
+                /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i.test(
+                  entry.path
+                ));
+            if (isImage && matchedFile) {
+              imageFiles.push(matchedFile);
+            } else {
+              const name =
+                entry.path.split(/[\\/]/).filter(Boolean).pop() ||
+                entry.path;
+              fileTags.push({
+                path: entry.path,
+                name,
+                isDirectory: entry.isDirectory,
+              });
+            }
+          });
+          if (imageFiles.length > 0) {
+            for (const imageFile of imageFiles) {
+              insertImageFromFile(imageFile);
+            }
+          }
+          if (fileTags.length > 0) {
+            insertFileTags(fileTags);
+          }
+        })
+        .catch(() => {
+          // 解析失败时静默处理
+        });
+    },
+    [insertFileTags, insertImageFromFile]
+  );
+
   const handleMentionDragStart = useCallback(
     (event: React.DragEvent<HTMLDivElement>, tag: FileTag) => {
       event.dataTransfer.setData("application/json", JSON.stringify(tag));
@@ -517,12 +747,85 @@ export const ChatInputView = ({
     []
   );
 
+  /**
+   * 将图片文件（拖拽 / 粘贴）以 image chip 形式插入编辑区。
+   * 通过 FileReader 读取为 dataURL，逐个插入并触发 syncContent
+   * （内部会调用 renumberImageChips 统一编号）。
+   */
+  const insertImageFiles = useCallback(
+    (files: File[]) => {
+      if (files.length === 0) {
+        return;
+      }
+
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+      }
+
+      for (const file of files) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result as string;
+          if (!dataUrl) {
+            return;
+          }
+
+          const mimeMatch = file.type.match(/^image\/([a-z]+)$/);
+          const ext = mimeMatch ? mimeMatch[1] : "png";
+          const imageTag: ImageTag = {
+            name: `image.${ext}`,
+            dataUrl,
+          };
+
+          insertHtmlAtSelection(createImageChipHtml(imageTag));
+          syncContent();
+        };
+        reader.readAsDataURL(file);
+      }
+    },
+    [syncContent, textareaRef]
+  );
+
   const handleDrop = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
       event.preventDefault();
       isDraggingOverRef.current = false;
       if (textareaRef.current) {
         textareaRef.current.classList.remove("drag-over");
+      }
+
+      // 终端拖拽手柄：拖到输入框 = 进入「监控终端」模式（实时订阅日志流）
+      const terminalData = event.dataTransfer.getData(TERMINAL_DRAG_MIME);
+      if (terminalData) {
+        try {
+          const payload = JSON.parse(terminalData) as TerminalDragPayload;
+          if (payload && typeof payload.tabId === "string") {
+            startTerminalMonitor(payload.tabId, (lines) => {
+              setMonitoredLines((prev) =>
+                [...prev, ...lines].slice(-MAX_MONITORED_LINES)
+              );
+            });
+            setMonitoredTerminal({
+              tabId: payload.tabId,
+              cwd: payload.cwd || "",
+            });
+            setMonitoredLines([]);
+            setMonitorExpanded(true);
+          }
+        } catch {
+          // 无效的终端拖拽数据：忽略
+        }
+        return;
+      }
+
+      // 支持从文件管理器拖入图片（单张或多张），与粘贴图片行为保持一致
+      const droppedFiles = Array.from(event.dataTransfer.files);
+      const imageFiles = droppedFiles.filter((file) =>
+        file.type.startsWith("image/")
+      );
+      if (imageFiles.length > 0) {
+        insertImageFiles(imageFiles);
+        return;
       }
 
       const jsonData = event.dataTransfer.getData("application/json");
@@ -540,57 +843,36 @@ export const ChatInputView = ({
               files.push(file);
             }
           }
-          if (files.length > 0) {
-            void window.snow
-              .resolveDroppedFiles(files)
-              .then((entries) => {
-                if (entries.length === 0) {
-                  return;
-                }
-                const imageFiles: File[] = [];
-                const fileTags: FileTag[] = [];
-                // entries 顺序与 files 顺序一一对应；以 File.type 优先判断
-                // 图片，路径扩展名兜底（某些系统 File.type 可能为空）。
-                entries.forEach((entry, idx) => {
-                  const matchedFile = files[idx];
-                  const isImage =
-                    !entry.isDirectory &&
-                    ((matchedFile && matchedFile.type.startsWith("image/")) ||
-                      /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i.test(
-                        entry.path
-                      ));
-                  if (isImage && matchedFile) {
-                    imageFiles.push(matchedFile);
-                  } else {
-                    const name =
-                      entry.path.split(/[\\/]/).filter(Boolean).pop() ||
-                      entry.path;
-                    fileTags.push({
-                      path: entry.path,
-                      name,
-                      isDirectory: entry.isDirectory,
-                    });
-                  }
-                });
-                if (imageFiles.length > 0) {
-                  for (const imageFile of imageFiles) {
-                    insertImageFromFile(imageFile);
-                  }
-                }
-                if (fileTags.length > 0) {
-                  insertFileTags(fileTags);
-                }
-              })
-              .catch(() => {
-                // 解析失败时静默处理
-              });
-          }
+          insertExternalFiles(files);
         }
         return;
       }
 
       try {
         const parsed = JSON.parse(jsonData) as Record<string, unknown>;
+
+        // 浏览器 tab 拖拽：{ type: "web-tag", url, title } → 插入网页引用 chip
+        if (
+          parsed.type === "web-tag" &&
+          typeof parsed.url === "string" &&
+          parsed.url.length > 0
+        ) {
+          const tag: WebTag = {
+            url: parsed.url,
+            title:
+              typeof parsed.title === "string" && parsed.title.length > 0
+                ? parsed.title
+                : undefined,
+          };
+
+          if (textareaRef.current) {
+            textareaRef.current.focus();
+          }
+
+          insertHtmlAtSelection(createWebTagChipHtml(tag));
+          syncContent();
+          return;
+        }
 
         // 搜索结果组合拖拽：{ type: "file-tags", tags: FileTag[] }
         if (parsed.type === "file-tags" && Array.isArray(parsed.tags)) {
@@ -704,22 +986,26 @@ export const ChatInputView = ({
         // Ignore invalid drag data
       }
     },
-    [insertFileTags, insertImageFromFile, syncContent, textareaRef]
+    [insertExternalFiles, insertFileTags, syncContent, textareaRef]
   );
 
   const handleDragOver = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
       const types = event.dataTransfer.types;
       // 应用内拖拽（文件/commit/change 标签）走 application/json；
-      // 从文件管理器拖入的外部文件走 Files。两者均需 preventDefault
+      // 终端监控拖拽走 application/x-snow-terminal（dropEffect: link）；
+      // 从文件管理器拖入的外部文件走 Files。三者均需 preventDefault
       // 才能允许 drop，否则浏览器默认拒绝（显示禁止光标）。
+      const hasTerminal = types.includes(TERMINAL_DRAG_MIME);
       const allowed =
-        types.includes("application/json") || types.includes("Files");
+        types.includes("application/json") ||
+        types.includes("Files") ||
+        hasTerminal;
       if (!allowed) {
         return;
       }
       event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
+      event.dataTransfer.dropEffect = hasTerminal ? "link" : "copy";
       if (!isDraggingOverRef.current && textareaRef.current) {
         isDraggingOverRef.current = true;
         textareaRef.current.classList.add("drag-over");
@@ -858,10 +1144,18 @@ export const ChatInputView = ({
 
       const items = event.clipboardData.items;
       const imageItems: DataTransferItem[] = [];
+      const fileItems: DataTransferItem[] = [];
 
       for (const item of items) {
+        if (item.kind !== "file") {
+          continue;
+        }
+        // 粘贴的图片（截图、从文件管理器复制的图片文件等）走 image chip；
+        // 其余文件（kind === "file" 且非图片 MIME）走 file chip。
         if (item.type.startsWith("image/")) {
           imageItems.push(item);
+        } else {
+          fileItems.push(item);
         }
       }
 
@@ -873,6 +1167,24 @@ export const ChatInputView = ({
           }
           insertImageFromFile(file);
         }
+      }
+
+      // 粘贴的外部文件（如从文件管理器复制的文件）与拖入共用解析逻辑：
+      // 图片插入 image chip，其余文件/文件夹插入 file chip。
+      if (fileItems.length > 0) {
+        const pastedFiles: File[] = [];
+        for (const fileItem of fileItems) {
+          const file = fileItem.getAsFile();
+          if (file) {
+            pastedFiles.push(file);
+          }
+        }
+        if (pastedFiles.length > 0) {
+          insertExternalFiles(pastedFiles);
+        }
+      }
+
+      if (imageItems.length > 0 || fileItems.length > 0) {
         return;
       }
 
@@ -946,7 +1258,63 @@ export const ChatInputView = ({
       syncContent();
       checkInputTriggers();
     },
-    [syncContent, insertImageFromFile, checkInputTriggers, textareaRef]
+    [syncContent, insertImageFromFile, insertExternalFiles, checkInputTriggers, textareaRef]
+  );
+
+  /**
+   * 路径@导航：将 @ 后的查询文本替换为相对路径（保留 @ 前缀），
+   * 用于 @ 面板"进入文件夹 / 面包屑跳转 / 返回上级"。
+   * 替换后重新解析触发词，面板随新路径刷新内容；relPath 为空表示回到根目录。
+   */
+  const replaceMentionQuery = useCallback(
+    (relPath: string) => {
+      const el = textareaRef.current;
+      if (!el || mentionStartOffsetRef.current < 0) {
+        return;
+      }
+
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0) {
+        return;
+      }
+
+      const range = selection.getRangeAt(0);
+      const currentNode = range.startContainer;
+      const currentOffset = range.startOffset;
+
+      if (currentNode.nodeType !== Node.TEXT_NODE) {
+        return;
+      }
+
+      const textNode = currentNode as Text;
+      const start = mentionStartOffsetRef.current;
+      // @ 后无文本时（currentOffset === start，如刚输入 @ 就直接点目录）
+      // 也允许插入路径；仅当光标在 @ 之前时放弃。
+      if (currentOffset < start) {
+        return;
+      }
+
+      range.setStart(textNode, start);
+      range.setEnd(textNode, currentOffset);
+      range.deleteContents();
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      // 接入浏览器撤销栈，Ctrl+Z 可回退本次导航；空路径（回根）只做删除
+      const newText = relPath ? `${relPath}/` : "";
+      if (newText) {
+        document.execCommand("insertText", false, newText);
+      }
+      checkInputTriggers();
+    },
+    [checkInputTriggers, textareaRef]
+  );
+
+  const handleMentionNavigateTo = useCallback(
+    (relPath: string) => {
+      replaceMentionQuery(relPath);
+    },
+    [replaceMentionQuery]
   );
 
   const handleInput = useCallback(() => {
@@ -1174,6 +1542,37 @@ export const ChatInputView = ({
     [textareaRef]
   );
 
+  // 点击 web chip 主体（非 remove 按钮）→ 在右侧面板打开对应网页。
+  // 通过 rightPanelEvents 事件总线请求 RightPanel 新建/切换到浏览器 tab。
+  const handleWebChipClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const target = event.target as HTMLElement;
+      // 点击 remove 按钮时不打开浏览器
+      if (target.closest("[data-chip-remove='true']")) {
+        return;
+      }
+      const chip = target.closest(
+        "[data-web-tag='true']"
+      ) as HTMLElement | null;
+      if (!chip || !textareaRef.current?.contains(chip)) {
+        return;
+      }
+      const rawData = chip.dataset.webData;
+      if (!rawData) {
+        return;
+      }
+      try {
+        const parsed = JSON.parse(rawData) as { url?: string };
+        if (parsed.url) {
+          rightPanelEvents.emit("open-browser-tab", { url: parsed.url });
+        }
+      } catch {
+        // Ignore malformed data
+      }
+    },
+    [textareaRef]
+  );
+
   const handleTextSnippetEditorSave = useCallback(() => {
     if (!textSnippetEditor) {
       return;
@@ -1207,10 +1606,228 @@ export const ChatInputView = ({
     syncContent();
   }, [syncContent, textSnippetEditor]);
 
-  const handleSelectFilesAndFolders = useCallback(async () => {
+  const showChipDetails = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const target = event.target as HTMLElement;
+      const chip = target.closest(
+        "[data-file-tag='true'],[data-commit-tag='true'],[data-change-tag='true'],[data-review-tag='true'],[data-element-tag='true'],[data-web-tag='true']"
+      ) as HTMLElement | null;
+      const clear = (): void => {
+        if (chipDetailsTimerRef.current) {
+          clearTimeout(chipDetailsTimerRef.current);
+          chipDetailsTimerRef.current = null;
+        }
+        setChipDetails(null);
+      };
+      if (!chip) {
+        clear();
+        return;
+      }
+
+      const rows: { label: string; value: string }[] = [];
+      let content: string | undefined;
+      try {
+        if (chip.dataset.fileTag === "true") {
+          const path = chip.dataset.filePath ?? "";
+          const isDir = chip.dataset.fileIsDir === "true";
+          const lines = chip.dataset.fileLines;
+          rows.push({
+            label: t(isDir ? "chatInput.chipDetailsFolder" : "chatInput.chipDetailsFile"),
+            value: path,
+          });
+          if (lines) {
+            rows.push({ label: t("chatInput.chipDetailsLines"), value: lines });
+          }
+        } else if (chip.dataset.commitTag === "true") {
+          const data = JSON.parse(
+            chip.dataset.commitData ?? "{}"
+          ) as Partial<CommitTag>;
+          rows.push({
+            label: t("chatInput.chipDetailsCommit"),
+            value: data.shortHash ?? "",
+          });
+          rows.push({
+            label: t("chatInput.chipDetailsAuthor"),
+            value: data.author ?? "",
+          });
+          if (data.date) {
+            rows.push({
+              label: t("chatInput.chipDetailsDate"),
+              value: data.date,
+            });
+          }
+          if (data.repoPath) {
+            rows.push({
+              label: t("chatInput.chipDetailsRepo"),
+              value: data.repoPath,
+            });
+          }
+          if (data.message) {
+            content = data.message;
+          }
+        } else if (chip.dataset.changeTag === "true") {
+          const data = JSON.parse(
+            chip.dataset.changeData ?? "{}"
+          ) as Partial<ChangeTag>;
+          const sectionLabel =
+            data.section === "staged"
+              ? t("chatInput.chipDetailsStaged")
+              : t("chatInput.chipDetailsUnstaged");
+          rows.push({
+            label: t("chatInput.chipDetailsSection"),
+            value: data.status ? `${sectionLabel} · ${data.status}` : sectionLabel,
+          });
+          rows.push({
+            label: t("chatInput.chipDetailsPath"),
+            value: data.path ?? "",
+          });
+          if (data.repoPath) {
+            rows.push({
+              label: t("chatInput.chipDetailsRepo"),
+              value: data.repoPath,
+            });
+          }
+        } else if (chip.dataset.reviewTag === "true") {
+          const data = JSON.parse(
+            chip.dataset.reviewData ?? "{}"
+          ) as { prompt?: string; summary?: string; charCount?: number; branch?: string; repoPath?: string };
+          rows.push({
+            label: t("chatInput.chipDetailsSummary"),
+            value: data.summary ?? "",
+          });
+          if (typeof data.charCount === "number") {
+            rows.push({
+              label: t("chatInput.chipDetailsChars"),
+              value: String(data.charCount),
+            });
+          }
+          if (data.branch) {
+            rows.push({
+              label: t("chatInput.chipDetailsBranch"),
+              value: data.branch,
+            });
+          }
+          if (data.repoPath) {
+            rows.push({
+              label: t("chatInput.chipDetailsRepo"),
+              value: data.repoPath,
+            });
+          }
+          if (data.prompt) {
+            content = base64ToUtf8(data.prompt);
+          }
+        } else if (chip.dataset.elementTag === "true") {
+          const data = JSON.parse(
+            chip.dataset.elementData ?? "{}"
+          ) as { url?: string; tag?: string; label?: string; text?: string; note?: string };
+          rows.push({
+            label: t("chatInput.chipDetailsTag"),
+            value: data.label ?? "",
+          });
+          if (data.tag) {
+            rows.push({
+              label: t("chatInput.chipDetailsType"),
+              value: data.tag,
+            });
+          }
+          if (data.url) {
+            rows.push({
+              label: t("chatInput.chipDetailsUrl"),
+              value: data.url,
+            });
+          }
+          if (data.note) {
+            rows.push({
+              label: t("chatInput.chipDetailsNote"),
+              value: base64ToUtf8(data.note),
+            });
+          }
+          if (data.text) {
+            content = base64ToUtf8(data.text);
+          }
+        } else if (chip.dataset.webTag === "true") {
+          const data = JSON.parse(
+            chip.dataset.webData ?? "{}"
+          ) as { url?: string; title?: string };
+          rows.push({
+            label: t("chatInput.chipDetailsUrl"),
+            value: data.url ?? "",
+          });
+          if (data.title) {
+            rows.push({
+              label: t("chatInput.chipDetailsTitle"),
+              value: data.title,
+            });
+          }
+        }
+      } catch {
+        clear();
+        return;
+      }
+      if (rows.length === 0) {
+        clear();
+        return;
+      }
+
+      if (chipDetailsTimerRef.current) {
+        clearTimeout(chipDetailsTimerRef.current);
+        chipDetailsTimerRef.current = null;
+      }
+
+      const rect = chip.getBoundingClientRect();
+      const PREVIEW_MAX_W = 420;
+      const halfW = PREVIEW_MAX_W / 2;
+      const clampedX = Math.max(
+        halfW + 4,
+        Math.min(rect.left + rect.width / 2, window.innerWidth - halfW - 4)
+      );
+      setChipDetails({
+        rows,
+        content,
+        x: clampedX,
+        y: rect.top,
+      });
+    },
+    [t]
+  );
+
+  const scheduleHideChipDetails = useCallback(() => {
+    chipDetailsTimerRef.current = setTimeout(() => {
+      setChipDetails(null);
+    }, 200);
+  }, []);
+
+  const cancelHideChipDetails = useCallback(() => {
+    if (chipDetailsTimerRef.current) {
+      clearTimeout(chipDetailsTimerRef.current);
+      chipDetailsTimerRef.current = null;
+    }
+  }, []);
+
+  // Windows 原生对话框无法在同一视图混合多选文件和文件夹，
+  // 因此"添加文件"与"添加文件夹"拆分为两个独立入口，
+  // 分别调用纯文件 / 纯文件夹选择器，避免文案与行为不一致。
+  const handleSelectFiles = useCallback(async () => {
     try {
-      const selected = await window.snow.selectFiles(
-        t("plusMenu.selectFilesTitle")
+      const selected = await window.snow.selectFiles(t("plusMenu.selectFilesTitle"));
+      if (!selected || selected.length === 0) {
+        return;
+      }
+      const tags: FileTag[] = selected.map((item) => {
+        const path = item.path;
+        const name = path.split("/").filter(Boolean).pop() || path;
+        return { path, name, isDirectory: item.isDirectory };
+      });
+      insertFileTags(tags);
+    } catch {
+      // dialog cancelled or error
+    }
+  }, [insertFileTags, t]);
+
+  const handleSelectFolders = useCallback(async () => {
+    try {
+      const selected = await window.snow.selectDirectories(
+        t("plusMenu.selectFoldersTitle")
       );
       if (!selected || selected.length === 0) {
         return;
@@ -1233,15 +1850,21 @@ export const ChatInputView = ({
         label: t("plusMenu.sectionAdd"),
         items: [
           {
-            id: "files-and-folders",
-            label: t("plusMenu.filesAndFolders"),
-            icon: Paperclip,
-            onSelect: () => void handleSelectFilesAndFolders(),
+            id: "files",
+            label: t("plusMenu.files"),
+            icon: File,
+            onSelect: () => void handleSelectFiles(),
+          },
+          {
+            id: "folders",
+            label: t("plusMenu.folders"),
+            icon: Folder,
+            onSelect: () => void handleSelectFolders(),
           },
         ],
       },
     ],
-    [t, handleSelectFilesAndFolders]
+    [t, handleSelectFiles, handleSelectFolders]
   );
 
   const handleWithdrawPending = useCallback(
@@ -1330,6 +1953,17 @@ export const ChatInputView = ({
         changesOverride={conversationFileChanges}
         onClose={() => setIsFileChangesOpen(false)}
       />
+      <ReviewPanel
+        open={isReviewOpen}
+        workDir={reviewWorkDir ?? ""}
+        onStartReview={(prompt) => {
+          handleSendMessage(prompt, {
+            model: selectedModel || undefined,
+            apiProfile: selectedApiProfile || undefined,
+          });
+        }}
+        onClose={() => setIsReviewOpen(false)}
+      />
       <div className="input-content" ref={mentionAnchorRef}>
         <FileMentionPopup
           ref={mentionPopupRef}
@@ -1340,6 +1974,7 @@ export const ChatInputView = ({
           onSelectBatch={handleMentionSelectBatch}
           textareaRef={textareaRef}
           onDragStart={handleMentionDragStart}
+          onNavigateTo={handleMentionNavigateTo}
         />
         <CommandPanel
           ref={commandPanelRef}
@@ -1367,6 +2002,84 @@ export const ChatInputView = ({
             />
           </div>
         ) : null}
+        {/* 终端监控模式：拖拽终端到输入框后出现，实时显示该终端日志 */}
+        {monitoredTerminal ? (
+          <div
+            className={`terminal-monitor-bar${
+              monitorExpanded ? " expanded" : ""
+            }`}
+            role="status"
+          >
+            <div className="terminal-monitor-main">
+              <button
+                type="button"
+                className="terminal-monitor-head"
+                onClick={() => setMonitorExpanded((v) => !v)}
+                title={t("chat.terminalMonitorToggle", {
+                  defaultValue: "展开 / 收起监控日志",
+                })}
+              >
+                <Radio
+                  size={12}
+                  strokeWidth={2}
+                  className="terminal-monitor-icon"
+                  aria-hidden="true"
+                />
+                <span className="terminal-monitor-label">
+                  {t("chat.terminalMonitorLabel", {
+                    defaultValue: "监控终端",
+                  })}
+                </span>
+                <span className="terminal-monitor-cwd">
+                  {monitoredTerminal.cwd}
+                </span>
+                <span className="terminal-monitor-count">
+                  {t("chat.terminalMonitorLines", {
+                    defaultValue: "{{count}} 行",
+                    values: { count: monitoredLines.length },
+                  })}
+                </span>
+                <ChevronDown
+                  size={13}
+                  className={`terminal-monitor-chevron${
+                    monitorExpanded ? " open" : ""
+                  }`}
+                  aria-hidden="true"
+                />
+              </button>
+              <button
+                type="button"
+                className="terminal-monitor-stop"
+                onClick={handleStopMonitor}
+                title={t("chat.terminalMonitorStop", {
+                  defaultValue: "停止监控",
+                })}
+                aria-label={t("chat.terminalMonitorStop", {
+                  defaultValue: "停止监控",
+                })}
+              >
+                <X size={12} strokeWidth={2} aria-hidden="true" />
+              </button>
+            </div>
+            {monitorExpanded ? (
+              <div className="terminal-monitor-log" ref={monitorScrollRef}>
+                {monitoredLines.length > 0 ? (
+                  monitoredLines.map((line, index) => (
+                    <div key={index} className="terminal-monitor-line">
+                      {line || "\u00A0"}
+                    </div>
+                  ))
+                ) : (
+                  <div className="terminal-monitor-empty">
+                    {t("chat.terminalMonitorEmpty", {
+                      defaultValue: "等待终端输出…",
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <div className="input-box">
           <div
             ref={textareaRef}
@@ -1388,14 +2101,17 @@ export const ChatInputView = ({
             onMouseMove={(event) => {
               showImagePreview(event);
               showTextSnippetPreview(event);
+              showChipDetails(event);
             }}
             onMouseLeave={() => {
               scheduleHideImagePreview();
               scheduleHideTextSnippetPreview();
+              scheduleHideChipDetails();
             }}
             onClick={(event) => {
               handleChipRemove(event);
               handleTextSnippetClick(event);
+              handleWebChipClick(event);
             }}
           />
           {imagePreview &&
@@ -1443,6 +2159,38 @@ export const ChatInputView = ({
                 <pre className="text-snippet-preview-content">
                   {textSnippetPreview.content}
                 </pre>
+              </div>,
+              document.body
+            )}
+          {chipDetails &&
+            createPortal(
+              <div
+                className="chip-details-preview"
+                style={{
+                  left: chipDetails.x,
+                  top: chipDetails.y,
+                  transform: "translate(-50%, calc(-100% - 8px))",
+                }}
+                onMouseEnter={cancelHideChipDetails}
+                onMouseLeave={scheduleHideChipDetails}
+              >
+                <div className="chip-details-preview-rows">
+                  {chipDetails.rows.map((row) => (
+                    <div className="chip-details-preview-row" key={row.label}>
+                      <span className="chip-details-preview-label">
+                        {row.label}
+                      </span>
+                      <span className="chip-details-preview-value">
+                        {row.value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {chipDetails.content && (
+                  <pre className="chip-details-preview-content">
+                    {chipDetails.content}
+                  </pre>
+                )}
               </div>,
               document.body
             )}
@@ -1616,34 +2364,25 @@ export const ChatInputView = ({
                       {thinkingLabel}
                     </span>
                   </span>
+                  {requestMethod === "responses" &&
+                    responsesFastModeEnabled && (
+                      <span
+                        className="model-trigger-fast"
+                        title={fastModeError ?? t("chat.fastModeEnabled")}
+                      >
+                        {isSavingFastMode ? (
+                          <Loader2 size={12} className="spin" />
+                        ) : (
+                          <Zap size={12} />
+                        )}
+                        <span>Fast</span>
+                      </span>
+                    )}
                   <ChevronDown size={12} />
                 </button>
-                <AnimatePresence initial={false}>
-                  {isModelMenuOpen && (
-                    <motion.div
-                      animate={
-                        appleMotionEnabled
-                          ? reducedMotion
-                            ? { opacity: 1 }
-                            : { opacity: 1, scale: 1, y: 0, filter: "blur(0px)" }
-                          : undefined
-                      }
+                {isModelMenuOpen && (
+                    <div
                       className={`model-dropdown drop-${modelDropdownDir}`}
-                      exit={
-                        appleMotionEnabled
-                          ? reducedMotion
-                            ? { opacity: 0 }
-                            : { opacity: 0, scale: 0.98, y: -4, filter: "blur(1px)" }
-                          : undefined
-                      }
-                      initial={
-                        appleMotionEnabled
-                          ? reducedMotion
-                            ? { opacity: 0 }
-                            : { opacity: 0, scale: 0.98, y: -4, filter: "blur(1px)" }
-                          : false
-                      }
-                      transition={appleMotionEnabled ? popoverTransition : undefined}
                     >
                     {modelMenuView === "root" && (
                       <div className="model-dropdown-list">
@@ -1689,6 +2428,45 @@ export const ChatInputView = ({
                             <ChevronRight size={12} />
                           </span>
                         </button>
+                        {requestMethod === "responses" && (
+                          <button
+                            className={`model-dropdown-item model-fast-mode-toggle ${
+                              responsesFastModeEnabled ? "active" : ""
+                            }`}
+                            role="switch"
+                            aria-checked={responsesFastModeEnabled}
+                            disabled={
+                              !runtimeApiConfig ||
+                              isLoadingApiConfig ||
+                              isSavingFastMode ||
+                              isStreaming ||
+                              isSubAgentConversation
+                            }
+                            onClick={() =>
+                              void handleToggleResponsesFastMode()
+                            }
+                            type="button"
+                            title={fastModeError ?? t("chat.fastModeHint")}
+                          >
+                            <span className="model-dropdown-item-name with-icon">
+                              <Zap size={14} className="thinking-option-icon" />
+                              <span>{t("chat.fastMode")}</span>
+                            </span>
+                            <span className="model-menu-value">
+                              {isSavingFastMode ? (
+                                <Loader2 size={12} className="spin" />
+                              ) : (
+                                <span className="model-menu-value-text">
+                                  {t(
+                                    responsesFastModeEnabled
+                                      ? "chat.fastModeOn"
+                                      : "chat.fastModeOff"
+                                  )}
+                                </span>
+                              )}
+                            </span>
+                          </button>
+                        )}
                         {!isSubAgentConversation && apiConfigs.length > 0 && (
                           <button
                             className="model-dropdown-item"
@@ -1839,6 +2617,36 @@ export const ChatInputView = ({
                               </button>
                             </div>
                           )}
+                          <div className="model-dropdown-search">
+                            <Search
+                              size={13}
+                              className="model-dropdown-search-icon"
+                            />
+                            <input
+                              className="model-dropdown-search-input"
+                              type="text"
+                              value={modelSearchQuery}
+                              onChange={(event) =>
+                                setModelSearchQuery(event.target.value)
+                              }
+                              onKeyDown={(event) => {
+                                if (event.key === "Escape") {
+                                  setModelSearchQuery("");
+                                }
+                              }}
+                              placeholder={labels.searchModels}
+                            />
+                            {modelSearchQuery && (
+                              <button
+                                className="model-dropdown-search-clear"
+                                type="button"
+                                aria-label={labels.searchModels}
+                                onClick={() => setModelSearchQuery("")}
+                              >
+                                <X size={12} />
+                              </button>
+                            )}
+                          </div>
                           <div className="model-dropdown-list">
                             {models.length === 0 &&
                               !modelError &&
@@ -1847,7 +2655,13 @@ export const ChatInputView = ({
                                   {labels.noModelsFound}
                                 </div>
                               )}
-                            {models.map((model) => (
+                            {models.length > 0 &&
+                              filteredModels.length === 0 && (
+                                <div className="model-dropdown-empty">
+                                  {labels.noMatchingModels}
+                                </div>
+                              )}
+                            {filteredModels.map((model) => (
                               <button
                                 key={model.id}
                                 className={`model-dropdown-item ${
@@ -2009,9 +2823,8 @@ export const ChatInputView = ({
                           </div>
                         </>
                       ))}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
+                    </div>
+                )}
               </div>
               <TokenUsageRing
                 tokenUsage={tokenUsage}

@@ -17,7 +17,7 @@ const DEFAULT_PROXY_BROWSER_SETTING_VALUE: &str = "{\"enabled\":false,\"port\":7
 
 const DEFAULT_TERMINAL_SETTING_NAME: &str = "Terminal settings";
 const DEFAULT_TERMINAL_SETTING_CODE: &str = "terminal_settings";
-const DEFAULT_TERMINAL_SETTING_VALUE: &str = "{\"shellPath\":\"\",\"fontFamily\":\"\",\"fontSize\":14,\"fontWeight\":\"normal\",\"lineHeight\":1.2,\"proxy\":\"\"}";
+const DEFAULT_TERMINAL_SETTING_VALUE: &str = "{\"shellPath\":\"\",\"fontFamily\":\"\",\"fontSize\":14,\"fontWeight\":\"normal\",\"lineHeight\":1.2}";
 
 const DEFAULT_CODEBASE_SETTING_NAME: &str = "Codebase settings";
 const DEFAULT_CODEBASE_SETTING_CODE: &str = "codebase_settings";
@@ -26,21 +26,6 @@ const DEFAULT_CODEBASE_SETTING_VALUE: &str = "{\"profileName\":\"default\",\"emb
 const DEFAULT_YOLO_MODE_SETTING_NAME: &str = "YOLO mode";
 const DEFAULT_YOLO_MODE_SETTING_CODE: &str = "yolo_mode";
 const DEFAULT_YOLO_MODE_SETTING_VALUE: &str = "false";
-
-const DEFAULT_PLAN_MODE_SETTING_NAME: &str = "Plan mode";
-const DEFAULT_PLAN_MODE_SETTING_CODE: &str = "plan_mode";
-const DEFAULT_PLAN_MODE_SETTING_VALUE: &str = "false";
-
-const DEFAULT_GOAL_MODE_SETTING_NAME: &str = "Goal mode";
-const DEFAULT_GOAL_MODE_SETTING_CODE: &str = "goal_mode";
-const DEFAULT_GOAL_MODE_SETTING_VALUE: &str = "false";
-
-const DEFAULT_GOAL_MODE_TOKEN_BUDGET_SETTING_NAME: &str = "Goal mode token budget";
-const DEFAULT_GOAL_MODE_TOKEN_BUDGET_SETTING_CODE: &str = "goal_mode_token_budget";
-const DEFAULT_GOAL_MODE_TOKEN_BUDGET_SETTING_VALUE: &str = "2000000";
-// Goal Mode Token Budget 持久化方案与 Goal Mode 开关一致：system_settings.setting_code = goal_mode_token_budget，
-// 值为字符串数字（默认 200000）。get_goal_mode_token_budget/set_goal_mode_token_budget 在 system_settings.rs 实现，
-// 通过 goal_settings.rs re-export，storage/mod.rs 桥接，exports/storage.rs 用 #[napi]+spawn_blocking 导出。
 
 const DEFAULT_REQUEST_LOGGING_SETTING_NAME: &str = "Request logging";
 const DEFAULT_REQUEST_LOGGING_SETTING_CODE: &str = "request_logging";
@@ -64,7 +49,7 @@ const DEFAULT_PRIVACY_SETTING_VALUE: &str = "{\"enabled\":false,\"mode\":\"local
 const DEFAULT_THEME_SETTING_NAME: &str = "Theme settings";
 const DEFAULT_THEME_SETTING_CODE: &str = "theme_settings";
 // 默认主题：跟随系统 + snow 预设 + 无背景图 + 100% 不透明
-const DEFAULT_THEME_SETTING_VALUE: &str = "{\"mode\":\"system\",\"presetId\":\"snow\",\"custom\":{\"light\":{\"bgPrimary\":\"#ffffff\",\"bgSecondary\":\"#f9fafb\",\"bgTertiary\":\"#f3f4f6\",\"bgHover\":\"#f3f4f6\",\"bgActive\":\"#e5e7eb\",\"chromeBg\":\"#f8fafc\",\"appBg\":\"#eef2f7\",\"borderColor\":\"#e5e7eb\",\"borderLight\":\"#f3f4f6\",\"borderSubtle\":\"#d1d5db\",\"textPrimary\":\"#111827\",\"textSecondary\":\"#374151\",\"textTertiary\":\"#6b7280\",\"textMuted\":\"#9ca3af\",\"accentGreen\":\"#22c55e\",\"accentGreenBg\":\"#dcfce7\",\"accentGreenText\":\"#166534\",\"accentRed\":\"#ef4444\",\"accentRedBg\":\"#fee2e2\",\"accentRedText\":\"#991b1b\",\"accentBlue\":\"#3b82f6\",\"accentBlueBg\":\"#dbeafe\",\"accentBlueText\":\"#1d4ed8\",\"onSolid\":\"#ffffff\",\"selectionBg\":\"rgba(59, 130, 246, 0.2)\",\"focusRing\":\"rgba(17, 24, 39, 0.06)\"},\"dark\":{\"bgPrimary\":\"#0a0a0a\",\"bgSecondary\":\"#111111\",\"bgTertiary\":\"#1a1a1a\",\"bgHover\":\"#1f1f1f\",\"bgActive\":\"#2a2a2a\",\"chromeBg\":\"#141414\",\"appBg\":\"#050505\",\"borderColor\":\"#2b2b2b\",\"borderLight\":\"#202020\",\"borderSubtle\":\"#3a3a3a\",\"textPrimary\":\"#f5f5f5\",\"textSecondary\":\"#d4d4d4\",\"textTertiary\":\"#a3a3a3\",\"textMuted\":\"#737373\",\"accentGreen\":\"#4ade80\",\"accentGreenBg\":\"rgba(34, 197, 94, 0.18)\",\"accentGreenText\":\"#86efac\",\"accentRed\":\"#f87171\",\"accentRedBg\":\"rgba(239, 68, 68, 0.18)\",\"accentRedText\":\"#fca5a5\",\"accentBlue\":\"#58a6ff\",\"accentBlueBg\":\"rgba(59, 130, 246, 0.18)\",\"accentBlueText\":\"#93c5fd\",\"onSolid\":\"#0a0a0a\",\"selectionBg\":\"rgba(88, 166, 255, 0.28)\",\"focusRing\":\"rgba(212, 212, 212, 0.14)\"}},\"background\":{\"enabled\":false,\"imagePath\":\"\",\"opacity\":1.0,\"blur\":0},\"fontFamily\":\"\",\"streamCursor\":{\"iconType\":\"dot\",\"lucideName\":\"\",\"svgPath\":\"\",\"iconSize\":14.0}}";
+const DEFAULT_THEME_SETTING_VALUE: &str = "{\"mode\":\"system\",\"presetId\":\"snow\",\"custom\":{\"light\":{\"bgPrimary\":\"#ffffff\",\"bgSecondary\":\"#f9fafb\",\"bgTertiary\":\"#f3f4f6\",\"bgHover\":\"#f3f4f6\",\"bgActive\":\"#e5e7eb\",\"chromeBg\":\"#f8fafc\",\"appBg\":\"#eef2f7\",\"borderColor\":\"#e5e7eb\",\"borderLight\":\"#f3f4f6\",\"borderSubtle\":\"#d1d5db\",\"textPrimary\":\"#111827\",\"textSecondary\":\"#374151\",\"textTertiary\":\"#6b7280\",\"textMuted\":\"#9ca3af\",\"accentGreen\":\"#22c55e\",\"accentGreenBg\":\"#dcfce7\",\"accentGreenText\":\"#166534\",\"accentRed\":\"#ef4444\",\"accentRedBg\":\"#fee2e2\",\"accentRedText\":\"#991b1b\",\"accentBlue\":\"#3b82f6\",\"accentBlueBg\":\"#dbeafe\",\"accentBlueText\":\"#1d4ed8\",\"accentColor\":\"\",\"onSolid\":\"#ffffff\",\"selectionBg\":\"rgba(59, 130, 246, 0.2)\",\"focusRing\":\"rgba(17, 24, 39, 0.06)\"},\"dark\":{\"bgPrimary\":\"#0a0a0a\",\"bgSecondary\":\"#111111\",\"bgTertiary\":\"#1a1a1a\",\"bgHover\":\"#1f1f1f\",\"bgActive\":\"#2a2a2a\",\"chromeBg\":\"#141414\",\"appBg\":\"#050505\",\"borderColor\":\"#2b2b2b\",\"borderLight\":\"#202020\",\"borderSubtle\":\"#3a3a3a\",\"textPrimary\":\"#f5f5f5\",\"textSecondary\":\"#d4d4d4\",\"textTertiary\":\"#a3a3a3\",\"textMuted\":\"#737373\",\"accentGreen\":\"#4ade80\",\"accentGreenBg\":\"rgba(34, 197, 94, 0.18)\",\"accentGreenText\":\"#86efac\",\"accentRed\":\"#f87171\",\"accentRedBg\":\"rgba(239, 68, 68, 0.18)\",\"accentRedText\":\"#fca5a5\",\"accentBlue\":\"#58a6ff\",\"accentBlueBg\":\"rgba(59, 130, 246, 0.18)\",\"accentBlueText\":\"#93c5fd\",\"accentColor\":\"\",\"onSolid\":\"#0a0a0a\",\"selectionBg\":\"rgba(88, 166, 255, 0.28)\",\"focusRing\":\"rgba(212, 212, 212, 0.14)\"}},\"background\":{\"enabled\":false,\"imagePath\":\"\",\"opacity\":1.0,\"blur\":0},\"fontFamily\":\"\",\"streamCursor\":{\"iconType\":\"dot\",\"lucideName\":\"\",\"svgPath\":\"\",\"iconSize\":14.0}}";
 
 const PROJECT_MCP_SETTING_NAME: &str = "Project MCP scope";
 const PROJECT_MCP_SETTING_CODE_PREFIX: &str = "project_mcp_scope_";
@@ -293,76 +278,6 @@ pub fn set_yolo_mode(database_path: &Path, enabled: bool) -> Result<()> {
         DEFAULT_YOLO_MODE_SETTING_NAME,
         DEFAULT_YOLO_MODE_SETTING_CODE,
         if enabled { "true" } else { "false" },
-    )
-}
-
-pub fn get_plan_mode(database_path: &Path) -> Result<bool> {
-    let Some(value) = get_system_setting_value(database_path, DEFAULT_PLAN_MODE_SETTING_CODE)?
-    else {
-        return Ok(false);
-    };
-
-    value.parse::<bool>().map_err(|error| {
-        Error::new(
-            Status::GenericFailure,
-            format!("Failed to parse Plan mode setting: {error}"),
-        )
-    })
-}
-
-pub fn set_plan_mode(database_path: &Path, enabled: bool) -> Result<()> {
-    set_system_setting(
-        database_path,
-        DEFAULT_PLAN_MODE_SETTING_NAME,
-        DEFAULT_PLAN_MODE_SETTING_CODE,
-        if enabled { "true" } else { "false" },
-    )
-}
-
-pub fn get_goal_mode(database_path: &Path) -> Result<bool> {
-    let Some(value) = get_system_setting_value(database_path, DEFAULT_GOAL_MODE_SETTING_CODE)?
-    else {
-        return Ok(false);
-    };
-
-    value.parse::<bool>().map_err(|error| {
-        Error::new(
-            Status::GenericFailure,
-            format!("Failed to parse Goal mode setting: {error}"),
-        )
-    })
-}
-
-pub fn set_goal_mode(database_path: &Path, enabled: bool) -> Result<()> {
-    set_system_setting(
-        database_path,
-        DEFAULT_GOAL_MODE_SETTING_NAME,
-        DEFAULT_GOAL_MODE_SETTING_CODE,
-        if enabled { "true" } else { "false" },
-    )
-}
-
-pub fn get_goal_mode_token_budget(database_path: &Path) -> Result<i64> {
-    let Some(value) =
-        get_system_setting_value(database_path, DEFAULT_GOAL_MODE_TOKEN_BUDGET_SETTING_CODE)?
-    else {
-        return Ok(2000000);
-    };
-
-    value.parse::<i64>().map_err(|error| {
-        Error::new(
-            Status::GenericFailure,
-            format!("Failed to parse Goal mode token budget setting: {error}"),
-        )
-    })
-}
-
-pub fn set_goal_mode_token_budget(database_path: &Path, budget: i64) -> Result<()> {
-    set_system_setting(
-        database_path,
-        DEFAULT_GOAL_MODE_TOKEN_BUDGET_SETTING_NAME,
-        DEFAULT_GOAL_MODE_TOKEN_BUDGET_SETTING_CODE,
-        &budget.to_string(),
     )
 }
 
@@ -1182,24 +1097,6 @@ fn seed_default_settings_with_connection(connection: &Connection) -> rusqlite::R
         DEFAULT_YOLO_MODE_SETTING_NAME,
         DEFAULT_YOLO_MODE_SETTING_CODE,
         DEFAULT_YOLO_MODE_SETTING_VALUE,
-    )?;
-    insert_default_setting(
-        connection,
-        DEFAULT_PLAN_MODE_SETTING_NAME,
-        DEFAULT_PLAN_MODE_SETTING_CODE,
-        DEFAULT_PLAN_MODE_SETTING_VALUE,
-    )?;
-    insert_default_setting(
-        connection,
-        DEFAULT_GOAL_MODE_SETTING_NAME,
-        DEFAULT_GOAL_MODE_SETTING_CODE,
-        DEFAULT_GOAL_MODE_SETTING_VALUE,
-    )?;
-    insert_default_setting(
-        connection,
-        DEFAULT_GOAL_MODE_TOKEN_BUDGET_SETTING_NAME,
-        DEFAULT_GOAL_MODE_TOKEN_BUDGET_SETTING_CODE,
-        DEFAULT_GOAL_MODE_TOKEN_BUDGET_SETTING_VALUE,
     )?;
     insert_default_setting(
         connection,

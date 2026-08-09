@@ -88,13 +88,14 @@ export type SshSession = {
 
 export type SshCapabilities = {
   platform: "posix" | "windows";
+  remoteOs?: string;
+  remoteArch?: string;
   posixShell: boolean;
   systemdUser: boolean;
   tmux: boolean;
   setsid: boolean;
   nohup: boolean;
   powerShell: boolean;
-  windowsJobObjects: boolean;
 };
 
 export type SshFileSaveGuarantee =
@@ -126,6 +127,12 @@ export type SshInternalFileWriteOptions = {
   signal?: AbortSignal;
   expectedVersion?: SshFileVersion;
   workspaceRoot?: string;
+  /**
+   * Explicit opt-in for Snow-managed files that must retain target inode
+   * metadata. This is a compatibility write: it preserves ACLs, xattrs, and
+   * security labels, but truncation is not atomic.
+   */
+  preserveInodeMetadata?: boolean;
 };
 
 export type SshFileWriteResult = {
@@ -177,6 +184,25 @@ export const setSshClientFactoryForTesting = (
 const generateSessionId = (): string =>
   `ssh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+type ObservedSshHostKey = {
+  fingerprint: string;
+  keyType: string;
+  publicKey: string;
+};
+
+const parseSshHostKeyType = (key: Buffer): string | null => {
+  if (key.length < 5) {
+    return null;
+  }
+  const keyTypeLength = key.readUInt32BE(0);
+  const end = 4 + keyTypeLength;
+  if (keyTypeLength === 0 || end > key.length) {
+    return null;
+  }
+  const keyType = key.subarray(4, end).toString("ascii");
+  return /^[A-Za-z0-9@._+-]+$/.test(keyType) ? keyType : null;
+};
+
 export const getSshProfileKey = (params: {
   host: string;
   port: number;
@@ -189,7 +215,7 @@ export const connectSsh = (
 ): Promise<string> => {
   return new Promise((resolve, reject) => {
     let settled = false;
-    let observedFingerprint: string | null = null;
+    let observedHostKey: ObservedSshHostKey | null = null;
     let hostKeyMismatch: { expected: string; received: string } | null = null;
     const client = sshClientFactory();
     const signal = options?.signal;
@@ -202,13 +228,26 @@ export const connectSsh = (
       keepaliveInterval: 10_000,
       keepaliveCountMax: 3,
       agentForward: false,
-      hostHash: "sha256",
       hostVerifier: (value: string | Buffer): boolean => {
-        const fingerprint = String(value);
+        const key = Buffer.isBuffer(value) ? value : Buffer.from(value);
+        const fingerprint = createHash("sha256").update(key).digest("hex");
+        const keyType = parseSshHostKeyType(key);
+        if (!keyType) {
+          rejectConnection(
+            new SshOperationError({
+              code: "SSH_HOST_KEY_UNAVAILABLE",
+              operation: "connect",
+              message: "SSH server provided an invalid host key",
+            })
+          );
+          return false;
+        }
+        const publicKey = key.toString("base64");
         const trusted = getSshHostKey(params.host, params.port);
         if (
           trusted &&
-          trusted.fingerprint !== fingerprint &&
+          (trusted.fingerprint !== fingerprint ||
+            (trusted.publicKey && trusted.publicKey !== publicKey)) &&
           params.hostKeyPolicy !== "replace"
         ) {
           hostKeyMismatch = {
@@ -218,7 +257,7 @@ export const connectSsh = (
           rejectHostKeyMismatch();
           return false;
         }
-        observedFingerprint = fingerprint;
+        observedHostKey = { fingerprint, keyType, publicKey };
         return true;
       },
     };
@@ -325,7 +364,7 @@ export const connectSsh = (
             return;
           }
 
-          if (!observedFingerprint) {
+          if (!observedHostKey) {
             rejectConnection(
               new SshOperationError({
                 code: "SSH_HOST_KEY_UNAVAILABLE",
@@ -340,7 +379,9 @@ export const connectSsh = (
             saveSshHostKey({
               host: params.host,
               port: params.port,
-              fingerprint: observedFingerprint,
+              fingerprint: observedHostKey.fingerprint,
+              keyType: observedHostKey.keyType,
+              publicKey: observedHostKey.publicKey,
             });
           } catch (error) {
             rejectConnection(
@@ -655,6 +696,36 @@ export const executeSshCommand = (
   });
 };
 
+/** Confirms that this SSH server permits PTY allocation before an interactive job starts. */
+export const probeSshPty = (sessionId: string): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const session = getSshSession(sessionId);
+    if (!session) {
+      reject(new Error("SSH session not found. Please reconnect."));
+      return;
+    }
+    session.client.exec("true", { pty: true }, (error, stream) => {
+      if (error) {
+        reject(new Error(`SSH PTY allocation failed: ${error.message}`));
+        return;
+      }
+      stream.on("error", (streamError: Error) => {
+        reject(new Error(`SSH PTY allocation failed: ${streamError.message}`));
+      });
+      stream.on("close", (exitCode: number | null) => {
+        if (exitCode === 0) {
+          resolve();
+        } else {
+          reject(
+            new Error(
+              `SSH PTY allocation was rejected with exit code ${exitCode ?? "unknown"}`
+            )
+          );
+        }
+      });
+    });
+  });
+
 const POSIX_CAPABILITY_PROBE_COMMAND = [
   "for capability in sh systemctl tmux setsid nohup; do",
   '  if command -v "$capability" >/dev/null 2>&1; then',
@@ -665,10 +736,18 @@ const POSIX_CAPABILITY_PROBE_COMMAND = [
   "done",
   'runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
   'if XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$runtime_dir/bus}" systemctl --user show-environment >/dev/null 2>&1; then printf "systemd_user=1\\n"; else printf "systemd_user=0\\n"; fi',
+  'printf "os=%s\\narch=%s\\n" "$(uname -s 2>/dev/null || printf unknown)" "$(uname -m 2>/dev/null || printf unknown)"',
 ].join("\n");
 
+const WINDOWS_CAPABILITY_PROBE_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  "[Console]::Out.WriteLine('platform=windows')",
+  "[Console]::Out.WriteLine('powershell=1')",
+].join("\r\n");
+
 const WINDOWS_CAPABILITY_PROBE_COMMAND =
-  'powershell.exe -NoProfile -NonInteractive -Command "Write-Output \'platform=windows\';Write-Output \'powershell=1\';Write-Output \'windows_job_objects=1\'"';
+  "powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
+  Buffer.from(WINDOWS_CAPABILITY_PROBE_SCRIPT, "utf16le").toString("base64");
 
 export const probeSshCapabilities = async (
   sessionId: string,
@@ -684,7 +763,7 @@ export const probeSshCapabilities = async (
   } catch (posixError) {
     try {
       output = await executeSshCommand(sessionId, WINDOWS_CAPABILITY_PROBE_COMMAND, {
-        timeoutMs: 5_000,
+        timeoutMs: 10_000,
         signal: options?.signal,
       });
       platform = "windows";
@@ -705,13 +784,14 @@ export const probeSshCapabilities = async (
   );
   const capabilities: SshCapabilities = {
     platform,
+    remoteOs: values.get("os")?.toLowerCase(),
+    remoteArch: values.get("arch")?.toLowerCase(),
     posixShell: values.get("sh") === "1",
     systemdUser: values.get("systemd_user") === "1",
     tmux: values.get("tmux") === "1",
     setsid: values.get("setsid") === "1",
     nohup: values.get("nohup") === "1",
     powerShell: values.get("powershell") === "1",
-    windowsJobObjects: values.get("windows_job_objects") === "1",
   };
   const session = getSshSession(sessionId);
   if (session) {
@@ -1277,6 +1357,28 @@ const writeCompatibilityFile = async (
   }
 };
 
+const copyBasicPosixMode = async (
+  sftp: import("ssh2").SFTPWrapper,
+  handle: Buffer,
+  targetStats: import("ssh2").Stats | null,
+  signal?: AbortSignal
+): Promise<void> => {
+  if (!targetStats) {
+    return;
+  }
+
+  // An atomic replacement always creates a new inode. SFTP can copy the
+  // basic rwx mode, but has no portable ACL/xattr transfer operation. The
+  // temporary file receives directory-default metadata; target-specific ACLs,
+  // xattrs, labels, and special mode bits require an explicit compatibility
+  // write that preserves the target inode.
+  await sftpVoid(
+    sftp,
+    (callback) => sftp.fchmod(handle, targetStats.mode & 0o777, callback),
+    atomicWriteAbortOptions(signal)
+  );
+};
+
 const createTemporaryPath = (remotePath: string): string => {
   const parent = dirname(remotePath);
   const name = basename(remotePath);
@@ -1414,7 +1516,7 @@ const writeSshFileWithOptions = async (
       }
     }
 
-    if (initialStats) {
+    if (initialStats && options?.preserveInodeMetadata) {
       compatibilityWriteStarted = true;
       return await completeCompatibilityWrite(
         sessionId,
@@ -1436,9 +1538,6 @@ const writeSshFileWithOptions = async (
     );
     temporaryCreated = true;
     await writeHandle(session.sftp, handle, data, signal);
-    const fsynced = await tryFsync(session.sftp, handle, signal);
-    await closeHandle(session.sftp, handle, signal);
-    handle = undefined;
 
     assertNotAborted(signal);
     await assertWorkspaceBoundary(
@@ -1447,12 +1546,15 @@ const writeSshFileWithOptions = async (
       options?.workspaceRoot,
       signal
     );
+    const currentStats = await sftpLstat(
+      session.sftp,
+      normalizedPath,
+      atomicWriteAbortOptions(signal)
+    );
+    if (currentStats) {
+      assertRegularFile(normalizedPath, currentStats);
+    }
     if (options?.expectedVersion) {
-      const currentStats = await sftpLstat(
-        session.sftp,
-        normalizedPath,
-        atomicWriteAbortOptions(signal)
-      );
       const currentVersion = currentStats
         ? (await readSshFileWithVersion(sessionId, normalizedPath, { signal })).version
         : { exists: false };
@@ -1464,6 +1566,11 @@ const writeSshFileWithOptions = async (
         });
       }
     }
+
+    await copyBasicPosixMode(session.sftp, handle, currentStats, signal);
+    const fsynced = await tryFsync(session.sftp, handle, signal);
+    await closeHandle(session.sftp, handle, signal);
+    handle = undefined;
 
     renameAttempted = true;
     const usedPosixRename = await tryPosixRename(

@@ -19,7 +19,12 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        input: resolve(__dirname, "src/preload/index.ts"),
+        input: {
+          index: resolve(__dirname, "src/preload/index.ts"),
+          // 内置浏览器 webview 的密码助手（guest 页面 preload，独立入口
+          // 以输出单独的 webview-browser.mjs 供 <webview preload> 引用）。
+          "webview-browser": resolve(__dirname, "src/preload/webviewBrowserPreload.ts"),
+        },
       },
     },
   },

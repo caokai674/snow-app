@@ -27,6 +27,7 @@ const MODEL_FETCH_TIMEOUT_SECS: u64 = 15;
 
 fn create_models_http_client() -> Result<Client> {
     Client::builder()
+        .user_agent(crate::api::http_client::app_user_agent())
         .timeout(Duration::from_secs(MODEL_FETCH_TIMEOUT_SECS))
         .build()
         .map_err(|error| Error::from_reason(format!("Failed to create HTTP client: {}", error)))

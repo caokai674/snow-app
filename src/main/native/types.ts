@@ -431,6 +431,12 @@ export type RemoteDraftRecord = RemoteDraftInput & {
   updatedAt: string;
 };
 
+export type IdeInfo = {
+  id: string;
+  name: string;
+  executable: string;
+};
+
 export type FileSearchResult = {
   path: string;
   relativePath: string;
@@ -549,6 +555,7 @@ export type SubAgentConfigInput = {
   systemPrompt: string;
   toolsJson: string;
   configProfile: string;
+  model: string;
   builtin: boolean;
   sortOrder: number;
   source: string;
@@ -692,6 +699,26 @@ export type ImageLibraryRecord = {
   model: string;
   provider: string;
   createdAt: string;
+  /** 所属相册 id；null = 未分类 */
+  albumId: string | null;
+};
+
+/** 图库相册记录 */
+export type ImageAlbumRecord = {
+  id: string;
+  name: string;
+  createdAt: string;
+  /** 相册封面：最新一张图的图库相对路径（image/...）；空相册为 null */
+  coverPath: string | null;
+  /** 相册内图片数量 */
+  imageCount: number;
+};
+
+/** 图库目录迁移进度 */
+export type ImageLibraryMigrationProgress = {
+  copied: number;
+  total: number;
+  done: boolean;
 };
 
 export type UserMessageSummary = {
@@ -738,7 +765,15 @@ export type ResponsesApiRequest = {
   directoryId?: string;
   checkpointId?: string;
   contextCompaction?: boolean;
+  /**
+   * Internal auto-compaction resume mode: the compaction handoff is already
+   * persisted as the latest `context_compaction` boundary, so `messages` is a
+   * placeholder that must not be re-injected into the payload nor persisted
+   * as normal user messages.
+   */
+  resumeAfterCompaction?: boolean;
   subAgentToolsJson?: string;
+  subAgentSystemPrompt?: string;
   subAgentConfigProfile?: string;
   skipContext?: boolean;
   planMode?: boolean;
@@ -782,6 +817,8 @@ export type ResponsesApiStreamChunk = {
   streamTokenCount: number;
   elapsedMs: number;
   ttftMs: number;
+  /** External-vision textify progress event (JSON string). See preload types. */
+  visionStatus?: string;
 };
 
 export type McpToolDefinition = {
@@ -1024,12 +1061,6 @@ export type NativeBridge = {
   ) => Promise<void>;
   getYoloMode: () => Promise<boolean>;
   setYoloMode: (enabled: boolean) => Promise<void>;
-  getPlanMode: () => Promise<boolean>;
-  setPlanMode: (enabled: boolean) => Promise<void>;
-  getGoalMode: () => Promise<boolean>;
-  setGoalMode: (enabled: boolean) => Promise<void>;
-  getGoalModeTokenBudget: () => Promise<number>;
-  setGoalModeTokenBudget: (budget: number) => Promise<void>;
   getConversationModes: (
     conversationId: string
   ) => Promise<ConversationModesResult>;
@@ -1127,6 +1158,8 @@ export type NativeBridge = {
   listWorkspaceDirectories: () => Promise<WorkspaceDirectoryRecord[]>;
   upsertWorkspaceDirectory: (item: WorkspaceDirectoryInput) => Promise<void>;
   activateWorkspaceDirectory: (directoryId: string) => Promise<void>;
+  listInstalledIdes: () => Promise<IdeInfo[]>;
+  openInIde: (ideId: string, projectPath: string) => Promise<void>;
   reorderWorkspaceDirectories: (
     items: WorkspaceDirectoryInput[]
   ) => Promise<void>;
@@ -1249,6 +1282,10 @@ export type NativeBridge = {
     limit: number,
     offset: number
   ) => Promise<ChatConversationPage>;
+  /** 跨项目按会话 ID 查询会话记录（供「跨项目通知」使用）。 */
+  listChatConversationsByIds: (
+    conversationIds: string[]
+  ) => Promise<ChatConversationRecord[]>;
   listPinnedConversations: (
     directoryId: string
   ) => Promise<ChatConversationRecord[]>;
@@ -1270,6 +1307,7 @@ export type NativeBridge = {
     agentId: string,
     agentName: string,
     directoryId: string,
+    apiProfileName: string,
     model: string,
     title: string
   ) => Promise<void>;
@@ -1428,6 +1466,15 @@ export type NativeBridge = {
     repoPath: string,
     hash: string
   ) => Promise<GitCommitFile[]>;
+  getCommitDiff: (
+    repoPath: string,
+    hash: string
+  ) => Promise<GitDiffResult>;
+  gitCommitFileDiff: (
+    repoPath: string,
+    hash: string,
+    filePath: string
+  ) => Promise<GitDiffResult>;
   discoverGitRepos: (rootPath: string) => Promise<GitRepoInfo[]>;
   startGitWatch: (
     repoPath: string,
@@ -1511,8 +1558,69 @@ export type NativeBridge = {
   getImageLibraryDir: () => Promise<string>;
   setImageLibraryDir: (dir: string) => Promise<void>;
   listImageLibrary: () => Promise<ImageLibraryRecord[]>;
+  listImageAlbums: () => Promise<ImageAlbumRecord[]>;
+  createImageAlbum: (name: string) => Promise<ImageAlbumRecord>;
+  renameImageAlbum: (id: string, name: string) => Promise<ImageAlbumRecord>;
+  deleteImageAlbum: (id: string) => Promise<void>;
+  setImageAlbum: (imageId: string, albumId: string | null) => Promise<void>;
+  /** 手动导入图片文件（复制进图库目录并写入索引），返回成功导入的记录 */
+  importImageFiles: (filePaths: string[]) => Promise<ImageLibraryRecord[]>;
   readImageLibraryFile: (relativePath: string) => Promise<string | null>;
   deleteImageLibraryImage: (id: string) => Promise<void>;
   countConversationImages: (conversationIds: string[]) => Promise<number>;
   deleteConversationImages: (conversationIds: string[]) => Promise<number>;
+  /** 准备图库迁移：校验目标目录并写入迁移日志；返回待迁移图片数量（0 表示无需迁移） */
+  prepareImageLibraryMigration: (targetDir: string) => Promise<number>;
+  /** 复制下一批图库文件并返回迁移进度 */
+  migrateImageLibraryChunk: () => Promise<ImageLibraryMigrationProgress>;
+  /** 提交迁移：写入新目录设置并清理旧根目录文件 */
+  commitImageLibraryMigration: () => Promise<void>;
+  /** 回滚迁移：删除已复制到新目录的文件并移除日志（幂等） */
+  rollbackImageLibraryMigration: () => Promise<void>;
+  /** 探测本机浏览器（Chrome/Edge/Chromium/Firefox）及其配置文件与数据量 */
+  browserImportListSources: () => Promise<BrowserImportSource[]>;
+  /** 解密并导出指定浏览器配置文件的已保存密码（明文，仅供主进程加密落盘） */
+  browserImportPasswords: (
+    sourceId: string,
+    profile: string
+  ) => Promise<ImportedBrowserPassword[]>;
+  /** 解析指定浏览器配置文件的 Cookie（Chrome 系已解密） */
+  browserImportCookies: (
+    sourceId: string,
+    profile: string
+  ) => Promise<ImportedBrowserCookie[]>;
+};
+
+/** 本机浏览器源（探测结果）。 */
+export type BrowserImportSource = {
+  /** "chrome" | "edge" | "chromium" | "firefox" */
+  id: string;
+  name: string;
+  profile: string;
+  /** 浏览器登录账号（Chrome: account_info email / Firefox: sync username） */
+  accountName: string;
+  passwordDb: string;
+  cookieDb: string;
+  passwordCount: number;
+  cookieCount: number;
+  note: string;
+};
+
+/** 导入的密码（明文仅存在于主进程内存，随即加密落盘）。 */
+export type ImportedBrowserPassword = {
+  origin: string;
+  username: string;
+  password: string;
+};
+
+/** 导入的 Cookie。 */
+export type ImportedBrowserCookie = {
+  domain: string;
+  path: string;
+  name: string;
+  value: string;
+  expires: number | null;
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: string;
 };

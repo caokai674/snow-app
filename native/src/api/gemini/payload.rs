@@ -268,6 +268,23 @@ pub(super) fn build_gemini_payload(
         }
     }
 
+    // Google Search grounding（Gemini 原生联网搜索）：
+    // 配置 snowcfg.googleSearch 开启时，向 tools 数组注入 google_search 工具。
+    // 与 MCP function tools 可共存，Gemini 允许 tools 中混合声明与内置工具。
+    if build_gemini_google_search_enabled(&api_config.config_json) {
+        let has_tools = payload
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty());
+        if !has_tools {
+            payload["tools"] = json!([]);
+        }
+        payload["tools"]
+            .as_array_mut()
+            .expect("tools is an array")
+            .push(json!({ "google_search": {} }));
+    }
+
     Ok(payload)
 }
 
@@ -296,4 +313,13 @@ pub(crate) fn build_gemini_thinking_config(config_json: &str) -> Option<Value> {
         .filter(|value| !value.is_empty() && *value != "none")?;
 
     Some(json!({ "thinkingLevel": thinking_level }))
+}
+
+/// 读取配置中的谷歌搜索联网开关（snowcfg.googleSearch）。
+/// 开启时 gemini 请求会注入 google_search 工具（Gemini 原生 grounding）。
+pub(crate) fn build_gemini_google_search_enabled(config_json: &str) -> bool {
+    serde_json::from_str::<Value>(config_json)
+        .ok()
+        .and_then(|parsed| parsed.get("snowcfg")?.get("googleSearch")?.as_bool())
+        .unwrap_or(false)
 }

@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  BrowserElementPicker,
   BrowserFindBar,
   type BrowserFindResult,
   BrowserToolbar,
   useBrowserHomepage,
+  useWebviewElementPicker,
   useWebviewScreenshot,
 } from "./browser";
 import { DEFAULT_BROWSER_HOMEPAGE } from "./browser/browserHomepageConstants";
@@ -11,13 +13,19 @@ import {
   focusBrowserMcpInstance,
   registerBrowserMcpInstance,
 } from "./browser/browserMcpController";
-import { executeBrowserMcpOperation } from "./browser/browserMcpOperations";
+import {
+  clearBrowserRouteRulesForInstance,
+  executeBrowserMcpOperation,
+} from "./browser/browserMcpOperations";
+import { APP_CONTROL_OPEN_SETTINGS_EVENT } from "../../hooks/useAppControl";
 
 export type BrowserPanelContentProps = {
   instanceId: string;
   initialUrl: string;
   isActive: boolean;
   onTitleChange?: (title: string) => void;
+  /** 页面每次导航（含页面内跳转）后的最新 URL 回调，用于上层同步 tab 数据 */
+  onUrlChange?: (url: string) => void;
 };
 
 const normalizeUrl = (input: string, homepage: string): string => {
@@ -64,9 +72,18 @@ export const BrowserPanelContent = ({
   initialUrl,
   isActive,
   onTitleChange,
+  onUrlChange,
 }: BrowserPanelContentProps): React.JSX.Element => {
   const webviewRef = useRef<Electron.WebviewTag | null>(null);
   const consoleMessagesRef = useRef<unknown[]>([]);
+  // onTitleChange 由 RightPanel 内联传入,每次父组件 render 都是新引用。
+  // 通过 ref 持有,事件监听 effect 只需依赖 instanceId,监听器只绑定一次,
+  // 避免多个浏览器实例时每次父组件重渲染都反复卸载/重建 webview 监听器。
+  const onTitleChangeRef = useRef(onTitleChange);
+  onTitleChangeRef.current = onTitleChange;
+  // onUrlChange 与 onTitleChange 同因,同样经 ref 持有。
+  const onUrlChangeRef = useRef(onUrlChange);
+  onUrlChangeRef.current = onUrlChange;
   const { homepage, loaded, setHomepage } = useBrowserHomepage();
   // When an explicit initialUrl is provided, use it immediately. Otherwise,
   // leave the address bar and webview src empty until the homepage has been
@@ -102,10 +119,42 @@ export const BrowserPanelContent = ({
   const [isLoading, setIsLoading] = useState(false);
   const { isCapturing, feedback, captureScreenshot } =
     useWebviewScreenshot(webviewRef);
+  const {
+    isPicking,
+    picked,
+    togglePicker,
+    cancelPicker,
+    confirmPicker,
+    applyElementStyle,
+  } = useWebviewElementPicker(webviewRef);
   const [zoomFactor, setZoomFactor] = useState(1);
   const [findVisible, setFindVisible] = useState(false);
   const [findText, setFindText] = useState("");
   const [findResult, setFindResult] = useState<BrowserFindResult | null>(null);
+  const browserContentRef = useRef<HTMLDivElement>(null);
+
+  // 计算元素选择备注弹窗的锚点（相对 .browser-content 的左上角）。
+  // guest 视口坐标通过 webview 元素的位置偏移到宿主坐标，再换算到
+  // 内容区局部坐标；缩放时按 zoomFactor 同步放大（DIP = CSS px × zoom）。
+  const pickerAnchor = useMemo(() => {
+    if (!picked) {
+      return null;
+    }
+    const webview = webviewRef.current;
+    const content = browserContentRef.current;
+    if (!webview || !content) {
+      return null;
+    }
+    const webviewRect = webview.getBoundingClientRect();
+    const contentRect = content.getBoundingClientRect();
+    const scale = webview.getZoomFactor();
+    return {
+      left: webviewRect.left + picked.rect.x * scale - contentRect.left,
+      top: webviewRect.top + picked.rect.y * scale - contentRect.top,
+      width: picked.rect.width * scale,
+      height: picked.rect.height * scale,
+    };
+  }, [picked]);
 
   useEffect(() => {
     const webview = webviewRef.current;
@@ -133,7 +182,11 @@ export const BrowserPanelContent = ({
           return result;
         })
     );
-    return unregister;
+    return () => {
+      unregister();
+      // 实例卸载时清理其累积的路由 mock 规则,避免残留规则影响其他实例。
+      clearBrowserRouteRulesForInstance(instanceId);
+    };
   }, [instanceId]);
 
   useEffect(() => {
@@ -164,6 +217,10 @@ export const BrowserPanelContent = ({
       // Keep the menu's zoom display in sync with the webview's actual zoom
       // (Electron persists zoom per webContents across navigations).
       setZoomFactor(webview.getZoomFactor());
+      // 上报最新 URL，供 RightPanel 同步 tab.data.url（拖拽引用需要实时地址）
+      if (onUrlChangeRef.current) {
+        onUrlChangeRef.current(e.url);
+      }
     };
 
     const handleDidStartLoading = (): void => {
@@ -178,23 +235,8 @@ export const BrowserPanelContent = ({
     const handlePageTitleUpdated = (
       e: Electron.PageTitleUpdatedEvent
     ): void => {
-      if (onTitleChange && e.title) {
-        onTitleChange(e.title);
-      }
-    };
-
-    const handleNewWindow = (e: Event & { url?: string }): void => {
-      e.preventDefault();
-      // Navigate in the same webview instead of opening a new window.
-      // We use loadURL directly and do NOT update webviewSrc, because
-      // changing src would fire a second racing loadURL call.
-      if (e.url) {
-        const url = normalizeUrl(e.url, homepage);
-        Promise.resolve(webview.loadURL(url)).catch((error: unknown) => {
-          if (!isSuppressedNavigationError(error)) {
-            console.error("Failed to navigate to new window URL:", error);
-          }
-        });
+      if (onTitleChangeRef.current && e.title) {
+        onTitleChangeRef.current(e.title);
       }
     };
 
@@ -245,7 +287,6 @@ export const BrowserPanelContent = ({
       "page-title-updated",
       handlePageTitleUpdated as EventListener
     );
-    webview.addEventListener("new-window", handleNewWindow);
     webview.addEventListener(
       "did-fail-load",
       handleDidFailLoad as EventListener
@@ -268,7 +309,6 @@ export const BrowserPanelContent = ({
         "page-title-updated",
         handlePageTitleUpdated as EventListener
       );
-      webview.removeEventListener("new-window", handleNewWindow);
       webview.removeEventListener(
         "did-fail-load",
         handleDidFailLoad as EventListener
@@ -276,8 +316,33 @@ export const BrowserPanelContent = ({
       webview.removeEventListener("found-in-page", handleFoundInPage);
       webview.removeEventListener("console-message", handleConsoleMessage);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onTitleChange]);
+  }, [instanceId]);
+
+  // 非激活 tab 的 webview 静音,避免多个浏览器实例时后台页面持续播放
+  // 音频/占用音频设备(对齐 Chrome 后台标签页行为);激活时恢复声音。
+  // 注意:webview 方法(含 setAudioMuted)要求 guest 已触发 dom-ready,
+  // 新 tab 挂载时 guest 可能尚未就绪,直接调用会抛
+  // "The WebView must be attached to the DOM and the dom-ready event
+  // emitted before this method can be called" 并中断渲染;因此先尝试
+  // 一次,失败则由 dom-ready 事件补一次。
+  useEffect(() => {
+    const webview = webviewRef.current;
+    if (!webview) {
+      return;
+    }
+    const applyMuted = (): void => {
+      try {
+        webview.setAudioMuted(!isActive);
+      } catch {
+        // guest 尚未就绪(dom-ready 未触发),等待 dom-ready 后重试。
+      }
+    };
+    applyMuted();
+    webview.addEventListener("dom-ready", applyMuted);
+    return () => {
+      webview.removeEventListener("dom-ready", applyMuted);
+    };
+  }, [instanceId, isActive]);
 
   const handleNavigate = (rawInput?: string): void => {
     const input = (rawInput ?? addressInput).trim();
@@ -351,6 +416,15 @@ export const BrowserPanelContent = ({
     webviewRef.current?.reload();
   };
 
+  // 跳转到浏览器设置页（起始页 / 密码管理 / 导入）。
+  const handleOpenSettings = (): void => {
+    window.dispatchEvent(
+      new CustomEvent(APP_CONTROL_OPEN_SETTINGS_EVENT, {
+        detail: { view: "browser-settings" },
+      })
+    );
+  };
+
   const applyZoom = (next: number): void => {
     setZoomFactor(next);
     webviewRef.current?.setZoomFactor(next);
@@ -375,7 +449,15 @@ export const BrowserPanelContent = ({
   };
 
   const handleOpenDevTools = (): void => {
-    webviewRef.current?.openDevTools();
+    const webview = webviewRef.current;
+    if (!webview) {
+      return;
+    }
+    void window.snow
+      .openBrowserDevTools(webview.getWebContentsId())
+      .catch((error) => {
+        console.error("Failed to open browser DevTools:", error);
+      });
   };
 
   const handleOpenFind = (): void => {
@@ -423,14 +505,25 @@ export const BrowserPanelContent = ({
     setFindResult(null);
   };
 
+  // allowpopups 是必须的：webview guest 默认 disablePopups=true，所有
+  // window.open / target=_blank 都会被 Chromium 直接拦截（window.open
+  // 返回 null），不会到达主进程 setWindowOpenHandler。放行后由主进程
+  // browserPopupWindow 统一创建真实弹出窗体（Google 登录等 OAuth 弹窗
+  // 依赖 window.opener 关系）。
+  //
+  // 注意：必须写字符串 "true" 而非布尔值！React 18 对未知 boolean 属性
+  // （allowpopups 不在 React 白名单）会丢弃并仅打印告警，导致 guest 保持
+  // disablePopups=true（实测 DOM 上 hasAttribute 为 false）。
   return (
     <div className="browser-panel">
       <BrowserToolbar
         canGoBack={canGoBack}
         canGoForward={canGoForward}
         isLoading={isLoading}
+        canPickElement={!isLoading && !!webviewSrc}
         addressInput={addressInput}
         isCapturing={isCapturing}
+        isPickingElement={isPicking}
         screenshotFeedback={feedback}
         onAddressChange={setAddressInput}
         onAddressKeyDown={handleAddressKeyDown}
@@ -438,10 +531,12 @@ export const BrowserPanelContent = ({
         onForward={handleForward}
         onReload={handleReload}
         onScreenshot={captureScreenshot}
+        onToggleElementPicker={togglePicker}
         zoomFactor={zoomFactor}
         homepage={homepage}
         onClearCache={handleClearCache}
         onClearCookies={handleClearCookies}
+        onOpenSettings={handleOpenSettings}
         onZoomIn={handleZoomIn}
         onZoomOut={handleZoomOut}
         onZoomReset={handleZoomReset}
@@ -450,12 +545,35 @@ export const BrowserPanelContent = ({
         onOpenDevTools={handleOpenDevTools}
         onSetHomepage={setHomepage}
       />
-      <div className="browser-content">
+      <div className="browser-content" ref={browserContentRef}>
         <webview
-          ref={webviewRef}
+          ref={(el) => {
+            webviewRef.current =
+              el as unknown as Electron.WebviewTag | null;
+            // allowpopups 必须为字符串属性：React 18 对未知 boolean 属性
+            // （allowpopups 不在 React 白名单）会丢弃并仅告警，而 Electron
+            // 类型声明又将其标为 boolean，无法在 JSX 中直接写字符串。
+            // 在元素挂载时（早于 guest attach）通过 DOM API 写入，否则
+            // guest 保持 disablePopups=true，所有 window.open 被拦截。
+            el?.setAttribute("allowpopups", "true");
+          }}
           src={webviewSrc}
           className="browser-webview"
+          preload={window.snow.browserWebviewPreloadPath}
+          webpreferences="sandbox=no,contextIsolation=yes,nodeIntegration=no"
         />
+        {pickerAnchor && picked && (
+          <BrowserElementPicker
+            anchorLeft={pickerAnchor.left}
+            anchorTop={pickerAnchor.top}
+            anchorWidth={pickerAnchor.width}
+            anchorHeight={pickerAnchor.height}
+            element={picked}
+            onConfirm={confirmPicker}
+            onCancel={cancelPicker}
+            onStyleChange={applyElementStyle}
+          />
+        )}
         {findVisible && (
           <BrowserFindBar
             value={findText}

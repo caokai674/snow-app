@@ -13,6 +13,7 @@ import {
   formatMessageTime,
   formatToolResultsContent,
   getErrorMessage,
+  isResponseErrorStatus,
   parseToolCalls,
 } from "../utils/conversationHelpers";
 import {
@@ -212,7 +213,8 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
       const executeSubAgentActivation = createSubAgentActivation({
         ctx,
         requestToolAuthorizations,
-        model: options.model,
+        parentApiProfile: options.apiProfile,
+        parentModel: options.model,
         planApprovedSessionKeysRef,
       });
 
@@ -224,7 +226,12 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
           toolResultsJson?: string;
         }[],
         currentConversationId: string | undefined,
-        checkpointId?: string
+        checkpointId?: string,
+        // Internal auto-compaction resume: the compaction handoff is already
+        // persisted as the latest context_compaction boundary, so the Rust
+        // backend builds the request context from the database and treats
+        // requestMessages as a placeholder (never sent nor persisted).
+        resumeAfterCompaction?: boolean
       ): Promise<void> => {
         const iterSessionKey = currentConversationId ?? PENDING_SESSION_KEY;
         let effectiveKey = iterSessionKey;
@@ -269,6 +276,7 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
             conversationId: currentConversationId,
             directoryId: sessionDirId,
             checkpointId,
+            resumeAfterCompaction,
             planMode: iterRef?.planMode ?? ctx.planModeRef.current,
             goalMode: iterRef?.goalMode ?? ctx.goalModeRef.current,
           },
@@ -288,6 +296,7 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
         }
 
         const response = await streamPromise;
+        const responseFailed = isResponseErrorStatus(response.status);
 
         const ref = ctx.sessionsRefData.current.get(effectiveKey);
         if (ref) {
@@ -407,7 +416,7 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
             // subsequent AI iterations must NOT refresh the list to avoid
             // excessive re-sorting. Follow-up messages already refreshed the
             // list at send time (handleSendMessage).
-            if (response.status !== "error") {
+            if (!responseFailed) {
               const refreshId = response.conversationId;
               void window.snow
                 .getChatConversation(refreshId)
@@ -432,7 +441,7 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
           if (
             isFirstMessage &&
             !summaryTriggered &&
-            response.status !== "error"
+            !responseFailed
           ) {
             summaryTriggered = true;
             const summaryConvId = response.conversationId;
@@ -487,7 +496,7 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
         // message is now persisted via store_chat_exchange) and re-fetch.
         ctx.setConversationVersion((version) => version + 1);
 
-        if (response.tokenUsage && response.status !== "error") {
+        if (response.tokenUsage && !responseFailed) {
           ctx.updateSessionField(
             effectiveKey,
             "tokenUsage",
@@ -495,18 +504,38 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
           );
         }
 
+        // Parse tool calls early: the auto-compaction gate below must know
+        // whether the agent loop will actually continue before compacting.
+        // (Marking the first call as running happens later in the tool
+        // executor; parsing itself is side-effect free.)
+        const toolCalls = parseToolCalls(response.toolCallsJson);
+        const visibleToolCalls = toolCalls;
+
         // Auto-compaction check: when the active API config has
         // enableAutoCompress=true and the total token usage exceeds the
         // configured threshold, compact the context so the AI loop can
         // continue without hitting the context window limit.
         //
+        // The check ONLY runs while the loop is still alive — i.e. the
+        // response carries tool calls to process, or user messages are queued
+        // and about to be injected. When the loop is finishing naturally (no
+        // tool calls, no pending user messages), compaction must NOT fire even
+        // if the threshold is crossed: it would spawn a fresh runAgentLoop
+        // iteration and wake the AI back up right after it completed. The
+        // over-threshold context is handled instead the next time the user
+        // sends a message, by the pre-send compaction in initCheckpointAndRun.
+        //
         // The compaction summary is appended as a new user message in the
         // database (handled by performCompaction). We then start a fresh
         // runAgentLoop iteration with the compacted context so the AI
         // picks up from the summary and continues working.
+        const loopWillContinue =
+          toolCalls.length > 0 ||
+          (ctx.pendingQueueRef.current.get(effectiveKey)?.length ?? 0) > 0;
         if (
+          loopWillContinue &&
           response.tokenUsage &&
-          response.status !== "error" &&
+          !responseFailed &&
           effectiveKey !== PENDING_SESSION_KEY
         ) {
           // Use the conversation-scoped profile (options.apiProfile) so the
@@ -583,6 +612,11 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
                   // context. The Rust backend uses conversationId to
                   // reconstruct context from the database, so the
                   // compaction summary message is automatically included.
+                  // resumeAfterCompaction tells Rust to treat the summary
+                  // passed below as a placeholder: the handoff is already
+                  // persisted as the context_compaction boundary, so it is
+                  // neither sent twice nor re-persisted as a normal user
+                  // message.
                   const postCompactionAssistantId =
                     createMessageId("assistant");
                   const postCompactionAssistant: ChatConversationMessage = {
@@ -600,7 +634,9 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
                   await runAgentLoop(
                     postCompactionAssistantId,
                     [{ role: "user", content: compactionSummary }],
-                    response.conversationId
+                    response.conversationId,
+                    undefined,
+                    true
                   );
                   return;
                 }
@@ -613,18 +649,8 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
           return;
         }
 
-        // Parse tool calls from response. Mark the first call as running immediately
-        // so expensive commands are visible before execution begins; later calls stay
-        // pending until the sequential executor reaches them.
-        const toolCalls = parseToolCalls(response.toolCallsJson);
-        const visibleToolCalls = toolCalls;
-
-        // Update assistant message with the persisted result. Failed responses
-        // still migrate the session, but remain visible locally as an error.
-        // Note: "incomplete" status (stream interrupted mid-response) is NOT
-        // treated as a hard failure — if tool calls were collected before the
-        // interruption, we still process them so the agent loop can continue.
-        const responseFailed = response.status === "error";
+        // Failed responses still migrate the session, but remain visible
+        // locally as an error. "incomplete" responses are partial but usable.
         ctx.updateSessionMessages(effectiveKey, (currentMessages) =>
           currentMessages.map((currentMessage) => {
             if (currentMessage.id !== currentAssistantMessageId) {
@@ -1207,7 +1233,11 @@ export const useAgentLoop = (params: UseAgentLoopParams) => {
             !isRunCancelled(finalSessionKey)
           ) {
             const sessionState = ctx.sessionsRef.current?.[finalSessionKey];
-            ctx.notifyAiComplete(sessionState?.summary || undefined);
+            ctx.notifyAiComplete({
+              conversationId: finalSessionKey,
+              directoryId: sessionState?.directoryId ?? ctx.directoryId,
+              title: sessionState?.summary || undefined,
+            });
           }
         });
     },

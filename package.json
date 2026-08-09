@@ -1,7 +1,7 @@
 {
   "name": "snow-app",
-  "version": "0.1.20",
-  "description": "High-performance cross-platform desktop app scaffold powered by Electron, React, TypeScript, and Rust.",
+  "version": "0.1.22",
+  "description": "Snow App The best AI Agent client in the universe",
   "author": {
     "name": "MayDay",
     "email": "mufasa@snow.app"
@@ -22,8 +22,11 @@
     "build:linux": "npm run build && electron-builder --linux AppImage deb",
     "build:all": "npm run build && electron-builder -mwl",
     "build:rust": "node scripts/build-native.cjs",
+    "build:snow-agent-release": "node scripts/build-snow-agent-release.cjs",
+    "verify:snow-agent-release": "node scripts/verify-snow-agent-release.cjs",
     "postinstall": "node scripts/patch-spectre.cjs && node scripts/ensure-conpty-dll.cjs",
     "check": "npm run check:ts && cargo check --manifest-path native/Cargo.toml",
+    "check:docs": "node scripts/check-docs.cjs",
     "check:ts": "tsc --noEmit",
     "test": "vitest run && cargo test --manifest-path native/Cargo.toml --features native-test",
     "preview": "electron-vite preview"
@@ -107,8 +110,16 @@
         "to": "icon.png"
       },
       {
+        "from": "resources/icon.ico",
+        "to": "icon.ico"
+      },
+      {
         "from": "resources/web",
         "to": "web"
+      },
+      {
+        "from": "resources/snow-agent/trust.json",
+        "to": "snow-agent/trust.json"
       }
     ],
     "directories": {

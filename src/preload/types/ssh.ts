@@ -19,6 +19,33 @@ export type SshProfileConnection = {
   lastError?: string;
 };
 
+/**
+ * SSH 连接失败的错误码，由主进程 `ssh:connect` handler 分类产生，
+ * 渲染层据此展示本地化的友好提示。
+ */
+export type SshConnectErrorCode =
+  | "network"
+  | "timeout"
+  | "auth"
+  | "sftp"
+  | "invalid"
+  | "unknown";
+
+/** preload 抛出的 SSH 连接错误：携带错误码与原始技术细节。 */
+export type SshConnectError = Error & {
+  code?: SshConnectErrorCode;
+  detail?: string;
+};
+
+/**
+ * `ssh:connect` 的结构化返回结果。注意：contextBridge 序列化 Error 时
+ * 会丢弃自定义属性（code/detail），因此需要完整错误信息的调用方
+ * （如连接向导）应使用 `sshConnectDetailed` 直接消费本类型。
+ */
+export type SshConnectResult =
+  | { ok: true; sessionId: string }
+  | { ok: false; code: SshConnectErrorCode; message: string; detail: string };
+
 export type SshConnectParams = {
   host: string;
   port: number;
@@ -39,13 +66,14 @@ export type SshDirectoryEntry = {
 
 export type SshCapabilities = {
   platform: "posix" | "windows";
+  remoteOs?: string;
+  remoteArch?: string;
   posixShell: boolean;
   systemdUser: boolean;
   tmux: boolean;
   setsid: boolean;
   nohup: boolean;
   powerShell: boolean;
-  windowsJobObjects: boolean;
 };
 
 export type SshFileSaveGuarantee =
@@ -132,10 +160,10 @@ export type RemoteJobBackendKind =
   | "snow-agent"
   | "systemd-user"
   | "tmux"
-  | "posix-detach"
-  | "windows-job";
+  | "posix-detach";
 
 export type RemoteJobCancellationPolicy = "cancel_remote" | "detach_only";
+export type RemoteJobMode = "batch" | "interactive";
 
 export type RemoteJobBinding = {
   jobId: string;
@@ -145,6 +173,7 @@ export type RemoteJobBinding = {
   commandHash: string;
   displayCommand: string;
   backend: RemoteJobBackendKind;
+  mode: RemoteJobMode;
   cancellationPolicy?: RemoteJobCancellationPolicy;
   createdAt: string;
   updatedAt: string;
@@ -162,6 +191,7 @@ export type RemoteJobState = {
   status: RemoteJobStatus;
   revision: number;
   backend?: RemoteJobBackendKind;
+  mode?: RemoteJobMode;
   runnerPid?: number;
   exitCode?: number;
   createdAt?: string;
@@ -169,6 +199,7 @@ export type RemoteJobState = {
   updatedAt: string;
   completedAt?: string;
   reason?: string;
+  truncated?: boolean;
 };
 
 export type RemoteJobStartRequest = {
@@ -178,6 +209,7 @@ export type RemoteJobStartRequest = {
   timeoutMs?: number;
   jobId?: string;
   backend?: RemoteJobBackendKind;
+  mode?: RemoteJobMode;
   conversationId?: string;
   toolCallId?: string;
 };
@@ -197,4 +229,18 @@ export type RemoteJobPtyAttachment = {
   jobId: string;
   backend: RemoteJobBackendKind;
   ptyId: string;
+};
+
+/** 本地 ~/.ssh/config 中解析出的主机条目。 */
+export type SshConfigHost = {
+  /** `Host` 关键字的值（别名） */
+  alias: string;
+  /** 实际主机名（HostName，缺失时回退为 alias） */
+  host: string;
+  /** 登录用户名（User） */
+  user?: string;
+  /** 端口（Port），默认 22 */
+  port: number;
+  /** 私钥文件路径（IdentityFile） */
+  identityFile?: string;
 };

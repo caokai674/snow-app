@@ -17,9 +17,10 @@
 //!   3. a clear error telling the agent to configure the settings or pass the
 //!      missing argument.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use base64::Engine;
 use futures::StreamExt;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeFunctionCallMode;
@@ -32,6 +33,13 @@ use super::super::tools::McpTool;
 
 const SERVER_ID: &str = "imagegen";
 const TOOL_GENERATE: &str = "generate";
+/// 视觉分析工具：读取项目中的图片（如 UI 设计稿）并用视觉模型生成描述，
+/// 供主模型理解设计后编码还原（前端页面等）。
+const TOOL_DESCRIBE: &str = "image-describe";
+const TOOL_DESCRIBE_NAME: &str = "imagegen-image-describe";
+
+/// image-describe 默认分析提示词（UI/UX 设计稿还原场景）。
+const DEFAULT_DESCRIBE_PROMPT: &str = "Describe this image as a UI/UX design reference for front-end implementation. Cover: overall layout structure (sections, columns, hierarchy), color palette (exact hex codes where discernible), typography (font styles, sizes, weights), spacing and margins, components (buttons, cards, forms, navigation, modals, lists), visual effects (shadows, gradients, border radius), icons and imagery, and any responsive/adaptive hints. Output a concise but COMPLETE structured description (use sections) that a developer can directly translate into code to recreate the page.";
 /// Image models may take several minutes for complex prompts (gpt-image 2K/4K,
 /// Gemini Nano Banana with web search). This is the DEFAULT when the settings
 /// panel value is missing; users can raise it in Settings -> Image generation.
@@ -41,7 +49,15 @@ const REQUEST_TIMEOUT_SECS: u64 = 300;
 const MIN_TIMEOUT_SECS: u64 = 60;
 const MAX_TIMEOUT_SECS: u64 = 3600;
 const DEFAULT_N: usize = 1;
-const MAX_N: usize = 4;
+/// 单次工具调用内并发生成图片的最大数量（1-8，与设置面板
+/// maxConcurrentImages 上限一致）。中转/上游不支持单请求多图（n>1），
+/// 实现上把一次调用拆成 n 个并发子请求（每个子请求 n=1）绕开该限制。
+const MAX_PARALLEL_IMAGES: usize = 8;
+/// 远程图片（预签名 URL 等）下载上限（50 MB，与主进程 img-proxy 协议一致），
+/// 防止上游 URL 指向超大文件耗尽内存。
+const MAX_REMOTE_IMAGE_BYTES: usize = 50 * 1024 * 1024;
+/// 远程图片下载单次超时（预签名链接通常秒级返回，30s 足够）。
+const REMOTE_IMAGE_TIMEOUT_SECS: u64 = 30;
 
 /// system_settings 表中的设置 code（与设置面板共用）。
 const IMAGE_GEN_SETTING_CODE: &str = "imagegen_settings";
@@ -123,13 +139,44 @@ impl ImageGenService {
         ImageGenService
     }
 
+    /// `image-describe`：读取磁盘图片（绝对路径或 upload/ 相对路径）并用
+    /// 视觉模型生成描述。用于「读取项目中的 UI 设计稿 → 理解设计 →
+    /// 编码还原前端页面」的工作流。视觉配置复用主 API 的 vision 通道。
+    pub async fn execute_describe(&self, args: &Value) -> napi::Result<Value> {
+        let path = required_string(args, "path", TOOL_DESCRIBE)?;
+        let user_prompt = args
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or(DEFAULT_DESCRIBE_PROMPT);
+
+        let description = crate::api::vision::describe_image_file(path, user_prompt).await?;
+
+        Ok(json!({
+            "path": path,
+            "description": description,
+            "note": "Use this description to understand the design. If the task is to recreate this UI with code, analyze the description carefully (layout, colors, typography, spacing, components) and implement it with the filesystem tools. Do NOT reference the image file in the final code — embed colors/values from the description."
+        }))
+    }
+
     pub async fn execute_generate(
         &self,
         args: &Value,
         on_chunk: &BashStreamCallback,
     ) -> napi::Result<Value> {
         let prompt = required_string(args, "prompt", TOOL_GENERATE)?;
-        let n = bounded_usize(args.get("n").and_then(Value::as_u64), DEFAULT_N, 1, MAX_N);
+        // n 支持 1-8：一次调用生成多张时，内部拆成 n 个并发子请求
+        // （每个子请求 n=1——中转/上游不支持单请求多图，实测 n>1 会触发
+        // 连接中断）。并发数由本工具内部管理，多调用间的并发仍由应用侧
+        // maxConcurrentImages 自动管理。
+        let n = args
+            .get("n")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(DEFAULT_N)
+            .max(1)
+            .min(MAX_PARALLEL_IMAGES);
 
         // --- 1. Load the independent front-end settings (blocking SQLite I/O) ---
         let settings = tokio::task::spawn_blocking(load_imagegen_settings)
@@ -199,11 +246,14 @@ impl ImageGenService {
         // （path 为相对数据库文件所在目录的磁盘路径，服务端读取文件后转
         //   base64；来自纯文本主模型消息中的 [Reference image #N for
         //   imagegen-generate: ...] 引用块，避免把大段 base64 塞进对话上下文）
+        // requestImages: 每个请求独立的参考图组（Array<Array<{data|path,mimeType}>>，
+        //   第 i 项对应第 i 个请求；未提供时所有请求共用顶层 images）
         let storage_info = crate::storage::initialize_app_storage()?;
         let database_path = std::path::PathBuf::from(storage_info.database_path);
         let images = parse_reference_images(args, &database_path)?;
+        let request_images = parse_request_images(args, &database_path)?;
         // 图生图（edits / inlineData 参考图）暂不支持流式预览
-        let stream_enabled = stream_enabled && images.is_empty();
+        let stream_enabled = stream_enabled && images.is_empty() && request_images.is_empty();
 
         // --- 7.5 Model capability guards (avoid provider 400 errors) ---
         // dall-e-3 仅支持文生图（OpenAI /images/edits 端点不接受 dall-e-3）
@@ -225,6 +275,68 @@ impl ImageGenService {
         }
         // dall-e-3 每次只能生成 1 张：n>1 自动收敛为 1，避免 400。
         let n = if is_dall_e_3 { n.min(1) } else { n };
+
+        // --- 7.2 Per-request prompts: `prompts` array overrides ---
+        // prompts: ["第一张的提示词", "第二张的提示词", ...] —— 每张图各自独立的
+        // 提示词；提供时请求数 = 数组长度（1-8，覆盖 n 参数）。
+        // 未提供时所有请求共用顶层 prompt，请求数 = n。
+        let prompts_override: Option<Vec<String>> =
+            match args.get("prompts").and_then(Value::as_array) {
+                Some(arr) => {
+                    let list: Vec<String> = arr
+                        .iter()
+                        .filter_map(|value| {
+                            value
+                                .as_str()
+                                .map(str::trim)
+                                .filter(|text| !text.is_empty())
+                                .map(str::to_string)
+                        })
+                        .collect();
+                    if list.is_empty() {
+                        return Err(Error::new(
+                            Status::InvalidArg,
+                            "`prompts` must be a non-empty array of non-empty strings".to_string(),
+                        ));
+                    }
+                    if list.len() > MAX_PARALLEL_IMAGES {
+                        return Err(Error::new(
+                            Status::InvalidArg,
+                            format!("`prompts` supports at most {MAX_PARALLEL_IMAGES} entries"),
+                        ));
+                    }
+                    Some(list)
+                }
+                None => None,
+            };
+        // 请求数：prompts 提供时取其长度，否则用 n（已 clamp 1-8）
+        let requests = prompts_override
+            .as_ref()
+            .map(|list| list.len())
+            .unwrap_or(n);
+
+        // --- 7.3 Per-request views: prompt 与参考图按请求索引分发 ---
+        // 逐请求提示词（dall-e-3 收敛后只取第 1 个）
+        let per_request_prompts: Vec<&str> = match &prompts_override {
+            Some(list) => list.iter().map(String::as_str).take(requests).collect(),
+            None => vec![prompt; requests],
+        };
+        // 逐请求参考图：requestImages 提供时长度必须等于请求数；否则全部共享
+        if !request_images.is_empty() && request_images.len() != requests {
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!(
+                    "`requestImages` must contain exactly {requests} group(s) \
+                     (one per request), got {}",
+                    request_images.len()
+                ),
+            ));
+        }
+        let per_request_images: Vec<&[ReferenceImage]> = if request_images.is_empty() {
+            vec![images.as_slice(); requests]
+        } else {
+            request_images.iter().map(Vec::as_slice).collect()
+        };
 
         let seed = args.get("seed").and_then(Value::as_u64);
         let input_fidelity = args
@@ -261,16 +373,16 @@ impl ImageGenService {
                 self.generate_gemini(
                     args,
                     channel_config,
-                    prompt,
+                    per_request_prompts.as_slice(),
                     &model,
                     &size,
                     &quality,
                     &base_url,
                     api_key,
-                    n,
+                    requests,
                     stream_enabled,
                     on_chunk,
-                    &images,
+                    per_request_images.as_slice(),
                     seed,
                     thinking_level.as_deref(),
                     image_search,
@@ -282,17 +394,17 @@ impl ImageGenService {
             _ => {
                 self.generate_openai(
                     args,
-                    prompt,
+                    per_request_prompts.as_slice(),
                     &model,
                     &size,
                     &quality,
                     &output_format,
                     &base_url,
                     api_key,
-                    n,
+                    requests,
                     stream_enabled,
                     on_chunk,
-                    &images,
+                    per_request_images.as_slice(),
                     seed,
                     input_fidelity.as_deref(),
                     background.as_deref(),
@@ -311,7 +423,7 @@ impl ImageGenService {
     async fn generate_openai(
         &self,
         args: &Value,
-        prompt: &str,
+        prompts: &[&str],
         model: &str,
         size: &Option<String>,
         quality: &Option<String>,
@@ -321,7 +433,7 @@ impl ImageGenService {
         n: usize,
         stream_enabled: bool,
         on_chunk: &BashStreamCallback,
-        images: &[ReferenceImage],
+        images: &[&[ReferenceImage]],
         seed: Option<u64>,
         input_fidelity: Option<&str>,
         background: Option<&str>,
@@ -333,251 +445,297 @@ impl ImageGenService {
         let is_dall_e = model.to_ascii_lowercase().starts_with("dall-e");
         let is_gpt_image_2 = model.to_ascii_lowercase().contains("gpt-image-2");
 
-        // --- Image-to-image: POST /images/edits (multipart) ---
-        if !images.is_empty() {
-            let endpoint = format!("{base_url}/images/edits");
-            let build_form = |background: Option<&str>| -> napi::Result<reqwest::multipart::Form> {
-                let mut form = reqwest::multipart::Form::new()
-                    .text("model", model.to_string())
-                    .text("prompt", prompt.to_string())
-                    .text("n", n.to_string());
-                for (index, image) in images.iter().enumerate() {
-                    let bytes = decode_base64(&image.data)?;
-                    let file_name =
-                        format!("image-{}.{}", index + 1, ext_for_mime(&image.mime_type));
-                    let part = reqwest::multipart::Part::bytes(bytes)
-                        .file_name(file_name)
-                        .mime_str(&image.mime_type)
-                        .map_err(|error| {
-                            generic_error(format!("Failed to build multipart part: {error}"))
-                        })?;
-                    form = form.part("image[]", part);
-                }
-                if let Some(value) = size {
-                    form = form.text("size", value.clone());
-                }
-                if let Some(value) = quality {
-                    form = form.text("quality", value.clone());
-                }
-                if let Some(value) = output_format {
-                    form = form.text("output_format", value.clone());
-                }
-                if let Some(value) = args.get("outputCompression").and_then(Value::as_u64) {
-                    form = form.text("output_compression", value.clamp(0, 100).to_string());
-                }
-                if let Some(value) = input_fidelity {
-                    // gpt-image-2 不允许设置 input_fidelity（自动高保真）
-                    if !is_gpt_image_2 && matches!(value, "low" | "high" | "auto") {
-                        form = form.text("input_fidelity", value.to_string());
-                    }
-                }
-                if let Some(value) = sanitize_background(model, background) {
-                    form = form.text("background", value.to_string());
-                }
-                if let Some(value) = moderation {
-                    if matches!(value, "auto" | "low") {
-                        form = form.text("moderation", value.to_string());
-                    }
-                }
-                Ok(form)
-            };
-
-            let client = build_client(timeout_secs).await?;
-            // 部分模型/代理不支持透明背景（400 "Transparent background is not
-            // supported"）：去掉 background 参数后重试一次
-            let mut attempt = 0;
-            let mut current_background = background;
-            let response = loop {
-                let form = build_form(current_background)?;
-                let response = client
-                    .post(&endpoint)
-                    .bearer_auth(api_key)
-                    .multipart(form)
-                    .send()
-                    .await
-                    .map_err(|error| {
-                        generic_error(format!("Image edit request failed: {error}"))
-                    })?;
-                let status = response.status();
-                if status.is_success() {
-                    break response;
-                }
-                let response_body: Value = response.json().await.unwrap_or_else(|_| json!({}));
-                if attempt == 0
-                    && current_background.is_some()
-                    && is_transparent_unsupported_error(&response_body)
-                {
-                    current_background = None;
-                    attempt += 1;
-                    continue;
-                }
-                return Err(api_error(
-                    "Image edit failed",
-                    status.as_u16(),
-                    &response_body,
-                ));
-            };
-
-            let response_body: Value = response.json().await.map_err(|error| {
-                generic_error(format!("Failed to parse image edit response: {error}"))
-            })?;
-            let Some(data) = response_body.get("data").and_then(Value::as_array) else {
-                return Err(generic_error(
-                    "Image edit response is missing the data array".to_string(),
-                ));
-            };
-            return collect_openai_result(
-                prompt,
-                model,
-                channel_label,
-                data.iter().cloned().collect(),
-                mime_type,
-            );
-        }
-
-        // --- Text-to-image: POST /images/generations (JSON) ---
-        let endpoint = format!("{base_url}/images/generations");
-
-        // size / quality / outputFormat are only sent when explicitly provided
-        // so that OpenAI-compatible third-party endpoints (which may reject
-        // unknown fields) keep working with a plain {model, prompt, n} body.
-        let mut body = json!({
-            "model": model,
-            "prompt": prompt,
-            "n": n,
-        });
-        if let Some(value) = size {
-            body["size"] = json!(value);
-        }
-        if let Some(value) = quality {
-            body["quality"] = json!(value);
-        }
-        if let Some(value) = output_format {
-            body["output_format"] = json!(value);
-        }
-        if let Some(value) = args.get("outputCompression").and_then(Value::as_u64) {
-            // jpeg/webp 专属压缩率 0-100（gpt-image 系列）
-            body["output_compression"] = json!(value.clamp(0, 100));
-        }
-        if let Some(value) = seed {
-            body["seed"] = json!(value);
-        }
-        if let Some(value) = sanitize_background(model, background) {
-            body["background"] = json!(value);
-        }
-        if let Some(value) = moderation {
-            if matches!(value, "auto" | "low") {
-                body["moderation"] = json!(value);
-            }
-        }
-        if stream_enabled && !is_dall_e {
-            // gpt-image 系列流式：生成过程中推送 0-3 张中间预览
-            body["stream"] = json!(true);
-            body["partial_images"] = json!(2);
-        }
-        if is_dall_e {
-            // dall-e-3 uses `response_format` (b64_json) and does not accept
-            // `output_format` / `stream` / `background`; its `quality` values
-            // (standard/hd) differ from gpt-image (low/medium/high), so drop
-            // them to avoid a 400.
-            body["response_format"] = json!("b64_json");
-            if let Some(map) = body.as_object_mut() {
-                map.remove("output_format");
-                map.remove("output_compression");
-                map.remove("quality");
-                map.remove("stream");
-                map.remove("partial_images");
-                map.remove("background");
-                map.remove("moderation");
-            }
-        }
-
+        // 单次调用内并发 n 个子请求（每个子请求 n=1）：中转/上游不支持
+        // 单请求多图，拆成并发请求绕开限制。n>1 时禁用流式——多路
+        // partial_image 事件无法区分归属，预览会互相覆盖。
+        let requests = n.max(1);
+        let allow_stream = stream_enabled
+            && requests == 1
+            && !is_dall_e
+            && images.iter().all(|set| set.is_empty());
         let client = build_client(timeout_secs).await?;
-        // 部分模型/代理不支持透明背景（400 "Transparent background is not
-        // supported"）：去掉 background 参数后重试一次
-        let mut attempt = 0;
-        let response = loop {
-            let response = client
-                .post(&endpoint)
-                .bearer_auth(api_key)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|error| {
-                    generic_error(format!("Image generation request failed: {error}"))
-                })?;
-            let status = response.status();
-            if status.is_success() {
-                break response;
-            }
-            let response_body: Value = response.json().await.unwrap_or_else(|_| json!({}));
-            if attempt == 0
-                && body.get("background").is_some()
-                && is_transparent_unsupported_error(&response_body)
-            {
-                if let Some(map) = body.as_object_mut() {
-                    map.remove("background");
+
+        let tasks: Vec<_> = (0..requests)
+            .map(|request_index| {
+                let client = client.clone();
+                let mime_type = mime_type.clone();
+                let edits_endpoint = format!("{base_url}/images/edits");
+                let generations_endpoint = format!("{base_url}/images/generations");
+                async move {
+                    // 当前请求的提示词与参考图（prompts/requestImages 逐请求分发）
+                    let prompt = prompts[request_index];
+                    let request_images: &[ReferenceImage] = images[request_index];
+                    // 用户显式指定 seed 且并发多张时逐张递增，避免生成完全相同的图
+                    let request_seed = seed.map(|value| value.wrapping_add(request_index as u64));
+
+                    // --- Image-to-image: POST /images/edits (multipart) ---
+                    if !request_images.is_empty() {
+                        let build_form =
+                            |background: Option<&str>| -> napi::Result<reqwest::multipart::Form> {
+                                let mut form = reqwest::multipart::Form::new()
+                                    .text("model", model.to_string())
+                                    .text("prompt", prompt.to_string())
+                                    .text("n", "1");
+                                for (index, image) in request_images.iter().enumerate() {
+                                    let bytes = decode_base64(&image.data)?;
+                                    let file_name = format!(
+                                        "image-{}.{}",
+                                        index + 1,
+                                        ext_for_mime(&image.mime_type)
+                                    );
+                                    let part = reqwest::multipart::Part::bytes(bytes)
+                                        .file_name(file_name)
+                                        .mime_str(&image.mime_type)
+                                        .map_err(|error| {
+                                            generic_error(format!(
+                                                "Failed to build multipart part: {error}"
+                                            ))
+                                        })?;
+                                    form = form.part("image[]", part);
+                                }
+                                if let Some(value) = size {
+                                    form = form.text("size", value.clone());
+                                }
+                                if let Some(value) = quality {
+                                    form = form.text("quality", value.clone());
+                                }
+                                if let Some(value) = output_format {
+                                    form = form.text("output_format", value.clone());
+                                }
+                                if let Some(value) =
+                                    args.get("outputCompression").and_then(Value::as_u64)
+                                {
+                                    form = form.text(
+                                        "output_compression",
+                                        value.clamp(0, 100).to_string(),
+                                    );
+                                }
+                                if let Some(value) = input_fidelity {
+                                    // gpt-image-2 不允许设置 input_fidelity（自动高保真）
+                                    if !is_gpt_image_2 && matches!(value, "low" | "high" | "auto") {
+                                        form = form.text("input_fidelity", value.to_string());
+                                    }
+                                }
+                                if let Some(value) = sanitize_background(model, background) {
+                                    form = form.text("background", value.to_string());
+                                }
+                                if let Some(value) = moderation {
+                                    if matches!(value, "auto" | "low") {
+                                        form = form.text("moderation", value.to_string());
+                                    }
+                                }
+                                Ok(form)
+                            };
+
+                        // 部分模型/代理不支持透明背景（400 "Transparent background is not
+                        // supported"）：去掉 background 参数后重试一次
+                        let mut attempt = 0;
+                        let mut current_background = background;
+                        let response = loop {
+                            let form = build_form(current_background)?;
+                            let response = client
+                                .post(&edits_endpoint)
+                                .bearer_auth(api_key)
+                                .multipart(form)
+                                .send()
+                                .await
+                                .map_err(|error| {
+                                    generic_error(format!("Image edit request failed: {error}"))
+                                })?;
+                            let status = response.status();
+                            if status.is_success() {
+                                break response;
+                            }
+                            let response_body: Value =
+                                response.json().await.unwrap_or_else(|_| json!({}));
+                            if attempt == 0
+                                && current_background.is_some()
+                                && is_transparent_unsupported_error(&response_body)
+                            {
+                                current_background = None;
+                                attempt += 1;
+                                continue;
+                            }
+                            return Err(api_error(
+                                "Image edit failed",
+                                status.as_u16(),
+                                &response_body,
+                            ));
+                        };
+
+                        let response_body: Value = response.json().await.map_err(|error| {
+                            generic_error(format!("Failed to parse image edit response: {error}"))
+                        })?;
+                        let Some(data) = response_body.get("data").and_then(Value::as_array) else {
+                            return Err(generic_error(
+                                "Image edit response is missing the data array".to_string(),
+                            ));
+                        };
+                        return collect_openai_result(
+                            prompt,
+                            model,
+                            channel_label,
+                            data.iter().cloned().collect(),
+                            mime_type,
+                        )
+                        .await;
+                    }
+
+                    // --- Text-to-image: POST /images/generations (JSON) ---
+                    // size / quality / outputFormat are only sent when explicitly provided
+                    // so that OpenAI-compatible third-party endpoints (which may reject
+                    // unknown fields) keep working with a plain {model, prompt, n} body.
+                    let mut body = json!({
+                        "model": model,
+                        "prompt": prompt,
+                        "n": 1,
+                    });
+                    if let Some(value) = size {
+                        body["size"] = json!(value);
+                    }
+                    if let Some(value) = quality {
+                        body["quality"] = json!(value);
+                    }
+                    if let Some(value) = output_format {
+                        body["output_format"] = json!(value);
+                    }
+                    if let Some(value) = args.get("outputCompression").and_then(Value::as_u64) {
+                        // jpeg/webp 专属压缩率 0-100（gpt-image 系列）
+                        body["output_compression"] = json!(value.clamp(0, 100));
+                    }
+                    if let Some(value) = request_seed {
+                        body["seed"] = json!(value);
+                    }
+                    if let Some(value) = sanitize_background(model, background) {
+                        body["background"] = json!(value);
+                    }
+                    if let Some(value) = moderation {
+                        if matches!(value, "auto" | "low") {
+                            body["moderation"] = json!(value);
+                        }
+                    }
+                    if allow_stream {
+                        // gpt-image 系列流式：生成过程中推送 0-3 张中间预览
+                        body["stream"] = json!(true);
+                        body["partial_images"] = json!(2);
+                    }
+                    if is_dall_e {
+                        // dall-e-3 uses `response_format` (b64_json) and does not accept
+                        // `output_format` / `stream` / `background`; its `quality` values
+                        // (standard/hd) differ from gpt-image (low/medium/high), so drop
+                        // them to avoid a 400.
+                        body["response_format"] = json!("b64_json");
+                        if let Some(map) = body.as_object_mut() {
+                            map.remove("output_format");
+                            map.remove("output_compression");
+                            map.remove("quality");
+                            map.remove("stream");
+                            map.remove("partial_images");
+                            map.remove("background");
+                            map.remove("moderation");
+                        }
+                    }
+
+                    // 部分模型/代理不支持透明背景（400 "Transparent background is not
+                    // supported"）：去掉 background 参数后重试一次
+                    let mut attempt = 0;
+                    let response = loop {
+                        let response = client
+                            .post(&generations_endpoint)
+                            .bearer_auth(api_key)
+                            .json(&body)
+                            .send()
+                            .await
+                            .map_err(|error| {
+                                generic_error(format!("Image generation request failed: {error}"))
+                            })?;
+                        let status = response.status();
+                        if status.is_success() {
+                            break response;
+                        }
+                        let response_body: Value =
+                            response.json().await.unwrap_or_else(|_| json!({}));
+                        if attempt == 0
+                            && body.get("background").is_some()
+                            && is_transparent_unsupported_error(&response_body)
+                        {
+                            if let Some(map) = body.as_object_mut() {
+                                map.remove("background");
+                            }
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err(api_error(
+                            "Image generation failed",
+                            status.as_u16(),
+                            &response_body,
+                        ));
+                    };
+
+                    // --- Streaming path: consume the SSE stream and forward partials ---
+                    if allow_stream {
+                        let mut partials: Vec<(usize, String)> = Vec::new();
+                        let mut completed: Vec<Value> = Vec::new();
+                        read_openai_sse(
+                            response,
+                            &mut partials,
+                            &mut completed,
+                            on_chunk,
+                            &mime_type,
+                        )
+                        .await?;
+
+                        let final_images = if !completed.is_empty() {
+                            completed
+                        } else if !partials.is_empty() {
+                            partials
+                                .into_iter()
+                                .max_by_key(|(index, _)| *index)
+                                .into_iter()
+                                .map(|(_, data)| json!({ "b64_json": data }))
+                                .collect()
+                        } else {
+                            return Err(generic_error(
+                                "Image generation stream ended without any image data".to_string(),
+                            ));
+                        };
+                        return collect_openai_result(
+                            prompt,
+                            model,
+                            channel_label,
+                            final_images,
+                            mime_type,
+                        )
+                        .await;
+                    }
+
+                    // --- Non-streaming path ---
+                    let response_body: Value = response.json().await.map_err(|error| {
+                        generic_error(format!(
+                            "Failed to parse image generation response: {error}"
+                        ))
+                    })?;
+
+                    let Some(data) = response_body.get("data").and_then(Value::as_array) else {
+                        return Err(generic_error(
+                            "Image generation response is missing the data array".to_string(),
+                        ));
+                    };
+
+                    collect_openai_result(
+                        prompt,
+                        model,
+                        channel_label,
+                        data.iter().cloned().collect(),
+                        mime_type,
+                    )
+                    .await
                 }
-                attempt += 1;
-                continue;
-            }
-            return Err(api_error(
-                "Image generation failed",
-                status.as_u16(),
-                &response_body,
-            ));
-        };
+            })
+            .collect();
 
-        // --- Streaming path: consume the SSE stream and forward partials ---
-        if stream_enabled && !is_dall_e {
-            let mut partials: Vec<(usize, String)> = Vec::new();
-            let mut completed: Vec<Value> = Vec::new();
-            read_openai_sse(
-                response,
-                &mut partials,
-                &mut completed,
-                on_chunk,
-                &mime_type,
-            )
-            .await?;
-
-            let final_images = if !completed.is_empty() {
-                completed
-            } else if !partials.is_empty() {
-                partials
-                    .into_iter()
-                    .max_by_key(|(index, _)| *index)
-                    .into_iter()
-                    .map(|(_, data)| json!({ "b64_json": data }))
-                    .collect()
-            } else {
-                return Err(generic_error(
-                    "Image generation stream ended without any image data".to_string(),
-                ));
-            };
-            return collect_openai_result(prompt, model, channel_label, final_images, mime_type);
-        }
-
-        // --- Non-streaming path ---
-        let response_body: Value = response.json().await.map_err(|error| {
-            generic_error(format!(
-                "Failed to parse image generation response: {error}"
-            ))
-        })?;
-
-        let Some(data) = response_body.get("data").and_then(Value::as_array) else {
-            return Err(generic_error(
-                "Image generation response is missing the data array".to_string(),
-            ));
-        };
-
-        collect_openai_result(
-            prompt,
-            model,
-            channel_label,
-            data.iter().cloned().collect(),
-            mime_type,
-        )
+        let results = futures::future::join_all(tasks).await;
+        merge_parallel_results(prompts[0], model, channel_label, requests, results)
     }
 
     /// Google Gemini branch.
@@ -591,7 +749,7 @@ impl ImageGenService {
         &self,
         args: &Value,
         channel: &ImageGenChannel,
-        prompt: &str,
+        prompts: &[&str],
         model: &str,
         size: &Option<String>,
         quality: &Option<String>,
@@ -600,7 +758,7 @@ impl ImageGenService {
         n: usize,
         stream_enabled: bool,
         on_chunk: &BashStreamCallback,
-        images: &[ReferenceImage],
+        images: &[&[ReferenceImage]],
         seed: Option<u64>,
         thinking_level: Option<&str>,
         image_search: bool,
@@ -611,17 +769,6 @@ impl ImageGenService {
             model,
             "gemini-3.1-flash-image" | "gemini-3-pro-image" | "gemini-3.1-flash-lite-image"
         );
-
-        // --- Shared: reference images as inlineData / image parts ---
-        let mut input_parts: Vec<Value> = Vec::new();
-        for image in images {
-            input_parts.push(json!({
-                "type": "image",
-                "mime_type": image.mime_type,
-                "data": image.data,
-            }));
-        }
-        input_parts.push(json!({ "type": "text", "text": prompt }));
 
         // --- Shared: web search grounding (tools) ---
         let web_search = args
@@ -638,154 +785,51 @@ impl ImageGenService {
             tools.push(search_tool);
         }
 
-        // --- Nano Banana 2+: Interactions API ---
-        if is_nano_banana_2 {
-            let endpoint = format!("{base_url}/interactions");
+        // 单次调用内并发 n 个子请求（与 OpenAI 分支同策略）；n>1 禁用流式
+        // （多路流式事件无法区分归属，预览会互相覆盖）。
+        let requests = n.max(1);
+        let allow_stream = stream_enabled && requests == 1;
+        let client = build_client(timeout_secs).await?;
 
-            let mut response_format = json!({
-                "type": "image",
-            });
-            if let Some(size) = size {
-                let trimmed = size.trim();
-                // 组合格式 "16:9@2K"：同时设置 aspect_ratio + image_size
-                if let Some((ratio_part, size_part)) = trimmed.split_once('@') {
-                    let ratio = ratio_part.trim();
-                    let image_size = size_part.trim();
-                    if matches!(image_size, "1K" | "2K" | "4K" | "0.5K" | "512") {
-                        response_format["image_size"] = json!(image_size);
-                    }
-                    if ratio.contains(':')
-                        && ratio.split(':').count() == 2
-                        && ratio.split(':').all(|part| part.parse::<u32>().is_ok())
-                    {
-                        response_format["aspect_ratio"] = json!(ratio);
-                    }
-                } else if matches!(trimmed, "1K" | "2K" | "4K" | "0.5K" | "512") {
-                    response_format["image_size"] = json!(trimmed);
-                } else if trimmed.contains(':')
-                    && trimmed.split(':').count() == 2
-                    && trimmed.split(':').all(|part| part.parse::<u32>().is_ok())
-                {
-                    response_format["aspect_ratio"] = json!(trimmed);
-                }
-            }
-            if let Some(quality) = quality {
-                if matches!(quality.as_str(), "low" | "medium" | "high") {
-                    response_format["image_quality"] = json!(quality);
-                }
-            }
-
-            let mut generation_config = json!({});
-            if let Some(level) = thinking_level {
-                if matches!(level, "minimal" | "high") {
-                    generation_config["thinking_level"] = json!(level);
-                }
-            }
-            if let Some(seed) = seed {
-                generation_config["seed"] = json!(seed);
-            }
-            if let Some(person_generation) = args
-                .get("personGeneration")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                if matches!(
-                    person_generation,
-                    "dont_allow" | "allow_all" | "allow_adult"
-                ) {
-                    generation_config["personGeneration"] = json!(person_generation);
-                }
-            }
-
-            let mut body = json!({
-                "model": model,
-                "input": input_parts,
-                "response_format": response_format,
-            });
-            if !tools.is_empty() {
-                body["tools"] = json!(tools);
-            }
-            if generation_config.as_object().is_some_and(|m| !m.is_empty()) {
-                body["generation_config"] = generation_config;
-            }
-
-            let client = build_client(timeout_secs).await?;
-            let response = client
-                .post(&endpoint)
-                .header("x-goog-api-key", api_key)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|error| {
-                    generic_error(format!("Image generation request failed: {error}"))
-                })?;
-            let status = response.status();
-            if !status.is_success() {
-                let response_body: Value = response.json().await.unwrap_or_else(|_| json!({}));
-                return Err(api_error(
-                    "Image generation failed",
-                    status.as_u16(),
-                    &response_body,
-                ));
-            }
-
-            let response_body: Value = response.json().await.map_err(|error| {
-                generic_error(format!(
-                    "Failed to parse image generation response: {error}"
-                ))
-            })?;
-
-            // Parse steps[].content blocks where type == "image"
-            // (only model_output steps; thought steps are hidden drafts).
-            let images = parse_interactions_images(&response_body);
-            return collect_gemini_result(prompt, model, channel_label, images);
-        }
-
-        // --- Legacy: generateContent API ---
-        let endpoint = if stream_enabled {
-            format!("{base_url}/models/{model}:streamGenerateContent")
-        } else {
-            format!("{base_url}/models/{model}:generateContent")
-        };
-
-        let mut generation_config = json!({ "responseModalities": ["IMAGE"] });
-        // size: "1K"/"2K"/"4K" -> imageSize; "N:N" (e.g. "16:9") -> aspectRatio;
-        // "16:9@2K" -> 两者同时设置。
+        // --- Nano Banana 2+: Interactions API 共享配置 ---
+        let interactions_endpoint = format!("{base_url}/interactions");
+        let mut interactions_response_format = json!({
+            "type": "image",
+        });
         if let Some(size) = size {
             let trimmed = size.trim();
+            // 组合格式 "16:9@2K"：同时设置 aspect_ratio + image_size
             if let Some((ratio_part, size_part)) = trimmed.split_once('@') {
                 let ratio = ratio_part.trim();
                 let image_size = size_part.trim();
-                if matches!(image_size, "1K" | "2K" | "4K") {
-                    generation_config["imageSize"] = json!(image_size);
+                if matches!(image_size, "1K" | "2K" | "4K" | "0.5K" | "512") {
+                    interactions_response_format["image_size"] = json!(image_size);
                 }
                 if ratio.contains(':')
                     && ratio.split(':').count() == 2
                     && ratio.split(':').all(|part| part.parse::<u32>().is_ok())
                 {
-                    generation_config["aspectRatio"] = json!(ratio);
+                    interactions_response_format["aspect_ratio"] = json!(ratio);
                 }
-            } else if matches!(trimmed, "1K" | "2K" | "4K") {
-                generation_config["imageSize"] = json!(trimmed);
+            } else if matches!(trimmed, "1K" | "2K" | "4K" | "0.5K" | "512") {
+                interactions_response_format["image_size"] = json!(trimmed);
             } else if trimmed.contains(':')
                 && trimmed.split(':').count() == 2
                 && trimmed.split(':').all(|part| part.parse::<u32>().is_ok())
             {
-                generation_config["aspectRatio"] = json!(trimmed);
+                interactions_response_format["aspect_ratio"] = json!(trimmed);
             }
         }
         if let Some(quality) = quality {
             if matches!(quality.as_str(), "low" | "medium" | "high") {
-                generation_config["imageQuality"] = json!(quality);
+                interactions_response_format["image_quality"] = json!(quality);
             }
         }
-        if n > 1 {
-            // imagen-4 系列支持一次多张（1-4）
-            generation_config["numberOfImages"] = json!(n.min(4));
-        }
-        if let Some(seed) = seed {
-            generation_config["seed"] = json!(seed);
+        let mut interactions_generation_config = json!({});
+        if let Some(level) = thinking_level {
+            if matches!(level, "minimal" | "high") {
+                interactions_generation_config["thinking_level"] = json!(level);
+            }
         }
         if let Some(person_generation) = args
             .get("personGeneration")
@@ -797,63 +841,209 @@ impl ImageGenService {
                 person_generation,
                 "dont_allow" | "allow_all" | "allow_adult"
             ) {
-                generation_config["personGeneration"] = json!(person_generation);
+                interactions_generation_config["personGeneration"] = json!(person_generation);
             }
         }
 
-        // contents.parts: 参考图（图生图）在前，文本指令在后
-        let mut parts: Vec<Value> = Vec::new();
-        for image in images {
-            parts.push(json!({
-                "inlineData": {
-                    "mimeType": image.mime_type,
-                    "data": image.data,
+        // --- Legacy: generateContent API 共享配置 ---
+        let legacy_endpoint = format!("{base_url}/models/{model}:generateContent");
+        let legacy_stream_endpoint = format!("{base_url}/models/{model}:streamGenerateContent");
+        let mut legacy_generation_config = json!({ "responseModalities": ["IMAGE"] });
+        // size: "1K"/"2K"/"4K" -> imageSize; "N:N" (e.g. "16:9") -> aspectRatio;
+        // "16:9@2K" -> 两者同时设置。
+        if let Some(size) = size {
+            let trimmed = size.trim();
+            if let Some((ratio_part, size_part)) = trimmed.split_once('@') {
+                let ratio = ratio_part.trim();
+                let image_size = size_part.trim();
+                if matches!(image_size, "1K" | "2K" | "4K") {
+                    legacy_generation_config["imageSize"] = json!(image_size);
                 }
-            }));
+                if ratio.contains(':')
+                    && ratio.split(':').count() == 2
+                    && ratio.split(':').all(|part| part.parse::<u32>().is_ok())
+                {
+                    legacy_generation_config["aspectRatio"] = json!(ratio);
+                }
+            } else if matches!(trimmed, "1K" | "2K" | "4K") {
+                legacy_generation_config["imageSize"] = json!(trimmed);
+            } else if trimmed.contains(':')
+                && trimmed.split(':').count() == 2
+                && trimmed.split(':').all(|part| part.parse::<u32>().is_ok())
+            {
+                legacy_generation_config["aspectRatio"] = json!(trimmed);
+            }
         }
-        parts.push(json!({ "text": prompt }));
-
-        let mut body = json!({
-            "contents": [ { "parts": parts } ],
-            "generationConfig": generation_config,
-        });
-        if !tools.is_empty() {
-            body["tools"] = json!(tools);
+        if let Some(quality) = quality {
+            if matches!(quality.as_str(), "low" | "medium" | "high") {
+                legacy_generation_config["imageQuality"] = json!(quality);
+            }
         }
-
-        let client = build_client(timeout_secs).await?;
-        let response = client
-            .post(&endpoint)
-            .header("x-goog-api-key", api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| generic_error(format!("Image generation request failed: {error}")))?;
-        let status = response.status();
-        if !status.is_success() {
-            let response_body: Value = response.json().await.unwrap_or_else(|_| json!({}));
-            return Err(api_error(
-                "Image generation failed",
-                status.as_u16(),
-                &response_body,
-            ));
-        }
-
-        // --- Streaming path: parse the SSE/JSON stream, forward inlineData ---
-        if stream_enabled {
-            let images = read_gemini_stream(response, on_chunk).await?;
-            return collect_gemini_result(prompt, model, channel_label, images);
+        if let Some(person_generation) = args
+            .get("personGeneration")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if matches!(
+                person_generation,
+                "dont_allow" | "allow_all" | "allow_adult"
+            ) {
+                legacy_generation_config["personGeneration"] = json!(person_generation);
+            }
         }
 
-        // --- Non-streaming path ---
-        let response_body: Value = response.json().await.map_err(|error| {
-            generic_error(format!(
-                "Failed to parse image generation response: {error}"
-            ))
-        })?;
+        let tasks: Vec<_> = (0..requests)
+            .map(|request_index| {
+                let client = client.clone();
+                let tools = tools.clone();
+                let interactions_response_format = interactions_response_format.clone();
+                let interactions_generation_config = interactions_generation_config.clone();
+                let interactions_endpoint = interactions_endpoint.clone();
+                let legacy_endpoint = legacy_endpoint.clone();
+                let legacy_stream_endpoint = legacy_stream_endpoint.clone();
+                let legacy_generation_config = legacy_generation_config.clone();
+                async move {
+                    // 当前请求的提示词与参考图（prompts/requestImages 逐请求分发）
+                    let prompt = prompts[request_index];
+                    let request_images: &[ReferenceImage] = images[request_index];
+                    // 用户显式指定 seed 且并发多张时逐张递增，避免生成完全相同的图
+                    let request_seed = seed.map(|value| value.wrapping_add(request_index as u64));
 
-        let images = parse_gemini_candidates(&response_body);
-        collect_gemini_result(prompt, model, channel_label, images)
+                    // --- Nano Banana 2+: Interactions API ---
+                    if is_nano_banana_2 {
+                        // input parts：参考图（图生图）在前，文本指令在后
+                        let mut input_parts: Vec<Value> = Vec::new();
+                        for image in request_images {
+                            input_parts.push(json!({
+                                "type": "image",
+                                "mime_type": image.mime_type,
+                                "data": image.data,
+                            }));
+                        }
+                        input_parts.push(json!({ "type": "text", "text": prompt }));
+
+                        let mut generation_config = interactions_generation_config.clone();
+                        if let Some(value) = request_seed {
+                            generation_config["seed"] = json!(value);
+                        }
+
+                        let mut body = json!({
+                            "model": model,
+                            "input": input_parts,
+                            "response_format": interactions_response_format,
+                        });
+                        if !tools.is_empty() {
+                            body["tools"] = json!(tools);
+                        }
+                        if generation_config.as_object().is_some_and(|m| !m.is_empty()) {
+                            body["generation_config"] = generation_config;
+                        }
+
+                        let response = client
+                            .post(&interactions_endpoint)
+                            .header("x-goog-api-key", api_key)
+                            .json(&body)
+                            .send()
+                            .await
+                            .map_err(|error| {
+                                generic_error(format!("Image generation request failed: {error}"))
+                            })?;
+                        let status = response.status();
+                        if !status.is_success() {
+                            let response_body: Value =
+                                response.json().await.unwrap_or_else(|_| json!({}));
+                            return Err(api_error(
+                                "Image generation failed",
+                                status.as_u16(),
+                                &response_body,
+                            ));
+                        }
+
+                        let response_body: Value = response.json().await.map_err(|error| {
+                            generic_error(format!(
+                                "Failed to parse image generation response: {error}"
+                            ))
+                        })?;
+
+                        // Parse steps[].content blocks where type == "image"
+                        // (only model_output steps; thought steps are hidden drafts).
+                        let images = parse_interactions_images(&response_body);
+                        return collect_gemini_result(prompt, model, channel_label, images);
+                    }
+
+                    // --- Legacy: generateContent API ---
+                    let mut generation_config = legacy_generation_config.clone();
+                    if let Some(value) = request_seed {
+                        generation_config["seed"] = json!(value);
+                    }
+
+                    // contents.parts: 参考图（图生图）在前，文本指令在后
+                    let mut parts: Vec<Value> = Vec::new();
+                    for image in request_images {
+                        parts.push(json!({
+                            "inlineData": {
+                                "mimeType": image.mime_type,
+                                "data": image.data,
+                            }
+                        }));
+                    }
+                    parts.push(json!({ "text": prompt }));
+
+                    let mut body = json!({
+                        "contents": [ { "parts": parts } ],
+                        "generationConfig": generation_config,
+                    });
+                    if !tools.is_empty() {
+                        body["tools"] = json!(tools);
+                    }
+
+                    let endpoint = if allow_stream {
+                        &legacy_stream_endpoint
+                    } else {
+                        &legacy_endpoint
+                    };
+                    let response = client
+                        .post(endpoint)
+                        .header("x-goog-api-key", api_key)
+                        .json(&body)
+                        .send()
+                        .await
+                        .map_err(|error| {
+                            generic_error(format!("Image generation request failed: {error}"))
+                        })?;
+                    let status = response.status();
+                    if !status.is_success() {
+                        let response_body: Value =
+                            response.json().await.unwrap_or_else(|_| json!({}));
+                        return Err(api_error(
+                            "Image generation failed",
+                            status.as_u16(),
+                            &response_body,
+                        ));
+                    }
+
+                    // --- Streaming path: parse the SSE/JSON stream, forward inlineData ---
+                    if allow_stream {
+                        let images = read_gemini_stream(response, on_chunk).await?;
+                        return collect_gemini_result(prompt, model, channel_label, images);
+                    }
+
+                    // --- Non-streaming path ---
+                    let response_body: Value = response.json().await.map_err(|error| {
+                        generic_error(format!(
+                            "Failed to parse image generation response: {error}"
+                        ))
+                    })?;
+
+                    let images = parse_gemini_candidates(&response_body);
+                    collect_gemini_result(prompt, model, channel_label, images)
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(tasks).await;
+        merge_parallel_results(prompts[0], model, channel_label, requests, results)
     }
 }
 
@@ -866,7 +1056,7 @@ impl McpService for ImageGenService {
         vec![McpTool {
             server_id: SERVER_ID.to_string(),
             name: TOOL_GENERATE.to_string(),
-            description: "Generate or edit image(s) using the INDEPENDENT image-generation configuration from Settings -> Image generation (separate from the conversation API; no built-in default model). TEXT-TO-IMAGE: pass only `prompt`. IMAGE-TO-IMAGE (edit / reference / restyle): pass `images` (reference images extracted from the user's attached images — either base64 from the @@image:...@@ tags, or the exact [Reference image #N for imagegen-generate: {...}] JSON blocks present in textified user messages when the main model is text-only) plus an edit `prompt`; the server resolves `path` references itself, so you NEVER need to copy huge base64 strings. OpenAI uses POST /v1/images/edits, Gemini embeds inlineData parts. Supported backends: OpenAI-compatible (gpt-image / dall-e) and Google Gemini Imagen (optional Google Search grounding). Provider auto-detected from the configured base URL unless overridden. USE THIS when the user asks to create, draw, generate, render, edit, restyle, or vary an image — ESPECIALLY when the user attached reference image(s): edit/vary THOSE images (image-to-image) instead of generating a new image from the text description alone. RENDERING RULE: after the tool returns, the generated image(s) are automatically shown to the user via a dedicated image UI component -- you MUST NOT use Markdown image syntax (![...](path)) to display them, and you MUST NOT echo the returned file paths back to the user; just reply with a natural, brief text response (e.g. what you drew, or asking if they want changes). TRANSPARENT BACKGROUND: when the user needs a transparent-background image (desktop pet, sticker, logo overlay, PNG cutout), pass background=\"transparent\" AND outputFormat=\"png\" AND prefer model gpt-image-1, the only model that can actually output transparency. gpt-image-2 CANNOT produce transparent backgrounds: requesting \"transparent\" there is silently downgraded to \"opaque\", so never expect transparency from gpt-image-2. dall-e-3 and Gemini ignore the background parameter entirely (always opaque). If the configured/available model cannot do transparency, tell the user and either switch to gpt-image-1 or generate with a plain solid background instead."
+            description: "Generate or edit image(s) using the INDEPENDENT image-generation configuration from Settings -> Image generation (separate from the conversation API; no built-in default model). TEXT-TO-IMAGE: pass only `prompt`. IMAGE-TO-IMAGE (edit / reference / restyle): pass `images` (reference images extracted from the user's attached images — either base64 from the @@image:...@@ tags, or the exact [Reference image #N for imagegen-generate: {...}] JSON blocks present in textified user messages when the main model is text-only) plus an edit `prompt`; the server resolves `path` references itself, so you NEVER need to copy huge base64 strings. OpenAI uses POST /v1/images/edits, Gemini embeds inlineData parts. Supported backends: OpenAI-compatible (gpt-image / dall-e) and Google Gemini Imagen (optional Google Search grounding). Provider auto-detected from the configured base URL unless overridden. USE THIS when the user asks to create, draw, generate, render, edit, restyle, or vary an image — ESPECIALLY when the user attached reference image(s): edit/vary THOSE images (image-to-image) instead of generating a new image from the text description alone. RENDERING RULE: after the tool returns, the generated image(s) are automatically shown to the user via a dedicated image UI component -- you MUST NOT use Markdown image syntax (![...](path)) to display them, and you MUST NOT echo the returned file paths back to the user; just reply with a natural, brief text response (e.g. what you drew, or asking if they want changes). TRANSPARENT BACKGROUND: when the user needs a transparent-background image (desktop pet, sticker, logo overlay, PNG cutout), pass background=\"transparent\" AND outputFormat=\"png\" AND prefer model gpt-image-1, the only model that can actually output transparency. gpt-image-2 CANNOT produce transparent backgrounds: requesting \"transparent\" there is silently downgraded to \"opaque\", so never expect transparency from gpt-image-2. dall-e-3 and Gemini ignore the background parameter entirely (always opaque). If the configured/available model cannot do transparency, tell the user and either switch to gpt-image-1 or generate with a plain solid background instead. MULTIPLE IMAGES / PARALLEL GENERATION: ONE call generates ONE image. To produce several images (e.g. a set with different styles or themes), call this tool MULTIPLE TIMES in parallel — one call per image, each with its own single `prompt` (and its own `images` group when editing). Parallel generation is ONLY possible through multiple separate calls: do NOT pass several prompts, a batch of styles, or `n` > 1 in a single call. (The legacy `n` / `prompts` / `requestImages` parameters remain accepted for backward compatibility but are NOT the way to generate multiple different images.)"
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -877,16 +1067,41 @@ impl McpService for ImageGenService {
                     },
                     "images": {
                         "type": "array",
-                        "description": "Reference images for image-to-image editing: [{ \"data\": \"<base64>\", \"mimeType\": \"image/png\" }] or [{ \"path\": \"upload/2026-07-25/x.png\", \"mimeType\": \"image/png\" }]. For `data`, extract base64 from the user's attached images in the conversation (the @@image:data:...@@ tags / multimodal image blocks). For `path`, copy the exact JSON object from a [Reference image #N for imagegen-generate: ...] block in a textified user message (text-only main model): the server resolves it relative to the conversation's upload/ directory and reads the file itself, so do NOT paste raw base64 into the context. Max 5 images, ~20MB each. When provided: OpenAI -> /images/edits endpoint; Gemini -> inlineData parts (prompt-based editing).",
+                        "description": "Reference images for image-to-image editing: [{ \\\"data\\\": \\\"<base64>\\\", \\\"mimeType\\\": \\\"image/png\\\" }] or [{ \\\"path\\\": \\\"upload/2026-07-25/x.png\\\", \\\"mimeType\\\": \\\"image/png\\\" }]. For `data`, extract base64 from the user's attached images in the conversation (the @@image:data:...@@ tags / multimodal image blocks). For `path`, copy the exact JSON object from a [Reference image #N for imagegen-generate: ...] block in a textified user message (text-only main model), or use the file's absolute disk path (e.g. C:/Users/xx/photo.png): relative paths are resolved against the conversation's upload/ directory; the server reads the file itself, so do NOT paste raw base64 into the context. Max 5 images, ~20MB each. When provided: OpenAI -> /images/edits endpoint; Gemini -> inlineData parts (prompt-based editing). When `requestImages` is provided, this `images` group is IGNORED (each request uses its own group).",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "data": { "type": "string", "description": "Base64-encoded image data (without the data: prefix)" },
-                                "path": { "type": "string", "description": "Relative file path under the conversation's upload/ directory, e.g. upload/2026-07-25/hash.png (from [Reference image #N for imagegen-generate: ...] blocks)" },
+                                "path": { "type": "string", "description": "Absolute disk path (e.g. C:/path/to/photo.png) or a path relative to the conversation's upload/ directory (e.g. upload/2026-07-25/hash.png, from [Reference image #N for imagegen-generate: ...] blocks)" },
                                 "mimeType": { "type": "string", "description": "Image MIME type, e.g. image/png, image/jpeg, image/webp" }
                             },
                             "required": ["data", "mimeType"]
                         }
+                    },
+                    "prompts": {
+                        "type": "array",
+                        "description": "LEGACY / NOT RECOMMENDED: an array of 1-8 prompt strings, one per image (mutually exclusive with `n`; when provided, the request count equals the array length). Do NOT use this to generate several different images — generate multiple images by calling this tool multiple times in parallel, one call per image with a single `prompt`. Kept only for backward compatibility; omit it and use the top-level `prompt`.",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "maxItems": 8
+                    },
+                    "requestImages": {
+                        "type": "array",
+                        "description": "LEGACY / NOT RECOMMENDED: an array with exactly N groups (N = number of requests = length of `prompts`, or `n`), each group an array of reference images shaped like `images` (see above); group i is used by request i. Do NOT use this to restyle several source images in one call — make one call per source image (each with its own `images` group) instead, in parallel. Kept only for backward compatibility.",
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "data": { "type": "string", "description": "Base64-encoded image data (without the data: prefix)" },
+                                    "path": { "type": "string", "description": "Absolute disk path (e.g. C:/path/to/photo.png) or a path relative to the conversation's upload/ directory (e.g. upload/2026-07-25/hash.png, from [Reference image #N for imagegen-generate: ...] blocks)" },
+                                    "mimeType": { "type": "string", "description": "Image MIME type, e.g. image/png, image/jpeg, image/webp" }
+                                },
+                                "required": ["data", "mimeType"]
+                            }
+                        },
+                        "minItems": 1,
+                        "maxItems": 8
                     },
                     "model": {
                         "type": "string",
@@ -919,10 +1134,10 @@ impl McpService for ImageGenService {
                     },
                     "n": {
                         "type": "number",
-                        "description": "Number of images to generate in one request (default: 1, max: 4). OpenAI and Gemini (imagen-4) both support it.",
+                        "description": "LEGACY / NOT RECOMMENDED for generating multiple images: 1-8 (default 1). To generate several images, call this tool multiple times in parallel (one call per image) instead of raising `n`. Kept for backward compatibility only: n>1 internally fans out to n concurrent sub-requests of the SAME prompt (one image each — the relay/upstream does not accept n>1 in a single request) and returns them together; streaming preview is disabled when n>1; dall-e-3 always returns exactly 1 image.",
                         "default": 1,
                         "minimum": 1,
-                        "maximum": 4
+                        "maximum": 8
                     },
                     "personGeneration": {
                         "type": "string",
@@ -969,6 +1184,25 @@ impl McpService for ImageGenService {
                 },
                 "required": ["prompt"]
             }),
+        }, McpTool {
+            server_id: SERVER_ID.to_string(),
+            name: TOOL_DESCRIBE_NAME.to_string(),
+            description: "Analyze an image file on disk with the vision model (uses the vision channel of the main API config) and return a structured description. USE THIS when the user asks you to read/understand a design image from the project (e.g. UI mockups, design screenshots, Figma exports) and implement or recreate it as code — for example 'look at the design in design/home.png and build this page'. The `path` accepts an absolute disk path (e.g. C:/Users/xx/project/design/home.png or /home/user/project/design/home.png) or a path relative to the conversation's upload/ directory (upload/2026-07-25/hash.png). Max 20MB, image formats only. Combine with filesystem tools: list/search the project for design files first, then describe each relevant image, then write the implementation code. The description focuses on UI/UX details (layout, colors with hex codes, typography, spacing, components, effects) so it can be translated directly into front-end code."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path of the image to analyze: absolute disk path (e.g. C:/Users/xx/project/design/home.png) or upload/ relative path."
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Optional custom analysis focus (e.g. \\\"focus on the color palette and spacing\\\"). Defaults to a UI/UX design description prompt."
+                    }
+                },
+                "required": ["path"]
+            }),
         }]
     }
 
@@ -978,8 +1212,12 @@ impl McpService for ImageGenService {
                 "The ImageGen tool must be executed through the asynchronous executor"
                     .to_string(),
             )),
+            TOOL_DESCRIBE => Err(generic_error(
+                "The image-describe tool must be executed through the asynchronous executor"
+                    .to_string(),
+            )),
             _ => Err(generic_error(format!(
-                "Unknown tool: \"{tool_name}\" for MCP server \"{SERVER_ID}\". Available tools: [imagegen-generate]"
+                "Unknown tool: \"{tool_name}\" for MCP server \"{SERVER_ID}\". Available tools: [imagegen-generate, imagegen-image-describe]"
             ))),
         }
     }
@@ -994,18 +1232,21 @@ struct ReferenceImage {
 /// 解析 `images` 参数。每个元素支持两种引用方式：
 /// - `{ "data": "<base64>", "mimeType": "image/png" }` —— 内联 base64
 ///   （兼容 `data:image/png;base64,...` data URL 前缀，自动剥离）；
-/// - `{ "path": "upload/2026-07-25/hash.png", "mimeType": "image/png" }`
-///   —— 相对数据库文件所在目录的磁盘路径（来自纯文本主模型消息中的
-///   `[Reference image #N for imagegen-generate: ...]` 引用块），由服务端
-///   读取文件并转 base64，避免把大段 base64 塞进对话上下文。
+/// - `{ "path": "C:/Users/xx/photo.png", "mimeType": "image/png" }`
+///   —— 绝对磁盘路径（用户本地任意目录的图片），或
+///   `upload/2026-07-25/hash.png` 这种相对数据库文件所在目录的路径（来自
+///   纯文本主模型消息中的 `[Reference image #N for imagegen-generate: ...]`
+///   引用块），由服务端读取文件并转 base64，避免把大段 base64 塞进对话
+///   上下文。
 /// 最多 14 张（Gemini 3 Pro Image 官方上限），单张 base64 上限约 20MB。
-fn parse_reference_images(args: &Value, database_path: &Path) -> napi::Result<Vec<ReferenceImage>> {
+/// 解析参考图数组（`images` 或 `requestImages` 的单个分组）。
+fn parse_reference_image_items(
+    items: &[Value],
+    database_path: &Path,
+) -> napi::Result<Vec<ReferenceImage>> {
     const MAX_IMAGES: usize = 14;
     const MAX_BASE64_LEN: usize = 20 * 1024 * 1024; // 20MB base64
 
-    let Some(items) = args.get("images").and_then(Value::as_array) else {
-        return Ok(Vec::new());
-    };
     if items.is_empty() {
         return Ok(Vec::new());
     }
@@ -1077,10 +1318,71 @@ fn parse_reference_images(args: &Value, database_path: &Path) -> napi::Result<Ve
     Ok(images)
 }
 
-/// 按磁盘相对路径读取参考图（`{ "path": ... }` 引用块形式）。
+/// 解析顶层 `images` 参数（所有请求共用的参考图）。
+fn parse_reference_images(args: &Value, database_path: &Path) -> napi::Result<Vec<ReferenceImage>> {
+    let Some(items) = args.get("images").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    parse_reference_image_items(items, database_path)
+}
+
+/// 解析 `requestImages` 参数（每个请求独立的参考图）：
+/// `Array<Array<{data|path, mimeType}>>`，第 i 项是第 i 个请求的参考图组。
+/// 组数即请求数（1-8），每组最多 MAX_IMAGES 张。
+fn parse_request_images(
+    args: &Value,
+    database_path: &Path,
+) -> napi::Result<Vec<Vec<ReferenceImage>>> {
+    const MAX_IMAGES: usize = 14;
+
+    let Some(sets) = args.get("requestImages").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    if sets.is_empty() {
+        return Ok(Vec::new());
+    }
+    if sets.len() > MAX_PARALLEL_IMAGES {
+        return Err(Error::new(
+            Status::InvalidArg,
+            format!(
+                "Too many request image sets: {} (max {MAX_PARALLEL_IMAGES})",
+                sets.len()
+            ),
+        ));
+    }
+
+    let mut result = Vec::with_capacity(sets.len());
+    for (index, set) in sets.iter().enumerate() {
+        let Some(items) = set.as_array() else {
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!(
+                    "Each entry of `requestImages` must be an array of reference images (entry {})",
+                    index + 1
+                ),
+            ));
+        };
+        if items.len() > MAX_IMAGES {
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!(
+                    "Too many reference images in `requestImages[{index}]`: {} (max {MAX_IMAGES})",
+                    items.len()
+                ),
+            ));
+        }
+        result.push(parse_reference_image_items(items, database_path)?);
+    }
+    Ok(result)
+}
+
+/// 按磁盘路径读取参考图（`{ "path": ... }` 引用块形式）。
 ///
-/// 仅允许 `upload/` 目录内的相对路径（相对数据库文件所在目录），拒绝绝对
-/// 路径与路径穿越（`..`），防止模型利用该参数读取 upload 目录以外的文件。
+/// 支持两种形式：
+/// - 绝对磁盘路径（如 `C:/Users/xx/photo.png`、`/home/xx/photo.png`）：
+///   直接读取，用于从任意目录引用用户本地图片；
+/// - `upload/` 目录内的相对路径（相对数据库文件所在目录）：读取会话上传
+///   目录下的文件；拒绝路径穿越（`..`），防止相对路径逃逸出 upload 目录。
 fn load_reference_image_from_path(
     path: &str,
     item: &Value,
@@ -1095,19 +1397,24 @@ fn load_reference_image_from_path(
             "Reference image `path` must not be empty".to_string(),
         ));
     }
-    if !normalized.starts_with("upload/") || normalized.contains("..") {
-        return Err(Error::new(
-            Status::InvalidArg,
-            format!(
-                "Invalid reference image path: \"{path}\". Only relative paths under the conversation's upload/ directory are allowed (e.g. upload/2026-07-25/hash.png)."
-            ),
-        ));
-    }
-
-    let file_path = database_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(&normalized);
+    let file_path = if Path::new(&normalized).is_absolute() {
+        // 绝对磁盘路径：用户本地任意目录的图片，直接读取
+        PathBuf::from(&normalized)
+    } else {
+        // 相对路径：仅允许 upload/ 目录内，拒绝路径穿越（..）
+        if !normalized.starts_with("upload/") || normalized.contains("..") {
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!(
+                    "Invalid reference image path: \"{path}\". Use an absolute file path (e.g. C:/path/to/image.png) or a relative path under the conversation's upload/ directory (e.g. upload/2026-07-25/hash.png)."
+                ),
+            ));
+        }
+        database_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&normalized)
+    };
     let bytes = std::fs::read(&file_path).map_err(|_| {
         Error::new(
             Status::InvalidArg,
@@ -1278,13 +1585,18 @@ fn process_openai_sse_line(
 }
 
 /// 将 OpenAI data 数组（b64_json / url）汇总为统一结果。
-fn collect_openai_result(
+/// url 项会下载为图片二进制并转 base64 进 content（随后由
+/// persist_generated_images 落盘到图库 + 索引，前端画廊直接展示、
+/// 图库可查，不依赖预签名链接的存活期）；下载失败（超时/非图片/过大）
+/// 时回退到 remote_urls 文本链接兜底，不阻断生成结果返回。
+async fn collect_openai_result(
     prompt: &str,
     model: &str,
     channel_label: &str,
     items: Vec<Value>,
     mime_type: String,
 ) -> napi::Result<Value> {
+    let client = build_client(None).await?;
     let mut content = Vec::new();
     let mut remote_urls = Vec::new();
     let mut generated = 0usize;
@@ -1300,11 +1612,25 @@ fn collect_openai_result(
                 "mimeType": mime_type,
             }));
         } else if let Some(url) = item.get("url").and_then(Value::as_str) {
-            if url.trim().is_empty() {
+            let url = url.trim();
+            if url.is_empty() {
                 continue;
             }
             generated += 1;
-            remote_urls.push(url.to_string());
+            match download_remote_image(&client, url).await {
+                Some((bytes, detected_mime)) => {
+                    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    content.push(json!({
+                        "type": "image",
+                        "data": data,
+                        "mimeType": detected_mime,
+                    }));
+                }
+                None => {
+                    // 下载失败：保留 URL，前端以文本链接兜底展示
+                    remote_urls.push(url.to_string());
+                }
+            }
         }
     }
 
@@ -1322,6 +1648,54 @@ fn collect_openai_result(
         content,
         remote_urls,
     ))
+}
+
+/// 下载远程图片（预签名 URL 等）为二进制。仅允许 http(s)，校验响应
+/// Content-Type 必须为 image/*（缺失时按 URL 后缀推断），限制大小与超时；
+/// 任何失败返回 None（由调用方回退为文本链接展示，不阻断生成结果返回）。
+async fn download_remote_image(client: &reqwest::Client, url: &str) -> Option<(Vec<u8>, String)> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return None;
+    }
+    let response = client
+        .get(url)
+        .timeout(Duration::from_secs(REMOTE_IMAGE_TIMEOUT_SECS))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or("").trim().to_string())
+        .filter(|value| value.starts_with("image/"))
+        .unwrap_or_else(|| guess_mime_from_url(url));
+    let bytes = response.bytes().await.ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_REMOTE_IMAGE_BYTES {
+        return None;
+    }
+    Some((bytes.to_vec(), mime))
+}
+
+/// 按 URL 路径后缀推断图片 MIME（上游未返回 image/* Content-Type 时兜底）。
+fn guess_mime_from_url(url: &str) -> String {
+    let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
+    if path.ends_with(".png") {
+        "image/png".to_string()
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg".to_string()
+    } else if path.ends_with(".webp") {
+        "image/webp".to_string()
+    } else if path.ends_with(".gif") {
+        "image/gif".to_string()
+    } else if path.ends_with(".avif") {
+        "image/avif".to_string()
+    } else {
+        "image/png".to_string()
+    }
 }
 
 /// 解析 Gemini Interactions API 响应：`steps[]` 中 `model_output` 步骤的
@@ -1807,6 +2181,61 @@ fn build_result(
     result
 }
 
+/// 合并单次调用内并发子请求的结果（content / remoteUrls / imageCount 汇总）。
+/// 每个子请求返回完整的 build_result 输出（其图片块已落库为 path 引用，
+/// 合并后再次调用 build_result 对已是 path 的块幂等跳过）。
+/// 至少 1 个子请求成功即整体成功，失败数量与原因追加到 contentPreview；
+/// 全部失败才返回错误。
+fn merge_parallel_results(
+    prompt: &str,
+    model: &str,
+    provider: &str,
+    total: usize,
+    results: Vec<napi::Result<Value>>,
+) -> napi::Result<Value> {
+    let mut content: Vec<Value> = Vec::new();
+    let mut remote_urls: Vec<String> = Vec::new();
+    let mut generated = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for result in results {
+        match result {
+            Ok(value) => {
+                if let Some(blocks) = value.get("content").and_then(Value::as_array) {
+                    content.extend(blocks.iter().cloned());
+                }
+                if let Some(urls) = value.get("remoteUrls").and_then(Value::as_array) {
+                    for url in urls {
+                        if let Some(url) = url.as_str() {
+                            remote_urls.push(url.to_string());
+                        }
+                    }
+                }
+                generated += value.get("imageCount").and_then(Value::as_u64).unwrap_or(0) as usize;
+            }
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+    if generated == 0 {
+        let message = failures
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "All parallel image requests failed".to_string());
+        return Err(generic_error(message));
+    }
+    let mut result = build_result(prompt, model, provider, generated, content, remote_urls);
+    if !failures.is_empty() {
+        if let Some(preview) = result.get("contentPreview").and_then(Value::as_str) {
+            result["contentPreview"] = json!(format!(
+                "{preview} {}/{} parallel requests failed: {}",
+                failures.len(),
+                total,
+                failures.join(" | ")
+            ));
+        }
+    }
+    Ok(result)
+}
+
 fn required_string<'a>(args: &'a Value, key: &str, tool_name: &str) -> napi::Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -1818,13 +2247,6 @@ fn required_string<'a>(args: &'a Value, key: &str, tool_name: &str) -> napi::Res
                 format!("{key} is required for tool \"{tool_name}\""),
             )
         })
-}
-
-fn bounded_usize(value: Option<u64>, default: usize, min: usize, max: usize) -> usize {
-    value
-        .map(|value| value as usize)
-        .unwrap_or(default)
-        .clamp(min, max)
 }
 
 fn mime_for_format(format: &str) -> String {

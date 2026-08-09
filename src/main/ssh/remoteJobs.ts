@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { app } from "electron";
 import {
   executeSshCommand,
+  probeSshPty,
   probeSshCapabilities,
   readSshFile,
   readSshFileRange,
@@ -24,49 +25,69 @@ import {
   withSshSession,
 } from "./remoteWorkspaceCommand";
 import {
-  buildWindowsCommandScript,
-  buildWindowsRunnerScript,
-  cancelWindowsRemoteJob,
   createWindowsRemoteDirectory,
   encodeWindowsPowerShell,
-  getWindowsRemoteJobTaskName,
   getWindowsRemoteJobRoot,
-  inspectWindowsRemoteJob,
-  isWindowsRemote,
-  launchWindowsDetachedPowerShell,
-  launchWindowsRemoteJob,
   moveWindowsRemotePath,
   removeWindowsRemotePath,
 } from "./windowsRemoteRunner";
 import {
+  canUseSnowAgent,
   cancelSnowAgentJob,
+  getSnowAgentAttachCommand,
   inspectSnowAgentJob,
   launchSnowAgentJob,
   negotiateSnowAgent,
-  probeSnowAgentLiveness,
+  startSnowAgentLivenessProbe,
+  startSnowAgentInteractiveProbe,
+  supportsSnowAgentInteractiveAttach,
+  verifySnowAgentInteractiveProbe,
 } from "./snowAgent";
 
 const JOB_SCHEMA_VERSION = 1;
 const MAX_JOB_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_JOB_TIMEOUT_MS = MAX_JOB_TIMEOUT_MS;
 const MAX_OUTPUT_READ_BYTES = 64 * 1024;
+const MAX_REMOTE_JOB_LOG_BYTES = 50 * 1024 * 1024;
 const SUCCESS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const FAILURE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const BACKEND_PROBE_CACHE_MS = 10 * 60 * 1000;
 const BACKEND_PROBE_FAILURES = new Map<string, string>();
 const STATE_LOCK_ATTEMPTS = 400;
+const STATE_LOCK_STALE_SECONDS = 5;
 const POSIX_CANCEL_GRACE_SECONDS = 5;
+const SYSTEMD_RUNTIME_GRACE_SECONDS = 10;
 const POSIX_RUNNER_POLL_SECONDS = 0.2;
 const INACTIVE_RUNNER_SETTLE_MS = 750;
-const WINDOWS_BACKEND_PROBE_TIMEOUT_MS = 10_000;
-const WINDOWS_BACKEND_PROBE_POLL_MS = 200;
+
+export const WINDOWS_DURABLE_JOB_UNAVAILABLE_MESSAGE =
+  "Windows durable jobs require a protected remote helper running under a least-privileged service account; Snow App does not provision or transmit service credentials over SSH.";
+
+export const assertDurableJobPlatformSupported = (
+  platform: SshCapabilities["platform"]
+): void => {
+  if (platform === "windows") {
+    throw new Error(WINDOWS_DURABLE_JOB_UNAVAILABLE_MESSAGE);
+  }
+};
 
 export type RemoteJobCancellationPolicy = "cancel_remote" | "detach_only";
+export type RemoteJobMode = "batch" | "interactive";
 
 export class RemoteJobLaunchRejectedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "RemoteJobLaunchRejectedError";
+  }
+}
+
+export class RemoteJobUnavailableError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(`[${code}] ${message}`);
+    this.name = "RemoteJobUnavailableError";
+    this.code = code;
   }
 }
 
@@ -86,8 +107,7 @@ export type RemoteJobBackendKind =
   | "snow-agent"
   | "systemd-user"
   | "tmux"
-  | "posix-detach"
-  | "windows-job";
+  | "posix-detach";
 
 export type RemoteJobState = {
   schemaVersion: number;
@@ -95,6 +115,7 @@ export type RemoteJobState = {
   status: RemoteJobStatus;
   revision: number;
   backend?: RemoteJobBackendKind;
+  mode?: RemoteJobMode;
   runnerPid?: number;
   exitCode?: number;
   createdAt?: string;
@@ -102,6 +123,7 @@ export type RemoteJobState = {
   updatedAt: string;
   completedAt?: string;
   reason?: string;
+  truncated?: boolean;
 };
 
 export type RemoteJobBinding = {
@@ -112,6 +134,7 @@ export type RemoteJobBinding = {
   commandHash: string;
   displayCommand: string;
   backend: RemoteJobBackendKind;
+  mode: RemoteJobMode;
   cancellationPolicy?: RemoteJobCancellationPolicy;
   jobTokenHash: string;
   createdAt: string;
@@ -131,6 +154,7 @@ export type RemoteJobStartRequest = {
   timeoutMs?: number;
   jobId?: string;
   backend?: RemoteJobBackendKind;
+  mode?: RemoteJobMode;
   conversationId?: string;
   toolCallId?: string;
 };
@@ -154,6 +178,7 @@ export type RemoteJobAttachSpec = {
   jobId: string;
   workspacePath: string;
   backend: RemoteJobBackendKind;
+  mode: "interactive";
   remoteCommand: string;
 };
 
@@ -163,6 +188,7 @@ export type RemoteJobBackendContext = {
   jobId: string;
   timeoutMs: number;
   capabilities: SshCapabilities;
+  mode: RemoteJobMode;
   signal?: AbortSignal;
 };
 
@@ -172,7 +198,6 @@ export interface RemoteJobBackend {
   launch(context: RemoteJobBackendContext): Promise<void>;
   inspect(context: RemoteJobBackendContext): Promise<"active" | "inactive">;
   cancel(context: RemoteJobBackendContext): Promise<void>;
-  supportsInteractiveAttach?: boolean;
 }
 
 type StoredBindings = {
@@ -219,13 +244,18 @@ const isBackendKind = (value: unknown): value is RemoteJobBackendKind =>
   value === "snow-agent" ||
   value === "systemd-user" ||
   value === "tmux" ||
-  value === "posix-detach" ||
-  value === "windows-job";
+  value === "posix-detach";
 
 const isCancellationPolicy = (
   value: unknown
 ): value is RemoteJobCancellationPolicy =>
   value === "cancel_remote" || value === "detach_only";
+
+const isRemoteJobMode = (value: unknown): value is RemoteJobMode =>
+  value === "batch" || value === "interactive";
+
+const modeFromStoredValue = (value: unknown): RemoteJobMode =>
+  isRemoteJobMode(value) ? value : "batch";
 
 const normalizeWorkspacePath = (value: string): string => {
   const path = value.trim();
@@ -249,7 +279,8 @@ const getBindingsDirectory = (): string =>
   process.env.SNOW_REMOTE_JOB_BINDINGS_DIR?.trim() ||
   join(app.getPath("userData"), "remote-jobs");
 
-const getBindingsPath = (): string => join(getBindingsDirectory(), "bindings.json");
+const getBindingsPath = (): string =>
+  join(getBindingsDirectory(), "bindings.json");
 
 const ensureBindingsDirectory = (): void => {
   const directory = getBindingsDirectory();
@@ -271,25 +302,31 @@ const readBindings = (): RemoteJobBinding[] => {
     if (!isRecord(parsed) || !Array.isArray(parsed.jobs)) {
       return [];
     }
-    return parsed.jobs.filter(
-      (job): job is RemoteJobBinding =>
-        isRecord(job) &&
-        typeof job.jobId === "string" &&
-        isJobId(job.jobId) &&
-        typeof job.workspacePath === "string" &&
-        typeof job.workspaceId === "string" &&
-        typeof job.profileId === "string" &&
-        typeof job.commandHash === "string" &&
-        typeof job.displayCommand === "string" &&
-        isBackendKind(job.backend) &&
-        (job.cancellationPolicy === undefined ||
-          isCancellationPolicy(job.cancellationPolicy)) &&
-        typeof job.jobTokenHash === "string" &&
-        typeof job.createdAt === "string" &&
-        typeof job.updatedAt === "string" &&
-        isRemoteJobStatus(job.status) &&
-        typeof job.revision === "number" &&
-        typeof job.lastOutputOffset === "number"
+    return parsed.jobs.flatMap((job): RemoteJobBinding[] =>
+      isRecord(job) &&
+      typeof job.jobId === "string" &&
+      isJobId(job.jobId) &&
+      typeof job.workspacePath === "string" &&
+      typeof job.workspaceId === "string" &&
+      typeof job.profileId === "string" &&
+      typeof job.commandHash === "string" &&
+      typeof job.displayCommand === "string" &&
+      isBackendKind(job.backend) &&
+      (job.cancellationPolicy === undefined ||
+        isCancellationPolicy(job.cancellationPolicy)) &&
+      typeof job.jobTokenHash === "string" &&
+      typeof job.createdAt === "string" &&
+      typeof job.updatedAt === "string" &&
+      isRemoteJobStatus(job.status) &&
+      typeof job.revision === "number" &&
+      typeof job.lastOutputOffset === "number"
+        ? [
+            {
+              ...job,
+              mode: modeFromStoredValue(job.mode),
+            } as RemoteJobBinding,
+          ]
+        : []
     );
   } catch {
     return [];
@@ -334,7 +371,11 @@ const updateBinding = (
   if (index < 0) {
     return null;
   }
-  const binding = { ...jobs[index], ...update, updatedAt: new Date().toISOString() };
+  const binding = {
+    ...jobs[index],
+    ...update,
+    updatedAt: new Date().toISOString(),
+  };
   jobs[index] = binding;
   writeBindings(jobs);
   return binding;
@@ -353,86 +394,213 @@ const summarizeCommand = (): string => "Remote command";
 
 const pathForJob = (root: string, jobId: string): string => `${root}/${jobId}`;
 
-const runPowerShell = (
+const powerShellQuote = (value: string): string =>
+  `'${value.replace(/'/g, "''")}'`;
+
+const writePosixRemoteState = async (
   sessionId: string,
-  script: string,
-  timeoutMs = 15_000
-): Promise<string> =>
-  executeSshCommand(
+  jobDirectory: string,
+  previous: RemoteJobState,
+  next: RemoteJobState
+): Promise<RemoteJobState> => {
+  const lockPath = `${jobDirectory}/state.lock`;
+  const statePath = `${jobDirectory}/state.json`;
+  const revisionPath = `${jobDirectory}/revision`;
+  const owner = randomUUID();
+  const script = [
+    "set -eu",
+    `state_path=${shellQuote(statePath)}`,
+    `revision_path=${shellQuote(revisionPath)}`,
+    `lock=${shellQuote(lockPath)}`,
+    'lock_owner="$lock/owner"',
+    'lock_reclaim="$lock/reclaim"',
+    `owner=${shellQuote(owner)}`,
+    `expected_revision=${Math.max(0, Math.floor(previous.revision))}`,
+    `next_state=${shellQuote(JSON.stringify(next))}`,
+    'state_tmp="$state_path.$owner.tmp"',
+    'revision_tmp="$revision_path.$owner.tmp"',
+    "lock_held=0",
+    "owns_state_lock() {",
+    '  [ -f "$lock_owner" ] || return 1',
+    '  [ ! -e "$lock_reclaim" ] || return 1',
+    '  [ "$(sed -n \'1p\' "$lock_owner" 2>/dev/null || true)" = "$owner" ]',
+    "}",
+    "release_state_lock() {",
+    '  rm -f -- "$state_tmp" "$revision_tmp" 2>/dev/null || true',
+    '  if [ "$lock_held" -eq 1 ] && owns_state_lock; then',
+    '    rm -f -- "$lock_owner" 2>/dev/null || true',
+    '    rmdir -- "$lock" 2>/dev/null || true',
+    "  fi",
+    "  lock_held=0",
+    "}",
+    "cleanup_state_lock() {",
+    "  status=$?",
+    "  trap - EXIT HUP INT TERM",
+    "  release_state_lock",
+    '  exit "$status"',
+    "}",
+    "trap cleanup_state_lock EXIT",
+    "trap 'exit 128' HUP INT TERM",
+    "state_lock_is_stale() {",
+    '  [ -f "$lock_owner" ] || return 0',
+    "  lock_owner_pid=$(sed -n '2p' \"$lock_owner\" 2>/dev/null || true)",
+    "  lock_owner_expiry=$(sed -n '3p' \"$lock_owner\" 2>/dev/null || true)",
+    '  case "$lock_owner_pid" in ""|*[!0-9]*) return 0 ;; esac',
+    '  case "$lock_owner_expiry" in ""|*[!0-9]*) return 0 ;; esac',
+    "  lock_now=$(date +%s)",
+    '  [ "$lock_now" -ge "$lock_owner_expiry" ] || return 1',
+    '  kill -0 "$lock_owner_pid" 2>/dev/null && return 1',
+    "  return 0",
+    "}",
+    "reclaim_stale_state_lock() {",
+    '  mkdir -- "$lock_reclaim" 2>/dev/null || return 1',
+    '  if ! state_lock_is_stale; then rmdir -- "$lock_reclaim" 2>/dev/null || true; return 1; fi',
+    '  rm -f -- "$lock_owner" 2>/dev/null || true',
+    '  rmdir -- "$lock_reclaim" 2>/dev/null || return 1',
+    '  rmdir -- "$lock" 2>/dev/null',
+    "}",
+    "acquire_state_lock() {",
+    "  attempt=0",
+    '  while [ "$attempt" -lt ' + STATE_LOCK_ATTEMPTS + " ]; do",
+    "    if owns_state_lock; then lock_held=1; return 0; fi",
+    '    if mkdir -- "$lock" 2>/dev/null; then',
+    "      lock_now=$(date +%s)",
+    `      (umask 077; printf "%s\\n%s\\n%s\\n" "$owner" "$$" "$((lock_now + ${STATE_LOCK_STALE_SECONDS}))" > "$lock_owner")`,
+    "      if owns_state_lock; then lock_held=1; return 0; fi",
+    "    else",
+    "      reclaim_stale_state_lock || true",
+    "    fi",
+    "    attempt=$((attempt + 1))",
+    "    sleep 0.025",
+    "  done",
+    "  return 75",
+    "}",
+    "acquire_state_lock",
+    'current_state=$(cat -- "$state_path")',
+    'current_revision=$(sed -n \'s/.*"revision"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p\' "$state_path" | head -n 1)',
+    'case "$current_revision" in ""|*[!0-9]*) exit 1 ;; esac',
+    'if [ "$current_revision" != "$expected_revision" ] || grep -Eq \'"status"[[:space:]]*:[[:space:]]*"(succeeded|failed|timed_out|cancelled|lost|launch_failed|indeterminate)"\' "$state_path"; then',
+    '  printf "%s\\n" "$current_state"',
+    "  exit 0",
+    "fi",
+    "next_revision=$((current_revision + 1))",
+    '(umask 077; printf "%s\\n" "$next_revision" > "$revision_tmp")',
+    'mv -f -- "$revision_tmp" "$revision_path"',
+    '(umask 077; printf "%s\\n" "$next_state" > "$state_tmp")',
+    'mv -f -- "$state_tmp" "$state_path"',
+    'cat -- "$state_path"',
+  ].join("\n");
+  const output = await executeSshCommand(
+    sessionId,
+    `sh -lc ${shellQuote(script)}`,
+    { timeoutMs: 15_000 }
+  );
+  return parseRemoteState(JSON.parse(output), previous.jobId);
+};
+
+const writeWindowsRemoteState = async (
+  sessionId: string,
+  jobDirectory: string,
+  previous: RemoteJobState,
+  next: RemoteJobState
+): Promise<RemoteJobState> => {
+  const owner = randomUUID();
+  const statePath = `${jobDirectory}/state.json`;
+  const revisionPath = `${jobDirectory}/revision`;
+  const lockPath = `${jobDirectory}/state.lock`;
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$statePath = ${powerShellQuote(statePath)}`,
+    `$revisionPath = ${powerShellQuote(revisionPath)}`,
+    `$stateLockPath = ${powerShellQuote(lockPath)}`,
+    "$stateLockOwnerPath = Join-Path $stateLockPath 'owner.json'",
+    "$stateLockReclaimPath = Join-Path $stateLockPath 'reclaim'",
+    `$owner = ${powerShellQuote(owner)}`,
+    `$expectedRevision = ${Math.max(0, Math.floor(previous.revision))}`,
+    `$nextStateJson = ${powerShellQuote(JSON.stringify(next))}`,
+    "$utf8NoBom = [System.Text.UTF8Encoding]::new($false)",
+    "$lockHeld = $false",
+    "function Test-StateLockOwner {",
+    "  if (-not (Test-Path -LiteralPath $stateLockOwnerPath) -or (Test-Path -LiteralPath $stateLockReclaimPath)) { return $false }",
+    "  try { return ((Get-Content -LiteralPath $stateLockOwnerPath -Raw | ConvertFrom-Json).owner -eq $owner) } catch { return $false }",
+    "}",
+    "function Exit-StateLock {",
+    "  if ($lockHeld -and (Test-StateLockOwner)) {",
+    "    Remove-Item -LiteralPath $stateLockOwnerPath -Force -ErrorAction SilentlyContinue",
+    "    Remove-Item -LiteralPath $stateLockPath -Force -ErrorAction SilentlyContinue",
+    "  }",
+    "  $lockHeld = $false",
+    "}",
+    "function Test-StateLockStale {",
+    "  if (-not (Test-Path -LiteralPath $stateLockOwnerPath)) { return $true }",
+    "  try { $metadata = Get-Content -LiteralPath $stateLockOwnerPath -Raw | ConvertFrom-Json } catch { return $true }",
+    "  if ($metadata.pid -isnot [long] -or $metadata.createdAtEpoch -isnot [long] -or $metadata.processStartTicks -isnot [long]) { return $true }",
+    "  $age = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$metadata.createdAtEpoch",
+    `  if ($age -lt ${STATE_LOCK_STALE_SECONDS}) { return $false }`,
+    "  try {",
+    "    $process = Get-Process -Id ([int]$metadata.pid) -ErrorAction Stop",
+    "    if ($process.StartTime.ToUniversalTime().Ticks -eq [long]$metadata.processStartTicks) { return $false }",
+    "  } catch {}",
+    "  return $true",
+    "}",
+    "function Try-ReclaimStateLock {",
+    "  try { New-Item -ItemType Directory -Path $stateLockReclaimPath -ErrorAction Stop | Out-Null } catch { return $false }",
+    "  if (-not (Test-StateLockStale)) { Remove-Item -LiteralPath $stateLockReclaimPath -Force -ErrorAction SilentlyContinue; return $false }",
+    "  try { Remove-Item -LiteralPath $stateLockPath -Force -Recurse -ErrorAction Stop; return $true } catch { return $false }",
+    "}",
+    "function Enter-StateLock {",
+    "  $deadline = [DateTime]::UtcNow.AddMilliseconds(10000)",
+    "  while ([DateTime]::UtcNow -lt $deadline) {",
+    "    if (Test-StateLockOwner) { $lockHeld = $true; return }",
+    "    try {",
+    "      New-Item -ItemType Directory -Path $stateLockPath -ErrorAction Stop | Out-Null",
+    "      $metadata = [ordered]@{ owner = $owner; pid = $PID; createdAtEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); processStartTicks = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks }",
+    "      [System.IO.File]::WriteAllText($stateLockOwnerPath, ($metadata | ConvertTo-Json -Compress), $utf8NoBom)",
+    "      if (Test-StateLockOwner) { $lockHeld = $true; return }",
+    "    } catch {",
+    "      if (Test-StateLockStale) { [void](Try-ReclaimStateLock) }",
+    "    }",
+    "    Start-Sleep -Milliseconds 25",
+    "  }",
+    "  throw 'Remote Job state lock timed out'",
+    "}",
+    "$result = $null",
+    '$revisionTemporary = "$revisionPath.$owner.tmp"',
+    '$stateTemporary = "$statePath.$owner.tmp"',
+    "try {",
+    "  Enter-StateLock",
+    "  $current = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json",
+    "  $terminal = $current.status -in @('succeeded','failed','timed_out','cancelled','lost','launch_failed','indeterminate')",
+    "  if ([int]$current.revision -ne $expectedRevision -or $terminal) {",
+    "    $result = $current",
+    "  } else {",
+    "    $nextRevision = [int]$current.revision + 1",
+    "    [System.IO.File]::WriteAllText($revisionTemporary, [string]$nextRevision, [System.Text.Encoding]::ASCII)",
+    "    [System.IO.File]::Replace($revisionTemporary, $revisionPath, $null)",
+    "    [System.IO.File]::WriteAllText($stateTemporary, $nextStateJson, $utf8NoBom)",
+    "    [System.IO.File]::Replace($stateTemporary, $statePath, $null)",
+    "    $result = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json",
+    "  }",
+    "  [Console]::Out.Write(($result | ConvertTo-Json -Compress))",
+    "} finally {",
+    "  Remove-Item -LiteralPath $revisionTemporary, $stateTemporary -Force -ErrorAction SilentlyContinue",
+    "  Exit-StateLock",
+    "}",
+  ].join("\r\n");
+  const output = await executeSshCommand(
     sessionId,
     `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${encodeWindowsPowerShell(
       script
     )}`,
-    { timeoutMs }
+    { timeoutMs: 15_000 }
   );
-
-const runPlatformScript = (
-  sessionId: string,
-  capabilities: SshCapabilities,
-  posixScript: string,
-  powerShellScript: string,
-  timeoutMs = 15_000
-): Promise<string> =>
-  capabilities.platform === "windows"
-    ? runPowerShell(sessionId, powerShellScript, timeoutMs)
-    : executeSshCommand(sessionId, `sh -lc ${shellQuote(posixScript)}`, {
-        timeoutMs,
-      });
-
-const powerShellQuote = (value: string): string =>
-  `'${value.replace(/'/g, "''")}'`;
-
-const withRemoteStateLock = async <T>(
-  sessionId: string,
-  capabilities: SshCapabilities,
-  jobDirectory: string,
-  operation: () => Promise<T>
-): Promise<T> => {
-  const lockPath = `${jobDirectory}/state.lock`;
-  const acquirePosix = [
-    `lock=${shellQuote(lockPath)}`,
-    `i=0`,
-    `while ! mkdir -- "$lock" 2>/dev/null; do`,
-    `  i=$((i + 1))`,
-    `  if [ "$i" -ge ${STATE_LOCK_ATTEMPTS} ]; then exit 75; fi`,
-    `  sleep 0.025`,
-    `done`,
-  ].join("\n");
-  const acquireWindows = [
-    `$lock = ${powerShellQuote(lockPath)}`,
-    `$acquired = $false`,
-    `for ($i = 0; $i -lt ${STATE_LOCK_ATTEMPTS}; $i++) {`,
-    `  try { New-Item -ItemType Directory -Path $lock -ErrorAction Stop | Out-Null; $acquired = $true; break } catch { Start-Sleep -Milliseconds 25 }`,
-    `}`,
-    `if (-not $acquired) { throw 'Remote Job state lock timed out' }`,
-  ].join("\n");
-  const releasePosix = `rmdir -- ${shellQuote(lockPath)} 2>/dev/null || true`;
-  const releaseWindows = `Remove-Item -LiteralPath ${powerShellQuote(
-    lockPath
-  )} -Force -Recurse -ErrorAction SilentlyContinue`;
-
-  await runPlatformScript(
-    sessionId,
-    capabilities,
-    acquirePosix,
-    acquireWindows,
-    15_000
-  );
-  try {
-    return await operation();
-  } finally {
-    await runPlatformScript(
-      sessionId,
-      capabilities,
-      releasePosix,
-      releaseWindows,
-      15_000
-    ).catch(() => undefined);
-  }
+  return parseRemoteState(JSON.parse(output), previous.jobId);
 };
 
-const remotePathExists = async (sessionId: string, path: string): Promise<boolean> =>
-  (await statSshEntry(sessionId, path)) !== null;
+const remotePathExists = async (
+  sessionId: string,
+  path: string
+): Promise<boolean> => (await statSshEntry(sessionId, path)) !== null;
 
 const createRemoteJobDirectory = (
   sessionId: string,
@@ -451,10 +619,7 @@ const moveRemoteJobDirectory = (
 ): Promise<string> =>
   capabilities.platform === "windows"
     ? moveWindowsRemotePath(sessionId, source, target)
-    : runShell(
-        sessionId,
-        `mv -- ${shellQuote(source)} ${shellQuote(target)}`
-      );
+    : runShell(sessionId, `mv -- ${shellQuote(source)} ${shellQuote(target)}`);
 
 const removeRemoteJobPath = (
   sessionId: string,
@@ -469,7 +634,8 @@ const getRemoteJobRoot = async (
   sessionId: string,
   knownCapabilities?: SshCapabilities
 ): Promise<string> => {
-  const capabilities = knownCapabilities ?? (await probeSshCapabilities(sessionId));
+  const capabilities =
+    knownCapabilities ?? (await probeSshCapabilities(sessionId));
   if (capabilities.platform === "windows") {
     return getWindowsRemoteJobRoot(sessionId);
   }
@@ -506,7 +672,10 @@ const readRemoteJson = async <T>(
   }
 };
 
-const parseRemoteState = (value: unknown, expectedJobId: string): RemoteJobState => {
+const parseRemoteState = (
+  value: unknown,
+  expectedJobId: string
+): RemoteJobState => {
   if (
     !isRecord(value) ||
     value.schemaVersion !== JOB_SCHEMA_VERSION ||
@@ -523,6 +692,7 @@ const parseRemoteState = (value: unknown, expectedJobId: string): RemoteJobState
     status: value.status,
     revision: Math.max(0, Math.floor(value.revision)),
     backend: isBackendKind(value.backend) ? value.backend : undefined,
+    mode: modeFromStoredValue(value.mode),
     runnerPid:
       typeof value.runnerPid === "number" && Number.isInteger(value.runnerPid)
         ? value.runnerPid
@@ -531,14 +701,27 @@ const parseRemoteState = (value: unknown, expectedJobId: string): RemoteJobState
       typeof value.exitCode === "number" && Number.isInteger(value.exitCode)
         ? value.exitCode
         : undefined,
-    createdAt: typeof value.createdAt === "string" ? value.createdAt : undefined,
-    startedAt: typeof value.startedAt === "string" ? value.startedAt : undefined,
+    createdAt:
+      typeof value.createdAt === "string" ? value.createdAt : undefined,
+    startedAt:
+      typeof value.startedAt === "string" ? value.startedAt : undefined,
     updatedAt: value.updatedAt,
     completedAt:
       typeof value.completedAt === "string" ? value.completedAt : undefined,
     reason: typeof value.reason === "string" ? value.reason : undefined,
+    truncated: value.truncated === true ? true : undefined,
   };
 };
+
+/** Test-only protocol migration hook; production callers use readRemoteState. */
+export const parseRemoteJobStateForTesting = (
+  value: unknown,
+  expectedJobId: string
+): RemoteJobState => parseRemoteState(value, expectedJobId);
+
+/** Test-only local binding migration hook. */
+export const getRemoteJobBindingsForTesting = (): RemoteJobBinding[] =>
+  readBindings();
 
 const readRemoteState = async (
   sessionId: string,
@@ -546,9 +729,39 @@ const readRemoteState = async (
   jobId: string
 ): Promise<RemoteJobState> =>
   parseRemoteState(
-    await readRemoteJson<unknown>(sessionId, `${jobDirectory}/state.json`, "state"),
+    await readRemoteJson<unknown>(
+      sessionId,
+      `${jobDirectory}/state.json`,
+      "state"
+    ),
     jobId
   );
+
+const recoverStaleSnowAgentLaunch = async (
+  sessionId: string,
+  capabilities: SshCapabilities,
+  jobDirectory: string,
+  jobId: string,
+  state: RemoteJobState
+): Promise<RemoteJobState> => {
+  if (state.status !== "launching" || state.backend !== "snow-agent") {
+    return state;
+  }
+
+  // `launching` is recoverable only before the runner records `running`.
+  // The agent checks its recorded runner PID and atomically reacquires a stale
+  // handoff lock, so this never restarts a task that might already be running.
+  const active = await inspectSnowAgentJob(
+    sessionId,
+    capabilities,
+    jobDirectory
+  ).catch(() => true);
+  if (active) {
+    return state;
+  }
+  await launchSnowAgentJob(sessionId, capabilities, jobDirectory, jobId);
+  return readRemoteState(sessionId, jobDirectory, jobId);
+};
 
 const writeRemoteState = async (
   sessionId: string,
@@ -557,38 +770,19 @@ const writeRemoteState = async (
   update: Partial<RemoteJobState>,
   capabilities: SshCapabilities
 ): Promise<RemoteJobState> => {
-  return withRemoteStateLock(sessionId, capabilities, jobDirectory, async () => {
-    const current = await readRemoteState(sessionId, jobDirectory, previous.jobId);
-    // A caller may have read an older snapshot while the Runner advanced the
-    // state. Returning the authoritative snapshot prevents a stale terminal
-    // write from changing a completed job back to cancelled/lost.
-    if (
-      current.revision !== previous.revision ||
-      TERMINAL_STATUSES.has(current.status)
-    ) {
-      return current;
-    }
-    const next: RemoteJobState = {
-      ...current,
-      ...update,
-      schemaVersion: JOB_SCHEMA_VERSION,
-      revision: current.revision + 1,
-      updatedAt: new Date().toISOString(),
-    };
-    // Keep the revision source used by all remote Runners in sync with the
-    // atomically replaced state file while holding the shared lock.
-    await writeInternalSshFile(
-      sessionId,
-      `${jobDirectory}/revision`,
-      `${next.revision}\n`
-    );
-    await writeInternalSshFile(
-      sessionId,
-      `${jobDirectory}/state.json`,
-      `${JSON.stringify(next)}\n`
-    );
-    return next;
-  });
+  const next: RemoteJobState = {
+    ...previous,
+    ...update,
+    schemaVersion: JOB_SCHEMA_VERSION,
+    revision: previous.revision + 1,
+    updatedAt: new Date().toISOString(),
+  };
+  // Keep the conditional read, revision update, state replacement, and lock
+  // cleanup in one remote process. A lost SSH channel can no longer strand a
+  // client-held lock between independent SFTP operations.
+  return capabilities.platform === "windows"
+    ? writeWindowsRemoteState(sessionId, jobDirectory, previous, next)
+    : writePosixRemoteState(sessionId, jobDirectory, previous, next);
 };
 
 const getUnitName = (jobId: string): string =>
@@ -603,7 +797,10 @@ const runShell = (
   timeoutMs = 15_000,
   signal?: AbortSignal
 ): Promise<string> =>
-  executeSshCommand(sessionId, `sh -lc ${shellQuote(script)}`, { timeoutMs, signal });
+  executeSshCommand(sessionId, `sh -lc ${shellQuote(script)}`, {
+    timeoutMs,
+    signal,
+  });
 
 const runConfirmedLaunchShell = async (
   sessionId: string,
@@ -625,7 +822,9 @@ const runConfirmedLaunchShell = async (
   );
   const match = output.match(new RegExp(`\\n${marker}:(\\d+)\\n?$`));
   if (!match) {
-    throw new Error("Remote Job backend launch acknowledgement was not confirmed");
+    throw new Error(
+      "Remote Job backend launch acknowledgement was not confirmed"
+    );
   }
   const status = Number(match[1]);
   if (status !== 0) {
@@ -647,8 +846,7 @@ const withSystemdUserEnvironment = (command: string): string =>
 const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
   "snow-agent": {
     kind: "snow-agent",
-    isAvailable: (capabilities) => capabilities.posixShell,
-    supportsInteractiveAttach: true,
+    isAvailable: canUseSnowAgent,
     async launch(context): Promise<void> {
       await launchSnowAgentJob(
         context.sessionId,
@@ -679,15 +877,20 @@ const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
     async launch(context): Promise<void> {
       const unit = getUnitName(context.jobId);
       const timeoutSeconds = Math.max(1, Math.ceil(context.timeoutMs / 1000));
+      // The runner owns timeout handling and needs time to stop the command
+      // group before atomically recording its terminal state.
+      const runtimeMaxSeconds = timeoutSeconds + SYSTEMD_RUNTIME_GRACE_SECONDS;
       await runConfirmedLaunchShell(
         context.sessionId,
-        withSystemdUserEnvironment([
-          "systemd-run --user --no-block --quiet",
-          `--unit ${shellQuote(unit)}`,
-          `--property=${shellQuote(`RuntimeMaxSec=${timeoutSeconds}`)}`,
-          `--property=${shellQuote("KillMode=control-group")}`,
-          `/bin/sh ${shellQuote(`${context.jobDirectory}/runner.sh`)}`,
-        ].join(" ")),
+        withSystemdUserEnvironment(
+          [
+            "systemd-run --user --no-block --quiet",
+            `--unit ${shellQuote(unit)}`,
+            `--property=${shellQuote(`RuntimeMaxSec=${runtimeMaxSeconds}`)}`,
+            `--property=${shellQuote("KillMode=control-group")}`,
+            `/bin/sh ${shellQuote(`${context.jobDirectory}/runner.sh`)}`,
+          ].join(" ")
+        ),
         context.signal
       );
     },
@@ -707,7 +910,9 @@ const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
       await runShell(
         context.sessionId,
         withSystemdUserEnvironment(
-          `systemctl --user stop ${shellQuote(getUnitName(context.jobId))} || true`
+          `systemctl --user stop ${shellQuote(
+            getUnitName(context.jobId)
+          )} || true`
         )
       );
     },
@@ -715,7 +920,6 @@ const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
   tmux: {
     kind: "tmux",
     isAvailable: (capabilities) => capabilities.tmux,
-    supportsInteractiveAttach: true,
     async launch(context): Promise<void> {
       await runConfirmedLaunchShell(
         context.sessionId,
@@ -789,37 +993,12 @@ const remoteBackends: Record<RemoteJobBackendKind, RemoteJobBackend> = {
       }
     },
   },
-  "windows-job": {
-    kind: "windows-job",
-    isAvailable: isWindowsRemote,
-    async launch(context): Promise<void> {
-      await launchWindowsRemoteJob(
-        context.sessionId,
-        `${context.jobDirectory}/runner.ps1`,
-        context.jobId,
-        context.signal
-      );
-    },
-    async inspect(context): Promise<"active" | "inactive"> {
-      const state = await readRemoteState(
-        context.sessionId,
-        context.jobDirectory,
-        context.jobId
-      );
-      return inspectWindowsRemoteJob(context.sessionId, state.runnerPid);
-    },
-    async cancel(context): Promise<void> {
-      const state = await readRemoteState(
-        context.sessionId,
-        context.jobDirectory,
-        context.jobId
-      );
-      await cancelWindowsRemoteJob(context.sessionId, state.runnerPid);
-    },
-  },
 };
 
-const buildCommandScript = (workingDirectory: string, command: string): string =>
+const buildCommandScript = (
+  workingDirectory: string,
+  command: string
+): string =>
   [
     "#!/bin/sh",
     "set -eu",
@@ -828,148 +1007,174 @@ const buildCommandScript = (workingDirectory: string, command: string): string =
     "",
   ].join("\n");
 
-const buildRunnerScript = (jobId: string, createdAt: string): string => [
-  "#!/bin/sh",
-  "set -eu",
-  'job_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)',
-  `job_id=${shellQuote(jobId)}`,
-  `created_at=${shellQuote(createdAt)}`,
-  'backend=$(cat "$job_dir/backend")',
-  'timeout_ms=$(cat "$job_dir/timeout-ms")',
-  'log_path="$job_dir/output.log"',
-  'revision_path="$job_dir/revision"',
-  'state_lock="$job_dir/state.lock"',
-  'runner_pid="$$"',
-  'printf "%s\\n" "$runner_pid" > "$job_dir/runner.pid"',
-  "chmod 600 \"$job_dir/runner.pid\" 2>/dev/null || true",
-  "ulimit -f 102400 2>/dev/null || true",
-  "acquire_state_lock() {",
-  '  i=0',
-  '  while ! mkdir -- "$state_lock" 2>/dev/null; do',
-  '    i=$((i + 1))',
-  `    if [ "$i" -ge ${STATE_LOCK_ATTEMPTS} ]; then return 75; fi`,
-  '    sleep 0.025',
-  '  done',
-  "}",
-  "release_state_lock() {",
-  '  rmdir -- "$state_lock" 2>/dev/null || true',
-  "}",
-  "next_revision() {",
-  '  current=$(cat "$revision_path" 2>/dev/null || printf 0)',
-  '  current=$((current + 1))',
-  '  printf "%s\\n" "$current" > "$revision_path"',
-  '  printf "%s" "$current"',
-  "}",
-  "write_state() {",
-  '  status="$1"',
-  '  exit_code="${2:-null}"',
-  '  reason="${3:-}"',
-  '  acquire_state_lock',
-  "  if [ -f \"$job_dir/state.json\" ] && grep -Eq '\"status\":\"(succeeded|failed|timed_out|cancelled|lost|launch_failed|indeterminate)\"' \"$job_dir/state.json\"; then",
-  '    release_state_lock',
-  '    return 0',
-  '  fi',
-  '  revision=$(next_revision)',
-  '  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")',
-  '  completed=""',
-  '  case "$status" in succeeded|failed|timed_out|cancelled|lost|launch_failed|indeterminate) completed=",\\"completedAt\\":\\"$now\\"" ;; esac',
-  '  reason_json=""',
-  '  if [ -n "$reason" ]; then reason_json=",\\"reason\\":\\"$reason\\"" ; fi',
-  '  printf "{\\"schemaVersion\\":1,\\"jobId\\":\\"%s\\",\\"status\\":\\"%s\\",\\"revision\\":%s,\\"backend\\":\\"%s\\",\\"runnerPid\\":%s,\\"createdAt\\":\\"%s\\",\\"updatedAt\\":\\"%s\\"%s%s,\\"exitCode\\":%s}\\n" "$job_id" "$status" "$revision" "$backend" "$runner_pid" "$created_at" "$now" "$completed" "$reason_json" "$exit_code" > "$job_dir/state.json.tmp"',
-  '  mv -f -- "$job_dir/state.json.tmp" "$job_dir/state.json"',
-  '  release_state_lock',
-  "}",
-  'write_state launching null ""',
-  'write_state running null ""',
-  'if [ -f "$job_dir/cancel.request" ]; then',
-  '  write_state cancelled null "cancelled before command start"',
-  '  exit 0',
-  "fi",
-  'timeout_seconds=$(( (timeout_ms + 999) / 1000 ))',
-  "signal_command_group() {",
-  '  signal="$1"',
-  '  if [ -x /bin/kill ]; then',
-  '    /bin/kill -"$signal" -- "-$command_pgid" 2>/dev/null || true',
-  '  elif [ -x /usr/bin/kill ]; then',
-  '    /usr/bin/kill -"$signal" -- "-$command_pgid" 2>/dev/null || true',
-  '  else',
-  '    kill -"$signal" "-$command_pgid" 2>/dev/null || true',
-  '  fi',
-  "}",
-  "terminate_command_group() {",
-  '  signal="$1"',
-  '  signal_command_group "$signal"',
-  "}",
-  "command_group_active() {",
-  '  if [ -x /bin/kill ]; then',
-  '    /bin/kill -0 -- "-$command_pgid" 2>/dev/null',
-  '  elif [ -x /usr/bin/kill ]; then',
-  '    /usr/bin/kill -0 -- "-$command_pgid" 2>/dev/null',
-  '  else',
-  '    kill -0 "-$command_pgid" 2>/dev/null',
-  '  fi',
-  "}",
-  'setsid /bin/sh "$job_dir/command.sh" >> "$log_path" 2>&1 &',
-  'command_pid="$!"',
-  'command_pgid="$command_pid"',
-  'printf "%s\\n" "$command_pid" > "$job_dir/command.pid"',
-  'printf "%s\\n" "$command_pgid" > "$job_dir/command.pgid"',
-  '( sleep "$timeout_seconds"; touch "$job_dir/timeout.request" ) &',
-  'watchdog_pid="$!"',
-  'cancelled=0',
-  'timed_out=0',
-  'termination_deadline=0',
-  'while command_group_active; do',
-  '  if [ -f "$job_dir/timeout.request" ] && [ "$timed_out" -eq 0 ]; then',
-  '    timed_out=1',
-  `    termination_deadline=$(( $(date +%s) + ${POSIX_CANCEL_GRACE_SECONDS} ))`,
-  '    terminate_command_group TERM',
-  '  elif [ -f "$job_dir/cancel.request" ] && [ "$cancelled" -eq 0 ] && [ "$timed_out" -eq 0 ]; then',
-  '    cancelled=1',
-  `    termination_deadline=$(( $(date +%s) + ${POSIX_CANCEL_GRACE_SECONDS} ))`,
-  '    terminate_command_group TERM',
-  '  elif [ "$termination_deadline" -gt 0 ] && [ "$(date +%s)" -ge "$termination_deadline" ]; then',
-  '    terminate_command_group KILL',
-  '    termination_deadline=$(( $(date +%s) + 1 ))',
-  "  fi",
-  `  sleep ${POSIX_RUNNER_POLL_SECONDS}`,
-  "done",
-  'wait "$command_pid" || command_exit_code="$?"',
-  'command_exit_code="${command_exit_code:-0}"',
-  'kill "$watchdog_pid" 2>/dev/null || true',
-  'wait "$watchdog_pid" 2>/dev/null || true',
-  'if [ -f "$job_dir/timeout.request" ]; then',
-  '  write_state timed_out "$command_exit_code" "timeout"',
-  'elif [ "$cancelled" -eq 1 ] || [ -f "$job_dir/cancel.request" ]; then',
-  '  write_state cancelled "$command_exit_code" "cancelled"',
-  'elif [ "$command_exit_code" -eq 0 ]; then',
-  '  write_state succeeded 0 ""',
-  "else",
-  '  write_state failed "$command_exit_code" "exit"',
-  "fi",
-  "",
-].join("\n");
+const buildRunnerScript = (jobId: string, createdAt: string): string =>
+  [
+    "#!/bin/sh",
+    "set -eu",
+    'job_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)',
+    `job_id=${shellQuote(jobId)}`,
+    `created_at=${shellQuote(createdAt)}`,
+    'backend=$(cat "$job_dir/backend")',
+    'timeout_ms=$(cat "$job_dir/timeout-ms")',
+    'log_path="$job_dir/output.log"',
+    'revision_path="$job_dir/revision"',
+    'state_lock="$job_dir/state.lock"',
+    'state_lock_owner="$state_lock/owner"',
+    'state_lock_reclaim="$state_lock/reclaim"',
+    'state_lock_owner_id="$job_id:$$:$(date +%s)"',
+    `state_lock_stale_seconds=${STATE_LOCK_STALE_SECONDS}`,
+    "state_lock_held=0",
+    'runner_pid="$$"',
+    'printf "%s\\n" "$runner_pid" > "$job_dir/runner.pid"',
+    'chmod 600 "$job_dir/runner.pid" 2>/dev/null || true',
+    "ulimit -f 102400 2>/dev/null || true",
+    "owns_state_lock() {",
+    '  [ -f "$state_lock_owner" ] || return 1',
+    '  [ ! -e "$state_lock_reclaim" ] || return 1',
+    '  [ "$(sed -n \'1p\' "$state_lock_owner" 2>/dev/null || true)" = "$state_lock_owner_id" ]',
+    "}",
+    "release_state_lock() {",
+    '  if [ "$state_lock_held" -eq 1 ] && owns_state_lock; then',
+    '    rm -f -- "$state_lock_owner" 2>/dev/null || true',
+    '    rmdir -- "$state_lock" 2>/dev/null || true',
+    "  fi",
+    "  state_lock_held=0",
+    "}",
+    "trap 'release_state_lock' EXIT",
+    "trap 'exit 128' HUP INT TERM",
+    "state_lock_is_stale() {",
+    '  [ -f "$state_lock_owner" ] || return 0',
+    "  lock_owner_pid=$(sed -n '2p' \"$state_lock_owner\" 2>/dev/null || true)",
+    "  lock_owner_started=$(sed -n '3p' \"$state_lock_owner\" 2>/dev/null || true)",
+    '  case "$lock_owner_pid" in ""|*[!0-9]*) return 0 ;; esac',
+    '  case "$lock_owner_started" in ""|*[!0-9]*) return 0 ;; esac',
+    "  lock_now=$(date +%s)",
+    '  [ "$lock_now" -ge "$lock_owner_started" ] || return 1',
+    '  [ $((lock_now - lock_owner_started)) -ge "$state_lock_stale_seconds" ] || return 1',
+    '  kill -0 "$lock_owner_pid" 2>/dev/null && return 1',
+    "  return 0",
+    "}",
+    "reclaim_stale_state_lock() {",
+    '  mkdir -- "$state_lock_reclaim" 2>/dev/null || return 1',
+    '  if ! state_lock_is_stale; then rmdir -- "$state_lock_reclaim" 2>/dev/null || true; return 1; fi',
+    '  rm -f -- "$state_lock_owner" 2>/dev/null || true',
+    '  rmdir -- "$state_lock_reclaim" 2>/dev/null || return 1',
+    '  rmdir -- "$state_lock" 2>/dev/null',
+    "}",
+    "acquire_state_lock() {",
+    "  i=0",
+    `  while [ "$i" -lt ${STATE_LOCK_ATTEMPTS} ]; do`,
+    "    if owns_state_lock; then state_lock_held=1; return 0; fi",
+    '    if mkdir -- "$state_lock" 2>/dev/null; then',
+    "      lock_now=$(date +%s)",
+    '      (umask 077; printf "%s\\n%s\\n%s\\n" "$state_lock_owner_id" "$$" "$lock_now" > "$state_lock_owner")',
+    "      if owns_state_lock; then state_lock_held=1; return 0; fi",
+    "    else",
+    "      reclaim_stale_state_lock || true",
+    "    fi",
+    "    i=$((i + 1))",
+    "    sleep 0.025",
+    "  done",
+    "  return 75",
+    "}",
+    "next_revision() {",
+    '  current=$(cat "$revision_path" 2>/dev/null || printf 0)',
+    "  current=$((current + 1))",
+    '  printf "%s\\n" "$current" > "$revision_path"',
+    '  printf "%s" "$current"',
+    "}",
+    "write_state() {",
+    '  status="$1"',
+    '  exit_code="${2:-null}"',
+    '  reason="${3:-}"',
+    "  acquire_state_lock || return $?",
+    '  if [ -f "$job_dir/state.json" ] && grep -Eq \'"status":"(succeeded|failed|timed_out|cancelled|lost|launch_failed|indeterminate)"\' "$job_dir/state.json"; then',
+    "    release_state_lock",
+    "    return 0",
+    "  fi",
+    "  revision=$(next_revision)",
+    '  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")',
+    '  completed=""',
+    '  case "$status" in succeeded|failed|timed_out|cancelled|lost|launch_failed|indeterminate) completed=",\\"completedAt\\":\\"$now\\"" ;; esac',
+    '  reason_json=""',
+    '  if [ -n "$reason" ]; then reason_json=",\\"reason\\":\\"$reason\\"" ; fi',
+    '  printf "{\\"schemaVersion\\":1,\\"jobId\\":\\"%s\\",\\"status\\":\\"%s\\",\\"revision\\":%s,\\"backend\\":\\"%s\\",\\"runnerPid\\":%s,\\"createdAt\\":\\"%s\\",\\"updatedAt\\":\\"%s\\"%s%s,\\"exitCode\\":%s}\\n" "$job_id" "$status" "$revision" "$backend" "$runner_pid" "$created_at" "$now" "$completed" "$reason_json" "$exit_code" > "$job_dir/state.json.tmp"',
+    '  mv -f -- "$job_dir/state.json.tmp" "$job_dir/state.json"',
+    "  release_state_lock",
+    "}",
+    'write_state launching null ""',
+    'write_state running null ""',
+    'if [ -f "$job_dir/cancel.request" ]; then',
+    '  write_state cancelled null "cancelled before command start"',
+    "  exit 0",
+    "fi",
+    "timeout_seconds=$(( (timeout_ms + 999) / 1000 ))",
+    "signal_command_group() {",
+    '  signal="$1"',
+    "  if [ -x /bin/kill ]; then",
+    '    /bin/kill -"$signal" -- "-$command_pgid" 2>/dev/null || true',
+    "  elif [ -x /usr/bin/kill ]; then",
+    '    /usr/bin/kill -"$signal" -- "-$command_pgid" 2>/dev/null || true',
+    "  else",
+    '    kill -"$signal" "-$command_pgid" 2>/dev/null || true',
+    "  fi",
+    "}",
+    "terminate_command_group() {",
+    '  signal="$1"',
+    '  signal_command_group "$signal"',
+    "}",
+    "command_group_active() {",
+    "  if [ -x /bin/kill ]; then",
+    '    /bin/kill -0 -- "-$command_pgid" 2>/dev/null',
+    "  elif [ -x /usr/bin/kill ]; then",
+    '    /usr/bin/kill -0 -- "-$command_pgid" 2>/dev/null',
+    "  else",
+    '    kill -0 "-$command_pgid" 2>/dev/null',
+    "  fi",
+    "}",
+    'setsid /bin/sh "$job_dir/command.sh" >> "$log_path" 2>&1 &',
+    'command_pid="$!"',
+    'command_pgid="$command_pid"',
+    'printf "%s\\n" "$command_pid" > "$job_dir/command.pid"',
+    'printf "%s\\n" "$command_pgid" > "$job_dir/command.pgid"',
+    '( sleep "$timeout_seconds"; touch "$job_dir/timeout.request" ) &',
+    'watchdog_pid="$!"',
+    "cancelled=0",
+    "timed_out=0",
+    "termination_deadline=0",
+    "while command_group_active; do",
+    '  if [ -f "$job_dir/timeout.request" ] && [ "$timed_out" -eq 0 ]; then',
+    "    timed_out=1",
+    `    termination_deadline=$(( $(date +%s) + ${POSIX_CANCEL_GRACE_SECONDS} ))`,
+    "    terminate_command_group TERM",
+    '  elif [ -f "$job_dir/cancel.request" ] && [ "$cancelled" -eq 0 ] && [ "$timed_out" -eq 0 ]; then',
+    "    cancelled=1",
+    `    termination_deadline=$(( $(date +%s) + ${POSIX_CANCEL_GRACE_SECONDS} ))`,
+    "    terminate_command_group TERM",
+    '  elif [ "$termination_deadline" -gt 0 ] && [ "$(date +%s)" -ge "$termination_deadline" ]; then',
+    "    terminate_command_group KILL",
+    "    termination_deadline=$(( $(date +%s) + 1 ))",
+    "  fi",
+    `  sleep ${POSIX_RUNNER_POLL_SECONDS}`,
+    "done",
+    'wait "$command_pid" || command_exit_code="$?"',
+    'command_exit_code="${command_exit_code:-0}"',
+    'kill "$watchdog_pid" 2>/dev/null || true',
+    'wait "$watchdog_pid" 2>/dev/null || true',
+    'if [ -f "$job_dir/timeout.request" ]; then',
+    '  write_state timed_out "$command_exit_code" "timeout"',
+    'elif [ "$cancelled" -eq 1 ] || [ -f "$job_dir/cancel.request" ]; then',
+    '  write_state cancelled "$command_exit_code" "cancelled"',
+    'elif [ "$command_exit_code" -eq 0 ]; then',
+    '  write_state succeeded 0 ""',
+    "else",
+    '  write_state failed "$command_exit_code" "exit"',
+    "fi",
+    "",
+  ].join("\n");
 
 const backendProbeScript = (markerPath: string): string =>
   `sleep 1; printf ok > ${shellQuote(markerPath)}`;
-
-const windowsBackendProbeScript = (
-  startedMarkerPath: string,
-  markerPath: string,
-  taskName: string
-): string =>
-  // Avoid first-use PowerShell module loading in a probe that runs as a new
-  // OpenSSH user. The test still writes only after the launching session ends.
-  [
-    "try {",
-    "  [System.Threading.Thread]::Sleep(750)",
-    `  [System.IO.File]::WriteAllText('${startedMarkerPath.replace(/'/g, "''")}', \"$PID|$env:USERNAME\", [System.Text.Encoding]::ASCII)`,
-    "  [System.Threading.Thread]::Sleep(1000)",
-    `  [System.IO.File]::WriteAllText('${markerPath.replace(/'/g, "''")}', 'ok', [System.Text.Encoding]::ASCII)`,
-    "} finally {",
-    `  & schtasks.exe /Delete /TN '${taskName.replace(/'/g, "''")}' /F 2>$null | Out-Null`,
-    "}",
-  ].join("\r\n");
 
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -977,13 +1182,15 @@ const wait = (milliseconds: number): Promise<void> =>
 const verifyBackendLiveness = async (
   workspacePath: string,
   backend: RemoteJobBackend,
-  capabilities: SshCapabilities
+  capabilities: SshCapabilities,
+  mode: RemoteJobMode
 ): Promise<boolean> => {
   if (!backend.isAvailable(capabilities)) {
     return false;
   }
-  const cacheKey = `${workspacePath}|${backend.kind}`;
-  const cachedUntil = BACKEND_PROBE_CACHE.get(cacheKey);
+  const cacheKey = `${workspacePath}|${backend.kind}|${mode}`;
+  const cachedUntil =
+    mode === "interactive" ? undefined : BACKEND_PROBE_CACHE.get(cacheKey);
   if (cachedUntil && cachedUntil > Date.now()) {
     return true;
   }
@@ -991,27 +1198,138 @@ const verifyBackendLiveness = async (
   const probeId = randomUUID();
   try {
     if (backend.kind === "snow-agent") {
-      await withSshSession(workspacePath, async (sessionId) => {
-        await negotiateSnowAgent(sessionId, capabilities);
-        await probeSnowAgentLiveness(sessionId, capabilities);
+      const initial = await withSshSession(workspacePath, async (sessionId) => {
+        const agent = await negotiateSnowAgent(sessionId, capabilities);
+        if (mode === "interactive") {
+          try {
+            await probeSshPty(sessionId);
+          } catch (error) {
+            throw new RemoteJobUnavailableError(
+              "PTY_UNAVAILABLE",
+              `SSH server did not permit PTY allocation: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+          }
+          if (!supportsSnowAgentInteractiveAttach(agent.capabilities)) {
+            throw new RemoteJobUnavailableError(
+              "PTY_UNAVAILABLE",
+              "The signed Snow Agent does not support interactive attach protocol v1"
+            );
+          }
+          const interactiveCacheKey = `${cacheKey}|${agent.artifactSha256}|${agent.capabilities.interactiveAttachProtocolVersion}`;
+          const cachedUntil = BACKEND_PROBE_CACHE.get(interactiveCacheKey);
+          if (cachedUntil && cachedUntil > Date.now()) {
+            return {
+              agent,
+              interactive: undefined,
+              batch: undefined,
+              interactiveCached: true,
+              interactiveCacheKey,
+            };
+          }
+          return {
+            agent,
+            interactive: await startSnowAgentInteractiveProbe(
+              sessionId,
+              capabilities
+            ),
+            batch: undefined,
+            interactiveCached: false,
+            interactiveCacheKey,
+          };
+        }
+        return {
+          agent,
+          batch: await startSnowAgentLivenessProbe(sessionId, capabilities),
+          interactive: undefined,
+          interactiveCached: false,
+          interactiveCacheKey: undefined,
+        };
       });
-      BACKEND_PROBE_CACHE.set(cacheKey, Date.now() + BACKEND_PROBE_CACHE_MS);
+      await withSshSession(workspacePath, async (sessionId) => {
+        if (initial.interactiveCached) {
+          return;
+        }
+        if (initial.interactive) {
+          const deadline = Date.now() + 3_000;
+          let lastError: unknown;
+          while (Date.now() < deadline) {
+            try {
+              await verifySnowAgentInteractiveProbe(
+                sessionId,
+                capabilities,
+                initial.interactive
+              );
+              BACKEND_PROBE_CACHE.set(
+                initial.interactiveCacheKey!,
+                Date.now() + BACKEND_PROBE_CACHE_MS
+              );
+              return;
+            } catch (error) {
+              lastError = error;
+              await wait(125);
+            }
+          }
+          throw new RemoteJobUnavailableError(
+            "DISCONNECT_PROBE_FAILED",
+            `Snow Agent PTY disconnect probe failed: ${
+              lastError instanceof Error ? lastError.message : String(lastError)
+            }`
+          );
+        }
+        const probe = initial.batch;
+        if (!probe) {
+          throw new Error(
+            "snow-agent liveness probe did not return a batch receipt"
+          );
+        }
+        const root = await getRemoteJobRoot(sessionId, capabilities);
+        const marker = `${root}/.snow-agent-self-test-${probe.probeId}`;
+        const deadline = Date.now() + 3_000;
+        try {
+          while (Date.now() < deadline) {
+            if (await remotePathExists(sessionId, marker)) {
+              const content = await readSshFile(sessionId, marker);
+              if (content.toString("utf8") === probe.markerToken) {
+                return;
+              }
+              throw new Error(
+                "snow-agent disconnect-survival marker token mismatched"
+              );
+            }
+            await wait(125);
+          }
+          throw new Error(
+            "snow-agent detached runner did not write its marker after the SSH disconnect"
+          );
+        } finally {
+          await runShell(sessionId, `rm -f -- ${shellQuote(marker)}`).catch(
+            () => undefined
+          );
+        }
+      });
+      if (mode === "batch") {
+        BACKEND_PROBE_CACHE.set(cacheKey, Date.now() + BACKEND_PROBE_CACHE_MS);
+      }
       return true;
     }
     await withSshSession(workspacePath, async (sessionId) => {
       const root = await getRemoteJobRoot(sessionId, capabilities);
       const marker = `${root}/.backend-probe-${probeId}`;
-      const startedMarker = `${marker}.started`;
-      const windowsProbeScriptPath = `${marker}.ps1`;
       const probeScript = backendProbeScript(marker);
       if (backend.kind === "systemd-user") {
         await runShell(
           sessionId,
-          withSystemdUserEnvironment([
-            "exec systemd-run --user --no-block --quiet",
-            `--unit ${shellQuote(`snow-app-probe-${probeId.replace(/-/g, "")}`)}`,
-            `/bin/sh -lc ${shellQuote(probeScript)}`,
-          ].join(" "))
+          withSystemdUserEnvironment(
+            [
+              "exec systemd-run --user --no-block --quiet",
+              `--unit ${shellQuote(
+                `snow-app-probe-${probeId.replace(/-/g, "")}`
+              )}`,
+              `/bin/sh -lc ${shellQuote(probeScript)}`,
+            ].join(" ")
+          )
         );
       } else if (backend.kind === "tmux") {
         await runShell(
@@ -1021,18 +1339,6 @@ const verifyBackendLiveness = async (
             `-s ${shellQuote(`snow-probe-${probeId.replace(/-/g, "")}`)}`,
             `/bin/sh -lc ${shellQuote(probeScript)}`,
           ].join(" ")
-        );
-      } else if (backend.kind === "windows-job") {
-        const taskName = getWindowsRemoteJobTaskName(`probe-${probeId}`);
-        await writeInternalSshFile(
-          sessionId,
-          windowsProbeScriptPath,
-          windowsBackendProbeScript(startedMarker, marker, taskName)
-        );
-        await launchWindowsDetachedPowerShell(
-          sessionId,
-          taskName,
-          windowsProbeScriptPath
         );
       } else {
         await runShell(
@@ -1046,55 +1352,19 @@ const verifyBackendLiveness = async (
     await withSshSession(workspacePath, async (sessionId) => {
       const root = await getRemoteJobRoot(sessionId, capabilities);
       const marker = `${root}/.backend-probe-${probeId}`;
-      const startedMarker = `${marker}.started`;
-      const windowsProbeScriptPath = `${marker}.ps1`;
-      const deadline =
-        Date.now() +
-        (backend.kind === "windows-job"
-          ? WINDOWS_BACKEND_PROBE_TIMEOUT_MS
-          : 1_250);
+      const deadline = Date.now() + 1_250;
       while (Date.now() < deadline) {
         if (await remotePathExists(sessionId, marker)) {
           const content = await readSshFile(sessionId, marker);
           if (content.toString("utf8") === "ok") {
-            if (capabilities.platform === "windows") {
-              await removeWindowsRemotePath(sessionId, marker);
-              await removeWindowsRemotePath(sessionId, startedMarker).catch(
-                () => undefined
-              );
-              await removeWindowsRemotePath(sessionId, windowsProbeScriptPath).catch(
-                () => undefined
-              );
-            } else {
-              await runShell(sessionId, `rm -f -- ${shellQuote(marker)}`);
-            }
+            await runShell(sessionId, `rm -f -- ${shellQuote(marker)}`);
             return;
           }
         }
-        await wait(
-          backend.kind === "windows-job" ? WINDOWS_BACKEND_PROBE_POLL_MS : 125
-        );
-      }
-      let diagnostic = "detached process did not start after the SSH disconnect";
-      if (
-        backend.kind === "windows-job" &&
-        (await remotePathExists(sessionId, startedMarker))
-      ) {
-        const started = (await readSshFile(sessionId, startedMarker))
-          .toString("utf8")
-          .trim();
-        await removeWindowsRemotePath(sessionId, startedMarker).catch(
-          () => undefined
-        );
-        diagnostic = `detached process started after disconnect (${started || "identity unavailable"}) but did not finish`;
-      }
-      if (backend.kind === "windows-job") {
-        await removeWindowsRemotePath(sessionId, windowsProbeScriptPath).catch(
-          () => undefined
-        );
+        await wait(125);
       }
       throw new Error(
-        `Remote backend did not survive the SSH disconnect: ${diagnostic}`
+        "Remote backend did not survive the SSH disconnect: detached process did not start"
       );
     });
     BACKEND_PROBE_CACHE.set(cacheKey, Date.now() + BACKEND_PROBE_CACHE_MS);
@@ -1102,26 +1372,40 @@ const verifyBackendLiveness = async (
     return true;
   } catch (error) {
     const reason =
-      error instanceof Error ? error.message.slice(0, 240) : String(error).slice(0, 240);
-    BACKEND_PROBE_FAILURES.set(
-      cacheKey,
-      reason
-    );
+      error instanceof Error
+        ? error.message.slice(0, 240)
+        : String(error).slice(0, 240);
+    BACKEND_PROBE_FAILURES.set(cacheKey, reason);
     return false;
   }
 };
 
 const selectBackend = async (
   workspacePath: string,
-  requested: RemoteJobBackendKind | undefined
+  requested: RemoteJobBackendKind | undefined,
+  mode: RemoteJobMode
 ): Promise<RemoteJobBackend> => {
   const capabilities = await withSshSession(workspacePath, async (sessionId) =>
     probeSshCapabilities(sessionId)
   );
-  const candidates = requested
-    ? [remoteBackends[requested]]
-    : capabilities.platform === "windows"
-      ? [remoteBackends["windows-job"]]
+  assertDurableJobPlatformSupported(capabilities.platform);
+  if (mode === "interactive" && requested && requested !== "snow-agent") {
+    throw new RemoteJobUnavailableError(
+      "PTY_UNAVAILABLE",
+      "Interactive Remote Jobs require the signed Snow Agent PTY broker"
+    );
+  }
+  if (mode === "interactive" && !canUseSnowAgent(capabilities)) {
+    throw new RemoteJobUnavailableError(
+      "UNSUPPORTED_ARCH",
+      "Interactive Remote Jobs support Linux x86_64 and aarch64 only"
+    );
+  }
+  const candidates =
+    mode === "interactive"
+      ? [remoteBackends["snow-agent"]]
+      : requested
+      ? [remoteBackends[requested]]
       : [
           remoteBackends["snow-agent"],
           remoteBackends["systemd-user"],
@@ -1129,13 +1413,31 @@ const selectBackend = async (
           remoteBackends["posix-detach"],
         ];
   for (const backend of candidates) {
-    if (await verifyBackendLiveness(workspacePath, backend, capabilities)) {
+    if (
+      await verifyBackendLiveness(workspacePath, backend, capabilities, mode)
+    ) {
       return backend;
     }
   }
-  const probeFailure = requested
-    ? BACKEND_PROBE_FAILURES.get(`${workspacePath}|${requested}`)
+  const probedBackend =
+    requested ?? (mode === "interactive" ? "snow-agent" : undefined);
+  const probeFailure = probedBackend
+    ? BACKEND_PROBE_FAILURES.get(`${workspacePath}|${probedBackend}|${mode}`)
     : undefined;
+  if (mode === "interactive") {
+    const recognizedCode =
+      /^\[(UNSUPPORTED_ARCH|SFTP_UNAVAILABLE|AGENT_HOME_NOEXEC|PTY_UNAVAILABLE|SIGNATURE_INVALID|RELEASE_DOWNLOAD_FAILED|CONTROLLER_BUSY|DISCONNECT_PROBE_FAILED)\]/.exec(
+        probeFailure ?? ""
+      );
+    const code = recognizedCode?.[1] ?? "DISCONNECT_PROBE_FAILED";
+    const detail = recognizedCode
+      ? (probeFailure ?? "").slice(recognizedCode[0].length).trimStart()
+      : probeFailure;
+    throw new RemoteJobUnavailableError(
+      code,
+      `Interactive Snow Agent is unavailable${detail ? `: ${detail}` : ""}`
+    );
+  }
   throw new Error(
     requested
       ? `Remote Job backend ${requested} is unavailable or failed disconnect verification${
@@ -1162,12 +1464,24 @@ const getRemoteOutput = async (
   });
 };
 
+const classifyRemoteJobFileTransferError = (error: unknown): never => {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/sftp|remote file|write stream|ssh session not found/i.test(message)) {
+    throw new RemoteJobUnavailableError(
+      "REMOTE_FILE_TRANSFER_UNAVAILABLE",
+      `Remote Job requires SFTP to create its protected task directory: ${message}`
+    );
+  }
+  throw error;
+};
+
 const buildBinding = (params: {
   jobId: string;
   workspacePath: string;
   workspaceId: string;
   command: string;
   backend: RemoteJobBackendKind;
+  mode: RemoteJobMode;
   jobTokenHash: string;
   createdAt: string;
   cancellationPolicy: RemoteJobCancellationPolicy;
@@ -1181,6 +1495,7 @@ const buildBinding = (params: {
   commandHash: commandHash(params.command),
   displayCommand: summarizeCommand(),
   backend: params.backend,
+  mode: params.mode,
   cancellationPolicy: params.cancellationPolicy,
   jobTokenHash: params.jobTokenHash,
   createdAt: params.createdAt,
@@ -1194,6 +1509,7 @@ const buildBinding = (params: {
 
 const readExistingJob = async (
   sessionId: string,
+  capabilities: SshCapabilities,
   jobDirectory: string,
   expected: RemoteJobBinding,
   trustedJobTokenHash?: string
@@ -1206,9 +1522,12 @@ const readExistingJob = async (
   if (
     manifest.jobId !== expected.jobId ||
     manifest.commandHash !== expected.commandHash ||
-    manifest.workspacePath !== expected.workspacePath
+    manifest.workspacePath !== expected.workspacePath ||
+    modeFromStoredValue(manifest.mode) !== expected.mode
   ) {
-    throw new Error("JOB_ID_COLLISION: jobId already belongs to another command");
+    throw new Error(
+      "JOB_ID_COLLISION: jobId already belongs to another command"
+    );
   }
   if (
     typeof manifest.jobTokenHash !== "string" ||
@@ -1217,9 +1536,17 @@ const readExistingJob = async (
     throw new Error("Remote Job manifest has an invalid cleanup token");
   }
   if (trustedJobTokenHash && manifest.jobTokenHash !== trustedJobTokenHash) {
-    throw new Error("JOB_ID_COLLISION: jobId cleanup token does not match the local Binding");
+    throw new Error(
+      "JOB_ID_COLLISION: jobId cleanup token does not match the local Binding"
+    );
   }
-  const state = await readRemoteState(sessionId, jobDirectory, expected.jobId);
+  const state = await recoverStaleSnowAgentLaunch(
+    sessionId,
+    capabilities,
+    jobDirectory,
+    expected.jobId,
+    await readRemoteState(sessionId, jobDirectory, expected.jobId)
+  );
   return {
     ...expected,
     jobTokenHash: manifest.jobTokenHash,
@@ -1233,6 +1560,7 @@ const readExistingJob = async (
     cancellationPolicy: isCancellationPolicy(manifest.cancellationPolicy)
       ? manifest.cancellationPolicy
       : expected.cancellationPolicy ?? "cancel_remote",
+    mode: modeFromStoredValue(manifest.mode ?? state.mode),
     status: state.status,
     revision: state.revision,
     updatedAt: state.updatedAt,
@@ -1262,15 +1590,22 @@ export const startRemoteJob = async (
   if (request.backend !== undefined && !isBackendKind(request.backend)) {
     throw new Error("Unknown Remote Job backend");
   }
+  if (request.mode !== undefined && !isRemoteJobMode(request.mode)) {
+    throw new Error("Unknown Remote Job mode");
+  }
   const timeoutMs = normalizeTimeout(request.timeoutMs);
+  const mode = request.mode ?? "batch";
   const existingBinding = getBinding(jobId);
   const requestedCommandHash = commandHash(command);
   if (
     existingBinding &&
     (existingBinding.workspacePath !== workspacePath ||
-      existingBinding.commandHash !== requestedCommandHash)
+      existingBinding.commandHash !== requestedCommandHash ||
+      existingBinding.mode !== mode)
   ) {
-    throw new Error("JOB_ID_COLLISION: jobId already belongs to another command");
+    throw new Error(
+      "JOB_ID_COLLISION: jobId already belongs to another command"
+    );
   }
 
   const createdAt = existingBinding?.createdAt ?? new Date().toISOString();
@@ -1288,6 +1623,7 @@ export const startRemoteJob = async (
         workspacePath,
       command,
       backend,
+      mode: existingBinding?.mode ?? mode,
       jobTokenHash:
         existingBinding?.jobTokenHash ??
         createHash("sha256").update(randomUUID()).digest("hex"),
@@ -1305,26 +1641,51 @@ export const startRemoteJob = async (
     existingBinding?.backend ?? request.backend ?? "posix-detach"
   );
 
-  const recovered = await withSshSession(workspacePath, async (sessionId) => {
-    const capabilities = await probeSshCapabilities(sessionId);
-    const root = await getRemoteJobRoot(sessionId, capabilities);
-    const jobDirectory = pathForJob(root, jobId);
-    if (!(await remotePathExists(sessionId, jobDirectory))) {
-      return null;
-    }
-    return readExistingJob(
-      sessionId,
-      jobDirectory,
-      recoveryBinding,
-      existingBinding?.jobTokenHash
+  let recovered: RemoteJobBinding | null = null;
+  try {
+    recovered = await withSshSession(
+      workspacePath,
+      async (sessionId) => {
+        const capabilities = await probeSshCapabilities(sessionId);
+        assertDurableJobPlatformSupported(capabilities.platform);
+        const root = await getRemoteJobRoot(sessionId, capabilities);
+        const jobDirectory = pathForJob(root, jobId);
+        let existing: boolean;
+        try {
+          existing = await remotePathExists(sessionId, jobDirectory);
+        } catch (error) {
+          // Every durable job needs SFTP, including the idempotency lookup before
+          // backend selection. Do not present an unavailable transfer channel as a
+          // backend failure or silently fall back to a shell-only job.
+          throw new RemoteJobUnavailableError(
+            "REMOTE_FILE_TRANSFER_UNAVAILABLE",
+            `Remote Job requires SFTP to inspect its protected task directory: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
+        if (!existing) {
+          return null;
+        }
+        return readExistingJob(
+          sessionId,
+          capabilities,
+          jobDirectory,
+          recoveryBinding,
+          existingBinding?.jobTokenHash
+        );
+      },
+      { signal }
     );
-  }, { signal });
+  } catch (error) {
+    classifyRemoteJobFileTransferError(error);
+  }
   if (recovered) {
     upsertBinding(recovered);
     return recovered;
   }
 
-  const backend = await selectBackend(workspacePath, request.backend);
+  const backend = await selectBackend(workspacePath, request.backend, mode);
   if (signal?.aborted) {
     throw new Error("Remote Job start was cancelled before durable submission");
   }
@@ -1332,151 +1693,16 @@ export const startRemoteJob = async (
   upsertBinding(binding);
 
   try {
-    return await withSshSession(workspacePath, async (sessionId) => {
-      const capabilities = await probeSshCapabilities(sessionId);
-      const root = await getRemoteJobRoot(sessionId, capabilities);
-      const jobDirectory = pathForJob(root, jobId);
-      if (await remotePathExists(sessionId, jobDirectory)) {
-        const recoveredExisting = await readExistingJob(
-          sessionId,
-          jobDirectory,
-          binding,
-          existingBinding?.jobTokenHash
-        );
-        upsertBinding(recoveredExisting);
-        return recoveredExisting;
-      }
-
-      const temporaryDirectory = `${root}/.${jobId}.${randomUUID()}.tmp`;
-      const manifest = {
-        schemaVersion: JOB_SCHEMA_VERSION,
-        jobId,
-        jobTokenHash: binding.jobTokenHash,
-        workspacePath,
-        commandHash: binding.commandHash,
-        displayCommand: binding.displayCommand,
-        createdAt,
-        timeoutMs,
-        backend: backend.kind,
-        cancellationPolicy,
-      };
-      const agentRequest = {
-        schemaVersion: JOB_SCHEMA_VERSION,
-        jobId,
-        jobTokenHash: binding.jobTokenHash,
-        workspacePath,
-        workingDirectory: normalizeRemotePath(
-          workspacePath.replace(/^ssh:\/\/[^/]+/, "") || "/"
-        ).replace(/^\/([A-Za-z]:\/)/, "$1"),
-        command,
-        timeoutMs,
-        createdAt,
-        resourceLimits: {
-          maxLogBytes: 50 * 1024 * 1024,
-          maxRuntimeMs: timeoutMs,
-        },
-      };
-      const initialState: RemoteJobState = {
-        schemaVersion: JOB_SCHEMA_VERSION,
-        jobId,
-        status: "preparing",
-        revision: 0,
-        backend: backend.kind,
-        createdAt,
-        updatedAt: createdAt,
-      };
-
-      await createRemoteJobDirectory(sessionId, capabilities, temporaryDirectory);
-      const workingDirectory = normalizeRemotePath(
-        workspacePath.replace(/^ssh:\/\/[^/]+/, "") || "/"
-      ).replace(/^\/([A-Za-z]:\/)/, "$1");
-      const jobFiles = capabilities.platform === "windows"
-        ? [
-            writeInternalSshFile(
-              sessionId,
-              `${temporaryDirectory}/command.ps1`,
-              buildWindowsCommandScript(workingDirectory)
-            ),
-            writeInternalSshFile(sessionId, `${temporaryDirectory}/command.txt`, command),
-            writeInternalSshFile(
-              sessionId,
-              `${temporaryDirectory}/runner.ps1`,
-              buildWindowsRunnerScript(jobId, createdAt)
-            ),
-          ]
-        : [
-            writeInternalSshFile(
-              sessionId,
-              `${temporaryDirectory}/command.sh`,
-              buildCommandScript(workingDirectory, command)
-            ),
-            writeInternalSshFile(
-              sessionId,
-              `${temporaryDirectory}/runner.sh`,
-              buildRunnerScript(jobId, createdAt)
-            ),
-          ];
-      await Promise.all([
-        ...jobFiles,
-        writeInternalSshFile(
-          sessionId,
-          `${temporaryDirectory}/manifest.json`,
-          `${JSON.stringify(manifest)}\n`
-        ),
-        writeInternalSshFile(
-          sessionId,
-          `${temporaryDirectory}/agent-request.json`,
-          `${JSON.stringify(agentRequest)}\n`
-        ),
-        writeInternalSshFile(sessionId, `${temporaryDirectory}/backend`, `${backend.kind}\n`),
-        writeInternalSshFile(sessionId, `${temporaryDirectory}/timeout-ms`, `${timeoutMs}\n`),
-        writeInternalSshFile(sessionId, `${temporaryDirectory}/revision`, "0\n"),
-        writeInternalSshFile(
-          sessionId,
-          `${temporaryDirectory}/state.json`,
-          `${JSON.stringify(initialState)}\n`
-        ),
-        writeInternalSshFile(sessionId, `${temporaryDirectory}/output.log`, ""),
-      ]);
-      if (signal?.aborted) {
-        await removeRemoteJobPath(sessionId, capabilities, temporaryDirectory).catch(
-          () => undefined
-        );
-        throw new Error("Remote Job start was cancelled before durable submission");
-      }
-      if (capabilities.platform === "posix") {
-        await runShell(
-          sessionId,
-          `chmod 700 -- ${shellQuote(
-            `${temporaryDirectory}/command.sh`
-          )} ${shellQuote(`${temporaryDirectory}/runner.sh`)} && chmod 600 -- ${shellQuote(
-            `${temporaryDirectory}/manifest.json`
-          )} ${shellQuote(`${temporaryDirectory}/agent-request.json`
-          )} ${shellQuote(`${temporaryDirectory}/state.json`)} ${shellQuote(
-            `${temporaryDirectory}/backend`
-          )} ${shellQuote(`${temporaryDirectory}/timeout-ms`)}`
-        );
-      }
-      if (signal?.aborted) {
-        await removeRemoteJobPath(sessionId, capabilities, temporaryDirectory).catch(
-          () => undefined
-        );
-        throw new Error("Remote Job start was cancelled before durable submission");
-      }
-      try {
-        await moveRemoteJobDirectory(
-          sessionId,
-          capabilities,
-          temporaryDirectory,
-          jobDirectory
-        );
-      } catch (error) {
-        const existingAfterRace = await remotePathExists(sessionId, jobDirectory).catch(
-          () => false
-        );
-        if (existingAfterRace) {
+    return await withSshSession(
+      workspacePath,
+      async (sessionId) => {
+        const capabilities = await probeSshCapabilities(sessionId);
+        const root = await getRemoteJobRoot(sessionId, capabilities);
+        const jobDirectory = pathForJob(root, jobId);
+        if (await remotePathExists(sessionId, jobDirectory)) {
           const recoveredExisting = await readExistingJob(
             sessionId,
+            capabilities,
             jobDirectory,
             binding,
             existingBinding?.jobTokenHash
@@ -1484,134 +1710,315 @@ export const startRemoteJob = async (
           upsertBinding(recoveredExisting);
           return recoveredExisting;
         }
-        throw error;
-      }
-      const cancelBeforeLaunch = async (): Promise<RemoteJobBinding> => {
-        const cancelled = await writeRemoteState(
-          sessionId,
-          jobDirectory,
-          initialState,
-          {
-            status: "cancelled",
-            reason: "cancelled before remote backend launch",
-          },
-          capabilities
-        );
-        const updated = {
-          ...binding,
-          status: cancelled.status,
-          revision: cancelled.revision,
-          updatedAt: cancelled.updatedAt,
-          lastError: cancelled.reason,
+
+        const temporaryDirectory = `${root}/.${jobId}.${randomUUID()}.tmp`;
+        const manifest = {
+          schemaVersion: JOB_SCHEMA_VERSION,
+          jobId,
+          jobTokenHash: binding.jobTokenHash,
+          workspacePath,
+          commandHash: binding.commandHash,
+          displayCommand: binding.displayCommand,
+          createdAt,
+          timeoutMs,
+          backend: backend.kind,
+          mode,
+          cancellationPolicy,
         };
-        upsertBinding(updated);
-        return updated;
-      };
-      if (signal?.aborted) {
-        return cancelBeforeLaunch();
-      }
-      if (backend.kind !== "snow-agent") {
+        const agentRequest = {
+          schemaVersion: JOB_SCHEMA_VERSION,
+          jobId,
+          jobTokenHash: binding.jobTokenHash,
+          workspacePath,
+          workingDirectory: normalizeRemotePath(
+            workspacePath.replace(/^ssh:\/\/[^/]+/, "") || "/"
+          ).replace(/^\/([A-Za-z]:\/)/, "$1"),
+          command,
+          timeoutMs,
+          mode,
+          createdAt,
+          resourceLimits: {
+            maxLogBytes: MAX_REMOTE_JOB_LOG_BYTES,
+            maxRuntimeMs: timeoutMs,
+          },
+        };
+        const initialState: RemoteJobState = {
+          schemaVersion: JOB_SCHEMA_VERSION,
+          jobId,
+          status: "preparing",
+          revision: 0,
+          backend: backend.kind,
+          mode,
+          createdAt,
+          updatedAt: createdAt,
+        };
+
         await createRemoteJobDirectory(
           sessionId,
           capabilities,
-          `${jobDirectory}/launch.lock`
+          temporaryDirectory
         );
-      }
-      if (signal?.aborted) {
-        return cancelBeforeLaunch();
-      }
-
-      try {
-        const launching = await writeRemoteState(
-          sessionId,
-          jobDirectory,
-          initialState,
-          { status: "launching", backend: backend.kind },
-          capabilities
-        );
-        await backend.launch({
-          sessionId,
-          jobDirectory,
-          jobId,
-          timeoutMs,
-          capabilities,
-          signal,
-        });
-        if (signal?.aborted && cancellationPolicy === "cancel_remote") {
-          await writeInternalSshFile(
+        const workingDirectory = normalizeRemotePath(
+          workspacePath.replace(/^ssh:\/\/[^/]+/, "") || "/"
+        ).replace(/^\/([A-Za-z]:\/)/, "$1");
+        const jobFiles = [
+          writeInternalSshFile(
             sessionId,
-            `${jobDirectory}/cancel.request`,
-            `${new Date().toISOString()}\n`
+            `${temporaryDirectory}/command.sh`,
+            buildCommandScript(workingDirectory, command)
+          ),
+          writeInternalSshFile(
+            sessionId,
+            `${temporaryDirectory}/runner.sh`,
+            buildRunnerScript(jobId, createdAt)
+          ),
+        ];
+        try {
+          await Promise.all([
+            ...jobFiles,
+            writeInternalSshFile(
+              sessionId,
+              `${temporaryDirectory}/manifest.json`,
+              `${JSON.stringify(manifest)}\n`
+            ),
+            writeInternalSshFile(
+              sessionId,
+              `${temporaryDirectory}/agent-request.json`,
+              `${JSON.stringify(agentRequest)}\n`
+            ),
+            writeInternalSshFile(
+              sessionId,
+              `${temporaryDirectory}/backend`,
+              `${backend.kind}\n`
+            ),
+            writeInternalSshFile(
+              sessionId,
+              `${temporaryDirectory}/timeout-ms`,
+              `${timeoutMs}\n`
+            ),
+            writeInternalSshFile(
+              sessionId,
+              `${temporaryDirectory}/revision`,
+              "0\n"
+            ),
+            writeInternalSshFile(
+              sessionId,
+              `${temporaryDirectory}/state.json`,
+              `${JSON.stringify(initialState)}\n`
+            ),
+            writeInternalSshFile(
+              sessionId,
+              `${temporaryDirectory}/output.log`,
+              ""
+            ),
+          ]);
+        } catch (error) {
+          await removeRemoteJobPath(
+            sessionId,
+            capabilities,
+            temporaryDirectory
           ).catch(() => undefined);
+          classifyRemoteJobFileTransferError(error);
         }
-        const observed = await readRemoteState(sessionId, jobDirectory, jobId).catch(
-          () => launching
-        );
-        const accepted: RemoteJobBinding = {
-          ...binding,
-          status: observed.status,
-          revision: observed.revision,
-          updatedAt: observed.updatedAt,
-          lastError: signal?.aborted
-            ? cancellationPolicy === "cancel_remote"
-              ? "cancellation requested after remote launch acknowledgement"
-              : "local wait detached after remote launch acknowledgement"
-            : undefined,
-        };
-        upsertBinding(accepted);
-        return accepted;
-      } catch (error) {
-        const current = await readRemoteState(sessionId, jobDirectory, jobId).catch(
-          () => initialState
-        );
-        if (signal?.aborted && cancellationPolicy === "cancel_remote") {
-          await writeInternalSshFile(
+        if (signal?.aborted) {
+          await removeRemoteJobPath(
             sessionId,
-            `${jobDirectory}/cancel.request`,
-            `${new Date().toISOString()}\n`
+            capabilities,
+            temporaryDirectory
           ).catch(() => undefined);
+          throw new Error(
+            "Remote Job start was cancelled before durable submission"
+          );
+        }
+        await runShell(
+          sessionId,
+          `chmod 700 -- ${shellQuote(
+            `${temporaryDirectory}/command.sh`
+          )} ${shellQuote(
+            `${temporaryDirectory}/runner.sh`
+          )} && chmod 600 -- ${shellQuote(
+            `${temporaryDirectory}/manifest.json`
+          )} ${shellQuote(
+            `${temporaryDirectory}/agent-request.json`
+          )} ${shellQuote(`${temporaryDirectory}/state.json`)} ${shellQuote(
+            `${temporaryDirectory}/backend`
+          )} ${shellQuote(`${temporaryDirectory}/timeout-ms`)}`
+        );
+        if (signal?.aborted) {
+          await removeRemoteJobPath(
+            sessionId,
+            capabilities,
+            temporaryDirectory
+          ).catch(() => undefined);
+          throw new Error(
+            "Remote Job start was cancelled before durable submission"
+          );
+        }
+        try {
+          await moveRemoteJobDirectory(
+            sessionId,
+            capabilities,
+            temporaryDirectory,
+            jobDirectory
+          );
+        } catch (error) {
+          const existingAfterRace = await remotePathExists(
+            sessionId,
+            jobDirectory
+          ).catch(() => false);
+          if (existingAfterRace) {
+            const recoveredExisting = await readExistingJob(
+              sessionId,
+              capabilities,
+              jobDirectory,
+              binding,
+              existingBinding?.jobTokenHash
+            );
+            upsertBinding(recoveredExisting);
+            return recoveredExisting;
+          }
+          throw error;
+        }
+        const cancelBeforeLaunch = async (): Promise<RemoteJobBinding> => {
+          const cancelled = await writeRemoteState(
+            sessionId,
+            jobDirectory,
+            initialState,
+            {
+              status: "cancelled",
+              reason: "cancelled before remote backend launch",
+            },
+            capabilities
+          );
           const updated = {
             ...binding,
-            status: current.status,
-            revision: current.revision,
-            updatedAt: current.updatedAt,
-            lastError: "cancellation requested; awaiting remote runner confirmation",
+            status: cancelled.status,
+            revision: cancelled.revision,
+            updatedAt: cancelled.updatedAt,
+            lastError: cancelled.reason,
+          };
+          upsertBinding(updated);
+          return updated;
+        };
+        if (signal?.aborted) {
+          return cancelBeforeLaunch();
+        }
+        if (backend.kind !== "snow-agent") {
+          await createRemoteJobDirectory(
+            sessionId,
+            capabilities,
+            `${jobDirectory}/launch.lock`
+          );
+        }
+        if (signal?.aborted) {
+          return cancelBeforeLaunch();
+        }
+
+        try {
+          const launching = await writeRemoteState(
+            sessionId,
+            jobDirectory,
+            initialState,
+            { status: "launching", backend: backend.kind },
+            capabilities
+          );
+          await backend.launch({
+            sessionId,
+            jobDirectory,
+            jobId,
+            timeoutMs,
+            capabilities,
+            mode,
+            signal,
+          });
+          if (signal?.aborted && cancellationPolicy === "cancel_remote") {
+            await writeInternalSshFile(
+              sessionId,
+              `${jobDirectory}/cancel.request`,
+              `${new Date().toISOString()}\n`
+            ).catch(() => undefined);
+          }
+          const observed = await readRemoteState(
+            sessionId,
+            jobDirectory,
+            jobId
+          ).catch(() => launching);
+          const accepted: RemoteJobBinding = {
+            ...binding,
+            status: observed.status,
+            revision: observed.revision,
+            updatedAt: observed.updatedAt,
+            lastError: signal?.aborted
+              ? cancellationPolicy === "cancel_remote"
+                ? "cancellation requested after remote launch acknowledgement"
+                : "local wait detached after remote launch acknowledgement"
+              : undefined,
+          };
+          upsertBinding(accepted);
+          return accepted;
+        } catch (error) {
+          const current = await readRemoteState(
+            sessionId,
+            jobDirectory,
+            jobId
+          ).catch(() => initialState);
+          if (signal?.aborted && cancellationPolicy === "cancel_remote") {
+            await writeInternalSshFile(
+              sessionId,
+              `${jobDirectory}/cancel.request`,
+              `${new Date().toISOString()}\n`
+            ).catch(() => undefined);
+            const updated = {
+              ...binding,
+              status: current.status,
+              revision: current.revision,
+              updatedAt: current.updatedAt,
+              lastError:
+                "cancellation requested; awaiting remote runner confirmation",
+            };
+            upsertBinding(updated);
+            return updated;
+          }
+          const confirmedRejection =
+            error instanceof RemoteJobLaunchRejectedError;
+          const outcome = await writeRemoteState(
+            sessionId,
+            jobDirectory,
+            current,
+            {
+              status: confirmedRejection ? "launch_failed" : "indeterminate",
+              reason:
+                confirmedRejection && error instanceof Error
+                  ? error.message.slice(0, 240)
+                  : error instanceof Error
+                  ? `launch acknowledgement was not confirmed: ${error.message.slice(
+                      0,
+                      240
+                    )}`
+                  : "launch acknowledgement was not confirmed",
+            },
+            capabilities
+          ).catch(() => ({
+            ...current,
+            status: confirmedRejection
+              ? ("launch_failed" as const)
+              : ("indeterminate" as const),
+            revision: current.revision + 1,
+            updatedAt: new Date().toISOString(),
+          }));
+          const updated = {
+            ...binding,
+            status: outcome.status,
+            revision: outcome.revision,
+            updatedAt: outcome.updatedAt,
+            lastError: outcome.reason,
           };
           upsertBinding(updated);
           return updated;
         }
-        const confirmedRejection = error instanceof RemoteJobLaunchRejectedError;
-        const outcome = await writeRemoteState(
-          sessionId,
-          jobDirectory,
-          current,
-          {
-            status: confirmedRejection ? "launch_failed" : "indeterminate",
-            reason:
-              confirmedRejection && error instanceof Error
-                ? error.message.slice(0, 240)
-                : error instanceof Error
-                ? `launch acknowledgement was not confirmed: ${error.message.slice(0, 240)}`
-                : "launch acknowledgement was not confirmed",
-          },
-          capabilities
-        ).catch(() => ({
-          ...current,
-          status: (confirmedRejection ? "launch_failed" : "indeterminate") as const,
-          revision: current.revision + 1,
-          updatedAt: new Date().toISOString(),
-        }));
-        const updated = {
-          ...binding,
-          status: outcome.status,
-          revision: outcome.revision,
-          updatedAt: outcome.updatedAt,
-          lastError: outcome.reason,
-        };
-        upsertBinding(updated);
-        return updated;
-      }
-    }, { signal });
+      },
+      { signal }
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const current = getBinding(jobId);
@@ -1643,7 +2050,10 @@ export const getRemoteJob = async (
   if (!binding) {
     throw new Error("Remote Job binding was not found");
   }
-  const offset = Math.max(0, Math.floor(options?.offset ?? binding.lastOutputOffset));
+  const offset = Math.max(
+    0,
+    Math.floor(options?.offset ?? binding.lastOutputOffset)
+  );
   const limit = Math.min(
     MAX_OUTPUT_READ_BYTES,
     Math.max(1, Math.floor(options?.limit ?? MAX_OUTPUT_READ_BYTES))
@@ -1653,9 +2063,15 @@ export const getRemoteJob = async (
     const root = await getRemoteJobRoot(sessionId, capabilities);
     const jobDirectory = pathForJob(root, jobId);
     const state = await readRemoteState(sessionId, jobDirectory, jobId);
-    let resolvedState = state;
-    if (state.status === "running") {
-      const backend = remoteBackends[state.backend ?? binding.backend];
+    let resolvedState = await recoverStaleSnowAgentLaunch(
+      sessionId,
+      capabilities,
+      jobDirectory,
+      jobId,
+      state
+    );
+    if (resolvedState.status === "running") {
+      const backend = remoteBackends[resolvedState.backend ?? binding.backend];
       const activity = await backend
         .inspect({
           sessionId,
@@ -1663,6 +2079,7 @@ export const getRemoteJob = async (
           jobId,
           timeoutMs: DEFAULT_JOB_TIMEOUT_MS,
           capabilities,
+          mode: binding.mode,
         })
         .catch(() => "active" as const);
       if (activity === "inactive") {
@@ -1670,7 +2087,11 @@ export const getRemoteJob = async (
         // after a short settle period so an inactive probe cannot turn that
         // terminal update into a stale `lost` state.
         await wait(INACTIVE_RUNNER_SETTLE_MS);
-        const settledState = await readRemoteState(sessionId, jobDirectory, jobId);
+        const settledState = await readRemoteState(
+          sessionId,
+          jobDirectory,
+          jobId
+        );
         resolvedState = TERMINAL_STATUSES.has(settledState.status)
           ? settledState
           : await writeRemoteState(
@@ -1725,18 +2146,26 @@ export const listRemoteJobs = async (
   const refreshed = await Promise.all(
     jobs.map(async (job) => {
       try {
-        return (await getRemoteJob(job.jobId, { offset: job.lastOutputOffset, limit: 1 }))
-          .job;
+        return (
+          await getRemoteJob(job.jobId, {
+            offset: job.lastOutputOffset,
+            limit: 1,
+          })
+        ).job;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return updateBinding(job.jobId, { lastError: message }) ?? job;
       }
     })
   );
-  return refreshed.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  return refreshed.sort((left, right) =>
+    right.createdAt.localeCompare(left.createdAt)
+  );
 };
 
-export const cancelRemoteJob = async (jobId: string): Promise<RemoteJobBinding> => {
+export const cancelRemoteJob = async (
+  jobId: string
+): Promise<RemoteJobBinding> => {
   if (!isJobId(jobId)) {
     throw new Error("Remote Job jobId must be a UUID");
   }
@@ -1797,43 +2226,42 @@ export const getRemoteJobAttachSpec = async (
     const jobDirectory = pathForJob(root, jobId);
     const state = await readRemoteState(sessionId, jobDirectory, jobId);
     const backendKind = state.backend ?? binding.backend;
-    const backend = remoteBackends[backendKind];
-    if (!backend.supportsInteractiveAttach) {
-      throw new Error(`Remote Job backend ${backendKind} does not support interactive attach`);
+    if (binding.mode !== "interactive" || state.mode !== "interactive") {
+      throw new RemoteJobUnavailableError(
+        "PTY_UNAVAILABLE",
+        "Only Remote Jobs created in interactive mode can attach a terminal"
+      );
     }
-    if (TERMINAL_STATUSES.has(state.status)) {
-      throw new Error("Cannot attach to a completed Remote Job");
+    if (state.status !== "running") {
+      throw new RemoteJobUnavailableError(
+        "PTY_UNAVAILABLE",
+        "Interactive Remote Job is not running"
+      );
     }
-    if (backendKind === "tmux") {
-      return {
-        jobId,
-        workspacePath: binding.workspacePath,
-        backend: backendKind,
-        remoteCommand: `tmux -L snow-app -f /dev/null attach-session -t ${shellQuote(
-          getTmuxSessionName(jobId)
-        )}`,
-      };
+    if (backendKind !== "snow-agent") {
+      throw new RemoteJobUnavailableError(
+        "PTY_UNAVAILABLE",
+        "Interactive Remote Jobs require the Snow Agent PTY broker"
+      );
     }
-    if (backendKind === "snow-agent") {
-      const agent = await negotiateSnowAgent(sessionId, capabilities);
-      if (!agent.capabilities.interactiveAttach) {
-        throw new Error("The negotiated snow-agent release does not support interactive attach");
-      }
-      const remoteCommand =
-        capabilities.platform === "windows"
-          ? `snow-agent.exe job attach --job-directory \"${jobDirectory.replace(
-              /\"/g,
-              '\\\"'
-            )}\"`
-          : `snow-agent job attach --job-directory ${shellQuote(jobDirectory)}`;
-      return {
-        jobId,
-        workspacePath: binding.workspacePath,
-        backend: backendKind,
-        remoteCommand,
-      };
+    const agent = await negotiateSnowAgent(sessionId, capabilities);
+    if (!supportsSnowAgentInteractiveAttach(agent.capabilities)) {
+      throw new RemoteJobUnavailableError(
+        "PTY_UNAVAILABLE",
+        "The negotiated Snow Agent does not support interactive attach protocol v1"
+      );
     }
-    throw new Error(`Remote Job backend ${backendKind} has no attach command`);
+    return {
+      jobId,
+      workspacePath: binding.workspacePath,
+      backend: backendKind,
+      mode: "interactive",
+      remoteCommand: await getSnowAgentAttachCommand(
+        sessionId,
+        capabilities,
+        jobDirectory
+      ),
+    };
   });
 };
 
@@ -1867,7 +2295,11 @@ export const cleanupRemoteJobs = async (): Promise<{ removed: string[] }> => {
     const retention =
       job.status === "succeeded" ? SUCCESS_RETENTION_MS : FAILURE_RETENTION_MS;
     const age = now - Date.parse(job.updatedAt);
-    if (!TERMINAL_STATUSES.has(job.status) || !Number.isFinite(age) || age < retention) {
+    if (
+      !TERMINAL_STATUSES.has(job.status) ||
+      !Number.isFinite(age) ||
+      age < retention
+    ) {
       retained.push(job);
       continue;
     }

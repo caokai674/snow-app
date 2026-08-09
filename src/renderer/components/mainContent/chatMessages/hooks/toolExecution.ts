@@ -13,6 +13,7 @@ import {
 import { appendHookExecutionToMessage, runHook } from "./hookOutcome";
 import { extractFileChangeFromTool } from "./fileChangeTracking";
 import { PENDING_SESSION_KEY } from "../utils/conversationTypes";
+import { injectSessionIdIntoToolArgs } from "../utils/toolSessionMetadata";
 import type {
   ConversationContextValue,
   HookExecutionRecord,
@@ -707,12 +708,19 @@ export function createToolExecutor(
               }
             }
 
-            // Bind command execution to the conversation. Durable Remote Jobs
-            // persist this binding so the Job panel can recover the context
-            // after an application restart.
+            // Attach Snow-owned session metadata to command and persistent
+            // terminal tools. Pending conversations do not yet have a stable ID.
+            toolArgs = injectSessionIdIntoToolArgs(
+              toolCall.name,
+              toolArgs,
+              effectiveKey === PENDING_SESSION_KEY ? undefined : effectiveKey
+            );
+
+            // Durable Remote Jobs also persist their conversation and tool-call
+            // binding so the Job panel can recover context after a restart.
             if (
-              toolCall.name === "bash-terminal-execute" ||
-              toolCall.name === "remote-job-start"
+              toolCall.name === "remote-job-start" &&
+              effectiveKey !== PENDING_SESSION_KEY
             ) {
               try {
                 const parsedArgs = JSON.parse(toolArgs) as Record<

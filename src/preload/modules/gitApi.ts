@@ -115,6 +115,14 @@ export const gitApi = {
     ipcRenderer.invoke("git:log", repoPath, skip, limit),
   gitCommitFiles: (repoPath: string, hash: string): Promise<GitCommitFile[]> =>
     ipcRenderer.invoke("git:commit-files", repoPath, hash),
+  gitCommitDiff: (repoPath: string, hash: string): Promise<GitDiffResult> =>
+    ipcRenderer.invoke("git:commit-diff", repoPath, hash),
+  gitCommitFileDiff: (
+    repoPath: string,
+    hash: string,
+    filePath: string
+  ): Promise<GitDiffResult> =>
+    ipcRenderer.invoke("git:commit-file-diff", repoPath, hash, filePath),
   discoverGitRepos: (rootPath: string): Promise<GitRepoInfo[]> =>
     ipcRenderer.invoke("git:discover-repos", rootPath),
   generateCommitMessage: (

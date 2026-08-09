@@ -66,6 +66,7 @@ pub(crate) fn emit_stream_chunk(
                 stream_token_count: *stream_token_count as i64,
                 elapsed_ms,
                 ttft_ms,
+                vision_status: None,
             },
             ThreadsafeFunctionCallMode::NonBlocking,
         );
@@ -87,6 +88,7 @@ pub(crate) fn emit_stream_chunk(
             stream_token_count: *stream_token_count as i64,
             elapsed_ms,
             ttft_ms,
+            vision_status: None,
         },
         ThreadsafeFunctionCallMode::NonBlocking,
     );
@@ -122,6 +124,7 @@ pub(crate) fn emit_tool_args_probe(
             stream_token_count: *stream_token_count as i64,
             elapsed_ms,
             ttft_ms,
+            vision_status: None,
         },
         ThreadsafeFunctionCallMode::NonBlocking,
     );

@@ -3,6 +3,7 @@ export type MainContentView =
   | "api-settings"
   | "imagegen-settings"
   | "image-library"
+  | "browser-settings"
   | "proxy-browser-settings"
   | "codebase-settings"
   | "system-prompt-settings"

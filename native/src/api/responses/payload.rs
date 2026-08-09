@@ -337,6 +337,14 @@ pub(super) fn build_responses_payload(
         payload["reasoning"] = reasoning;
     }
 
+    if let Some(text) = build_responses_text_config(&api_config.config_json) {
+        payload["text"] = text;
+    }
+
+    if let Some(service_tier) = build_responses_service_tier(&api_config.config_json) {
+        payload["service_tier"] = json!(service_tier);
+    }
+
     if let Some(tools) = tools {
         if tools.as_array().is_some_and(|items| !items.is_empty()) {
             payload["tools"] = tools;
@@ -389,6 +397,29 @@ pub(crate) fn build_responses_reasoning(config_json: &str) -> Option<Value> {
         "effort": effort,
         "summary": "auto",
     }))
+}
+
+fn build_responses_text_config(config_json: &str) -> Option<Value> {
+    let parsed = serde_json::from_str::<Value>(config_json).ok()?;
+    let verbosity = parsed
+        .get("snowcfg")?
+        .get("responsesVerbosity")?
+        .as_str()?
+        .trim();
+
+    match verbosity {
+        "low" | "medium" | "high" => Some(json!({
+            "verbosity": verbosity,
+        })),
+        _ => None,
+    }
+}
+
+fn build_responses_service_tier(config_json: &str) -> Option<&'static str> {
+    let parsed = serde_json::from_str::<Value>(config_json).ok()?;
+    let enabled = parsed.get("snowcfg")?.get("responsesFastMode")?.as_bool()?;
+
+    enabled.then_some("priority")
 }
 
 // ---------------------------------------------------------------------------

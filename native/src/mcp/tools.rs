@@ -996,6 +996,8 @@ pub async fn call_mcp_tool(
         ImageGenService::new()
             .execute_generate(&args, &on_chunk)
             .await?
+    } else if tool_full_name == "imagegen-image-describe" {
+        ImageGenService::new().execute_describe(&args).await?
     } else if let Some(tool_name) = tool_full_name.strip_prefix("browser-") {
         BrowserService::new()
             .execute_async(tool_name, &args, &on_browser_command)
@@ -1013,8 +1015,12 @@ pub async fn call_mcp_tool(
             .execute_async(app_control_tool, &args, &on_app_control, &on_user_question)
             .await?
     } else if let Some(config_tool) = tool_full_name.strip_prefix("config-") {
+        // 传入运行时已知的当前会话 projectId（directoryId）。ConfigService
+        // 内部会将其注入到支持项目级作用域的调用（hooks/subAgents/skills/
+        // settings 项目键），并让 config-list 返回 currentProjectId，
+        // 修复 AI 无法获知当前会话项目ID导致项目级配置落到全局的问题。
         ConfigService::new()
-            .execute_async(config_tool, &args)
+            .execute_async(config_tool, &args, project_id.clone())
             .await?
     } else if tool_full_name == "skills-skill-execute" {
         SkillsService::new()
@@ -1027,7 +1033,6 @@ pub async fn call_mcp_tool(
     } else if let Some(codelens_tool) = tool_full_name.strip_prefix("codelens-") {
         let service = CodeLensService::new();
         match codelens_tool {
-            "diagnose" => service.execute_diagnose(&args).await?,
             "find_definition" => {
                 service
                     .execute_find_definition(&args, project_id.as_deref())
@@ -1043,7 +1048,7 @@ pub async fn call_mcp_tool(
                 return Err(Error::new(
                     Status::GenericFailure,
                     format!(
-                        "Unknown codelens tool: \"{codelens_tool}\". Available tools: [diagnose, find_definition, find_references, file_outline]"
+                        "Unknown codelens tool: \"{codelens_tool}\". Available tools: [find_definition, find_references, file_outline]"
                     ),
                 ));
             }

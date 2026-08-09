@@ -276,6 +276,7 @@ pub fn seed_default_sub_agent_configs(database_path: &Path) -> Result<()> {
                    system_prompt,
                    tools_json,
                    config_profile,
+                   model,
                    builtin,
                    sort_order,
                    source,
@@ -283,7 +284,7 @@ pub fn seed_default_sub_agent_configs(database_path: &Path) -> Result<()> {
                    created_at,
                    updated_at
                  ) VALUES (
-                   ?1, 'agent_general', 'General Purpose Agent', ?2, ?3, ?4, '', 1, 0, 'builtin', '', datetime('now', 'localtime'), datetime('now', 'localtime')
+                   ?1, 'agent_general', 'General Purpose Agent', ?2, ?3, ?4, '', '', 1, 0, 'builtin', '', datetime('now', 'localtime'), datetime('now', 'localtime')
                  )",
                 params![
                     database::create_snowflake_id(),
@@ -318,6 +319,7 @@ fn query_sub_agent_configs(
                 system_prompt,
                 tools_json,
                 config_profile,
+                model,
                 builtin,
                 sort_order,
                 source,
@@ -341,7 +343,7 @@ fn query_sub_agent_configs(
 }
 
 fn map_sub_agent_config_row(row: &rusqlite::Row) -> rusqlite::Result<SubAgentConfigRecord> {
-    let builtin: i64 = row.get(7)?;
+    let builtin: i64 = row.get(8)?;
     Ok(SubAgentConfigRecord {
         id: row.get(0)?,
         agent_id: row.get(1)?,
@@ -350,11 +352,12 @@ fn map_sub_agent_config_row(row: &rusqlite::Row) -> rusqlite::Result<SubAgentCon
         system_prompt: row.get(4)?,
         tools_json: row.get(5)?,
         config_profile: row.get(6)?,
+        model: row.get(7)?,
         builtin: builtin != 0,
-        sort_order: row.get(8)?,
-        source: row.get(9)?,
-        project_id: row.get(10)?,
-        updated_at: row.get(11)?,
+        sort_order: row.get(9)?,
+        source: row.get(10)?,
+        project_id: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -380,6 +383,7 @@ fn upsert_sub_agent_config_with_connection(
            system_prompt,
            tools_json,
            config_profile,
+           model,
            builtin,
            sort_order,
            source,
@@ -387,7 +391,7 @@ fn upsert_sub_agent_config_with_connection(
            created_at,
            updated_at
          ) VALUES (
-           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now', 'localtime'), datetime('now', 'localtime')
+           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, datetime('now', 'localtime'), datetime('now', 'localtime')
          )
          ON CONFLICT(agent_id, project_id) DO UPDATE SET
            name = excluded.name,
@@ -395,6 +399,7 @@ fn upsert_sub_agent_config_with_connection(
            system_prompt = excluded.system_prompt,
            tools_json = excluded.tools_json,
            config_profile = excluded.config_profile,
+           model = excluded.model,
            builtin = excluded.builtin,
            sort_order = excluded.sort_order,
            source = excluded.source,
@@ -407,6 +412,7 @@ fn upsert_sub_agent_config_with_connection(
             item.system_prompt,
             item.tools_json,
             item.config_profile,
+            item.model,
             item.builtin as i32,
             item.sort_order,
             item.source,

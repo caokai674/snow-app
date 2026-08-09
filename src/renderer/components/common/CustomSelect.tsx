@@ -7,11 +7,6 @@ import {
 } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import { createPortal } from "react-dom";
-import { AnimatePresence, motion } from "motion/react";
-import {
-  appleSurfaceTransition,
-  useAppleThemeMotion,
-} from "../../hooks/useAppleThemeMotion";
 
 export type CustomSelectOption = {
   value: string;
@@ -60,8 +55,6 @@ export function CustomSelect({
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const { enabled: appleMotionEnabled, reducedMotion } = useAppleThemeMotion();
-  const transition = appleSurfaceTransition(reducedMotion);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -134,22 +127,6 @@ export function CustomSelect({
     setIsOpen((v) => !v);
   };
 
-  const dropdownTarget = appleMotionEnabled
-    ? reducedMotion
-      ? { opacity: 1 }
-      : { opacity: 1, scale: 1, y: 0, filter: "blur(0px)" }
-    : undefined;
-  const dropdownInitial = appleMotionEnabled
-    ? reducedMotion
-      ? { opacity: 0 }
-      : { opacity: 0, scale: 0.98, y: -4, filter: "blur(1px)" }
-    : false;
-  const dropdownExit = appleMotionEnabled
-    ? reducedMotion
-      ? { opacity: 0 }
-      : { opacity: 0, scale: 0.98, y: -4, filter: "blur(1px)" }
-    : undefined;
-
   const dropdownItems = (
     <>
       {options.map((opt) => (
@@ -169,16 +146,9 @@ export function CustomSelect({
   );
 
   const dropdown = (
-    <motion.div
-      animate={dropdownTarget}
-      className="custom-select-dropdown"
-      exit={dropdownExit}
-      initial={dropdownInitial}
-      ref={dropdownRef}
-      transition={appleMotionEnabled ? transition : undefined}
-    >
+    <div className="custom-select-dropdown" ref={dropdownRef}>
       {dropdownItems}
-    </motion.div>
+    </div>
   );
 
   return (
@@ -197,41 +167,24 @@ export function CustomSelect({
       </button>
       {portal && dropdownRect
         ? createPortal(
-            <AnimatePresence
-              initial={false}
-              onExitComplete={() => {
-                if (!isOpen) {
-                  setDropdownRect(null);
-                }
-              }}
-            >
-              {isOpen && (
-                <motion.div
-                  animate={dropdownTarget}
-                  className="custom-select-dropdown-portal"
-                  exit={dropdownExit}
-                  initial={dropdownInitial}
-                  ref={dropdownRef}
-                  style={{
-                    position: "fixed",
-                    top: `${dropdownRect.top}px`,
-                    left: `${dropdownRect.left}px`,
-                    width: `${dropdownRect.width}px`,
-                    zIndex: 100000,
-                  }}
-                  transition={appleMotionEnabled ? transition : undefined}
-                >
-                  <div className="custom-select-dropdown">{dropdownItems}</div>
-                </motion.div>
-              )}
-            </AnimatePresence>,
+            isOpen && (
+              <div
+                className="custom-select-dropdown-portal"
+                ref={dropdownRef}
+                style={{
+                  position: "fixed",
+                  top: `${dropdownRect.top}px`,
+                  left: `${dropdownRect.left}px`,
+                  width: `${dropdownRect.width}px`,
+                  zIndex: 100000,
+                }}
+              >
+                <div className="custom-select-dropdown">{dropdownItems}</div>
+              </div>
+            ),
             document.body
           )
-        : !portal && (
-            <AnimatePresence initial={false}>
-              {isOpen && dropdown}
-            </AnimatePresence>
-          )}
+        : !portal && isOpen && dropdown}
     </div>
   );
 }

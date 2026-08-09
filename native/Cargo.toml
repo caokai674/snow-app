@@ -1,6 +1,6 @@
 [package]
 name = "snow_native"
-version = "0.1.20"
+version = "0.1.22"
 edition = "2021"
 license = "MIT"
 
@@ -26,6 +26,7 @@ napi = { version = "3.2.4", default-features = false, features = ["napi4", "asyn
 napi-derive = "3.2.4"
 reqwest = { version = "0.12.5", features = ["blocking", "json", "stream", "multipart", "gzip", "brotli", "deflate"] }
 flate2 = "1"
+libc = "0.2"
 tar = "0.4"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = { version = "1.0.204", features = ["derive"] }
@@ -45,7 +46,6 @@ encoding_rs = "0.8"
 pdf-extract = "0.12"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 oxc = { version = "0.82", features = ["semantic", "ast_visit"] }
-oxc_miette = { package = "oxc-miette", version = "2.7" }
 tree-sitter = "0.25"
 tree-sitter-python = "0.25"
 tree-sitter-rust = "0.23"
@@ -62,6 +62,19 @@ tree-sitter-yaml = "0.7"
 tree-sitter-bash = "0.23"
 tree-sitter-lua = "0.5"
 
+# Browser credential import: Chrome/Edge/Chromium (PBKDF2 + AES-128-CBC,
+# DPAPI + AES-256-GCM, App-Bound v20: SYSTEM DPAPI + AES-256-GCM /
+# ChaCha20-Poly1305 / CNG) and Firefox (SHA1 20-round + 3DES-CBC). Pure-Rust
+# crypto crates so the native module stays self-contained.
+aes = "0.8"
+aes-gcm = "0.10"
+cbc = "0.1"
+chacha20poly1305 = "0.10"
+cipher = "0.4"
+des = "0.8"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha1 = "0.10"
+
 # Official MCP Rust SDK (2026-07-28 spec). Replaces hand-rolled JSON-RPC client.
 rmcp = { version = "3.0.1", default-features = false, features = [
     "client",
@@ -76,6 +89,13 @@ http = "1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+] }
 
 [build-dependencies]
 napi-build = "2.2.3"

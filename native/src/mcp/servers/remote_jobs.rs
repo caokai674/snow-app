@@ -24,7 +24,7 @@ impl McpService for RemoteJobsService {
             McpTool {
                 server_id: SERVER_ID.to_string(),
                 name: "start".to_string(),
-                description: "Start a durable, non-interactive command on the active SSH workspace. The task keeps running after the SSH channel and the application disconnect. Use this for builds, tests, installs, deployments, or commands with unknown duration. The result includes an idempotent jobId; never retry with a new jobId when the start result is uncertain.".to_string(),
+                description: "Start a durable command on the active SSH workspace. The task keeps running after the SSH channel and the application disconnect. Use batch mode for builds, tests, installs, deployments, or commands with unknown duration. Use interactive mode only when a running task needs terminal input; interactive tasks require the signed Snow Agent PTY broker and can be attached while running. The result includes an idempotent jobId; never retry with a new jobId when the start result is uncertain.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -33,7 +33,8 @@ impl McpService for RemoteJobsService {
                         "workingDirectory": { "type": "string", "description": "Required SSH workspace path or a path relative to the active SSH workspace." },
                         "timeout": { "type": "number", "description": "Optional maximum duration in milliseconds, capped at 30 minutes." },
                         "jobId": { "type": "string", "description": "Optional existing UUID idempotency key. Reuse the same value only for an exact retry of the same command." },
-                        "backend": { "type": "string", "enum": ["snow-agent", "systemd-user", "tmux", "posix-detach", "windows-job"], "description": "Optional fixed backend. Omit to select a verified backend." }
+                        "backend": { "type": "string", "enum": ["snow-agent", "systemd-user", "tmux", "posix-detach"], "description": "Optional fixed backend. Omit to select a verified backend." },
+                        "mode": { "type": "string", "enum": ["batch", "interactive"], "default": "batch", "description": "Optional execution mode. Interactive tasks can be attached while running and require the signed Snow Agent PTY broker." }
                     },
                     "required": ["command", "description", "workingDirectory"]
                 }),

@@ -7,6 +7,7 @@ import type {
   TokenUsage,
   UserQuestionRequest,
 } from "../../../../../preload";
+import type { NotificationConversationTarget } from "../../../../../shared/notification";
 import type { Dispatch, SetStateAction } from "react";
 
 export type UserQuestionState = {
@@ -48,6 +49,11 @@ export type HookExecutionRecord = {
   blockMessage?: string | null;
   /** Timestamp (epoch ms) when the hook execution completed. */
   timestamp: number;
+  /** When the hook is bound to a specific tool call (e.g. beforeSubAgentStart
+   *  while a sub-agent activation runs, onSubAgentComplete when it finishes),
+   *  the tool call's interactionId.  The renderer uses this to attach the
+   *  hook record to the matching tool card instead of the message footer. */
+  toolCallInteractionId?: string;
   /** When true, the hook returned a decision JSON and the user must
    *  approve or reject the action before the AI loop can continue. */
   pendingDecision?: boolean;
@@ -170,6 +176,20 @@ export type SubAgentSessionEvent = {
   toolCallInteractionId?: string;
 };
 
+export type VisionAnalysisState = {
+  /** describing = 调用外挂视觉 API 中；cached = 命中 blake3 缓存直接复用；
+   *  done = 全部图片文本化完成；error = 文本化失败（请求将失败）。 */
+  phase: "describing" | "cached" | "done" | "error";
+  /** 当前已处理的图片序号（1 起）。 */
+  index: number;
+  /** 本次消息中需要文本化的图片总数。 */
+  total: number;
+  /** 外挂视觉模型名（配置了才带）。 */
+  model?: string;
+  /** phase === "error" 时的错误信息。 */
+  error?: string;
+};
+
 export type ConversationSessionState = {
   messages: ChatConversationMessage[];
   messageRecords: ChatMessageRecord[];
@@ -209,6 +229,11 @@ export type ConversationSessionState = {
    *  rollback). Independent of the backend's per-iteration streamElapsedMs
    *  (which resets on every new createResponseStream call). */
   streamStartedAt: number;
+  /** External-vision textify progress, driven by `ResponsesApiStreamChunk.
+   *  visionStatus` events. Set while the backend describes user images with
+   *  the external vision model; cleared when the textify pass finishes
+   *  (phase done/error) so the intermediate status card disappears. */
+  visionAnalysis?: VisionAnalysisState;
 };
 
 export type ConversationSessionRef = {
@@ -319,9 +344,17 @@ export type PendingToolAuthorization = {
 };
 
 export type PendingUserQuestion = {
+  sessionKey: string;
   interactionId: string;
   resolve: (resultJson: string) => void;
   reject: (error: Error) => void;
+};
+
+/** 用户在提问工具卡片上未提交的交互草稿（按 questionId 索引）。卡片因会话
+ *  切换等场景重挂载时，用草稿恢复已勾选的选项与自定义回答。 */
+export type UserQuestionDraft = {
+  selectedOptions: string[];
+  customAnswers: string[];
 };
 
 export type PendingHookDecision = {
@@ -337,6 +370,23 @@ export type UserQuestionTarget = {
 export type PendingQueueItem = {
   text: string;
   options: ChatInputSendOptions;
+};
+
+export type ConversationNotificationContext = {
+  conversationId: NotificationConversationTarget["conversationId"] | undefined;
+  directoryId: NotificationConversationTarget["directoryId"] | undefined;
+};
+
+export type NotifyAiCompleteOptions = ConversationNotificationContext & {
+  title: string | undefined;
+};
+
+export type NotifySensitiveCommandOptions = ConversationNotificationContext & {
+  toolName: string;
+};
+
+export type NotifyUserInteractionOptions = ConversationNotificationContext & {
+  reason: string;
 };
 
 /** Ref value type compatible with React's MutableRefObject */
@@ -379,6 +429,8 @@ export type ConversationContextValue = {
   fileChangeStatsHydratedRef: RefValue<Set<string>>;
   streamingConversationIds: Set<string>;
   completedConversationIds: Set<string>;
+  pendingUserQuestionConversationIds: Set<string>;
+  attentionRequiredConversationIds: Set<string>;
   isLoadingInitialHistory: boolean;
   draftToRestore: string | null;
   rollbackPreview: RollbackPreview | null;
@@ -433,7 +485,9 @@ export type ConversationContextValue = {
       model?: string,
       isAuto?: boolean,
       subAgentConfigProfile?: string,
-      apiProfile?: string
+      apiProfile?: string,
+      subAgentToolsJson?: string,
+      subAgentSystemPrompt?: string
     ) => Promise<string | null>
   >;
   yoloModeRef: RefValue<boolean>;
@@ -481,6 +535,7 @@ export type ConversationContextValue = {
   recordFileChange: (conversationId: string, record: FileChangeRecord) => void;
   setStreamingConversationIds: Dispatch<SetStateAction<Set<string>>>;
   setCompletedConversationIds: Dispatch<SetStateAction<Set<string>>>;
+  setPendingUserQuestionConversationIds: Dispatch<SetStateAction<Set<string>>>;
   setIsLoadingInitialHistory: Dispatch<SetStateAction<boolean>>;
   setDraftToRestore: Dispatch<SetStateAction<string | null>>;
   setRollbackPreview: Dispatch<SetStateAction<RollbackPreview | null>>;
@@ -521,9 +576,13 @@ export type ConversationContextValue = {
   clearInputDraft: (conversationId: string | undefined) => void;
 
   // 通知系统：AI 流程结束 / 敏感命令拦截 / 用户交互确认时触发系统通知
-  notifyAiComplete: (conversationTitle?: string) => void;
-  notifySensitiveCommandIntercepted: (toolName: string) => void;
-  notifyUserInteractionRequired: (reason: string) => void;
+  notifyAiComplete: (options: NotifyAiCompleteOptions) => void;
+  notifySensitiveCommandIntercepted: (
+    options: NotifySensitiveCommandOptions
+  ) => void;
+  notifyUserInteractionRequired: (
+    options: NotifyUserInteractionOptions
+  ) => void;
 };
 
 export type UseChatConversationResult = {
@@ -562,10 +621,14 @@ export type UseChatConversationResult = {
    *  starts. Drives the accumulating elapsed timer in StreamMetrics so it
    *  survives conversation switches between parallel streaming sessions. */
   streamStartedAt: number;
+  /** External-vision textify progress for the active conversation. Present
+   *  while the backend describes user images with the external vision model. */
+  visionAnalysis: VisionAnalysisState | undefined;
   forkedFromConversationId: string | undefined;
   forkMessageCount: number | undefined;
   streamingConversationIds: Set<string>;
   completedConversationIds: Set<string>;
+  attentionRequiredConversationIds: Set<string>;
   isLoadingOlderMessages: boolean;
   hasMoreMessages: boolean;
   isInitialHistoryLoaded: boolean;
@@ -639,6 +702,11 @@ export type UseChatConversationResult = {
     customAnswers: string[]
   ) => void;
   cancelUserQuestion: (questionId: string) => void;
+  /** 读取/保存/清除提问卡片未提交的交互草稿（按 questionId）。卡片因会话
+   *  切换等重挂载时据此恢复已勾选的选项与自定义回答。 */
+  getUserQuestionDraft: (questionId: string) => UserQuestionDraft | undefined;
+  saveUserQuestionDraft: (questionId: string, draft: UserQuestionDraft) => void;
+  clearUserQuestionDraft: (questionId: string) => void;
 };
 
 // Re-export preload types for convenience

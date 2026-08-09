@@ -341,6 +341,43 @@ impl FilesystemService {
             }
         }
 
+        // Step 1.5: 字面子串匹配
+        // 覆盖 search_content 只是某一行片段（例如超长单行字符串中的一段）或
+        // 跨行片段的场景，这是整行精确/模糊匹配无法命中的情况。
+        if let Some((new_content, edit_start_line, edit_end_line, total_matches)) =
+            try_substring_replace(&content, search_content, &replace_content, occurrence)
+        {
+            let new_bytes =
+                encode_text_back(&new_content, original_encoding, had_bom).map_err(|e| {
+                    Error::new(
+                        Status::GenericFailure,
+                        format!(
+                            "Failed to encode edited content back to original encoding: {} (path: {})",
+                            e, file_path
+                        ),
+                    )
+                })?;
+            fs::write(&file_path, &new_bytes).map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("Failed to write file: {} (path: {})", e, file_path),
+                )
+            })?;
+
+            let review =
+                build_edit_review_context_lines(&new_content, edit_start_line, edit_end_line);
+
+            return Ok(json!({
+                "success": true,
+                "totalMatches": total_matches,
+                "occurrence": occurrence,
+                "matchType": "substring",
+                "matchedLineStart": edit_start_line + 1,
+                "matchedLineEnd": edit_end_line + 1,
+                "review": review
+            }));
+        }
+
         // Step 2: 模糊行匹配（基于 Levenshtein 距离 + 变窗口 + 预过滤）
         if let Some((start_line, end_line, similarity)) =
             find_best_line_match_v2(search_content, &file_lines)
@@ -642,6 +679,56 @@ fn try_strip_line_prefixes(text: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// 尝试把 search_content 作为字面子串在完整文件内容中匹配并替换。
+/// 覆盖 search_content 只是某一行片段（例如超长单行字符串中的一段）或跨行
+/// 片段的场景，这是整行精确/模糊匹配无法命中的情况。先把 search_content 的
+/// 行尾适配为文件的行尾风格再做字面查找。成功时返回
+/// (新内容, 编辑起始行 0-based, 编辑结束行 0-based inclusive, 总匹配数)。
+fn try_substring_replace(
+    content: &str,
+    search_content: &str,
+    replace_content: &str,
+    occurrence: usize,
+) -> Option<(String, usize, usize, usize)> {
+    if search_content.is_empty() {
+        return None;
+    }
+    let adapted_search = adapt_line_endings(search_content, content);
+    if adapted_search.is_empty() {
+        return None;
+    }
+
+    // 收集所有非重叠出现位置（字节索引）。
+    let mut positions: Vec<usize> = Vec::new();
+    let mut cursor = 0usize;
+    while cursor <= content.len() {
+        match content[cursor..].find(&adapted_search) {
+            Some(rel) => {
+                let abs = cursor + rel;
+                positions.push(abs);
+                cursor = abs + adapted_search.len();
+            }
+            None => break,
+        }
+    }
+    if positions.is_empty() {
+        return None;
+    }
+
+    let target = *positions.get(occurrence.saturating_sub(1))?;
+    let end = target + adapted_search.len();
+
+    let mut new_content = String::with_capacity(content.len() + replace_content.len());
+    new_content.push_str(&content[..target]);
+    new_content.push_str(replace_content);
+    new_content.push_str(&content[end..]);
+
+    let edit_start_line = content[..target].matches('\n').count();
+    let edit_end_line = edit_start_line + replace_content.split('\n').count().saturating_sub(1);
+
+    Some((new_content, edit_start_line, edit_end_line, positions.len()))
 }
 
 /// 在文件行数组中，按行滑动窗口查找与 searchContent 最相似的区间。

@@ -107,9 +107,12 @@ async fn create_gemini_response_async(
         max_context_tokens: api_config.max_context_tokens,
         directory_id: request.directory_id.as_deref(),
         context_compaction: request.context_compaction.unwrap_or(false),
+        resume_after_compaction: request.resume_after_compaction.unwrap_or(false),
         skip_context: request.skip_context.unwrap_or(false),
         plan_mode: request.plan_mode.unwrap_or(false),
         goal_mode: request.goal_mode.unwrap_or(false),
+        is_sub_agent: request.is_sub_agent_request(),
+        sub_agent_system_prompt: request.sub_agent_system_prompt.as_deref(),
         system_prompt_ids_json: &api_config.system_prompt_ids_json,
         remote_role_content: request.remote_role_content.as_deref(),
         remote_include_global_rules: request.remote_include_global_rules,
@@ -126,6 +129,7 @@ async fn create_gemini_response_async(
         &api_config,
         &custom_headers,
         skip_context,
+        Some(on_chunk),
     )
     .await?;
 
@@ -210,7 +214,13 @@ async fn create_gemini_response_async(
                 response_content: &streamed_response.content,
                 response_id: &streamed_response.id,
                 checkpoint_id: request.checkpoint_id.as_deref().unwrap_or(""),
-                model: &streamed_response.model,
+                // Persist the requested model, not the model echoed back by the
+                // API response body. Some providers (e.g. aliased models with
+                // date-stamped snapshots like `deepseek-flash-0731`) return a
+                // different name than what was requested; trusting the response
+                // would corrupt the conversation's recorded model and the chat
+                // input's model display on the next load.
+                model,
                 api_profile_name: &api_config.profile_name,
                 status: &streamed_response.status,
                 raw_response_json: &raw_response_json,
@@ -220,6 +230,7 @@ async fn create_gemini_response_async(
                 tool_calls_json: &streamed_response.tool_calls_json,
                 directory_id: request.directory_id.as_deref().unwrap_or(""),
                 context_compaction: request.context_compaction.unwrap_or(false),
+                resume_after_compaction: request.resume_after_compaction.unwrap_or(false),
                 total_duration_ms: streamed_response.total_duration_ms,
             },
         )?
@@ -232,7 +243,10 @@ async fn create_gemini_response_async(
         conversation_id: prepared_request.conversation_id,
         content: streamed_response.content,
         thinking: streamed_response.thinking,
-        model: streamed_response.model,
+        // Return the requested model so the renderer's assistant message
+        // records match what was persisted (the response body's model is
+        // unreliable across providers and may carry date-stamped aliases).
+        model: model.to_string(),
         status: streamed_response.status,
         tool_calls_json: streamed_response.tool_calls_json,
         token_usage: TokenUsage {

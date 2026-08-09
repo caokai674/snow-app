@@ -255,7 +255,9 @@ fn validate_and_normalize_args(tool_name: &str, args: &Value) -> napi::Result<Va
     match tool_name {
         "open" => {
             optional_non_empty_string(args, "cwd")?;
-            optional_non_empty_string(args, "shellPath")?;
+            if let Some(path) = optional_non_empty_string(args, "shellPath")? {
+                validate_shell_path(path)?;
+            }
         }
         "send" => {
             optional_non_empty_string(args, "tabId")?;
@@ -336,6 +338,21 @@ fn optional_non_empty_string<'a>(args: &'a Value, field: &str) -> napi::Result<O
             format!("{field} must be a string when provided"),
         )),
     }
+}
+
+/// 校验 shellPath 指向真实存在的可执行文件：含路径分隔符的路径（绝对或
+/// 相对）必须存在，否则直接拒绝——避免 PTY 静默回退到默认 shell 后智能体
+/// 收到"成功"却与预期不符。纯文件名（如 `wsl.exe`、`bash`）允许，由 PTY
+/// 层按 PATH 解析，无法在参数校验阶段确认。
+fn validate_shell_path(path: &str) -> napi::Result<()> {
+    let has_separator = path.contains('/') || path.contains('\\');
+    if has_separator && !std::path::Path::new(path).exists() {
+        return Err(Error::new(
+            Status::InvalidArg,
+            format!("shellPath does not exist: {path}"),
+        ));
+    }
+    Ok(())
 }
 
 fn bounded_u64(

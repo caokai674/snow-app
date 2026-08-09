@@ -991,6 +991,117 @@ pub fn get_commit_files(repo_path: &str, hash: &str) -> Result<Vec<GitCommitFile
     Ok(files)
 }
 
+/// Get the full diff introduced by a single commit (`git show <hash>`).
+///
+/// Suppresses the commit-header/message output (`--format=`) so only the
+/// patch remains. Binary files are detected the same way as `get_file_diff`.
+pub fn get_commit_diff(repo_path: &str, hash: &str) -> Result<GitDiffResult> {
+    if !is_git_repo(repo_path) {
+        return Ok(GitDiffResult {
+            content: String::new(),
+            is_binary: false,
+        });
+    }
+
+    let args = vec!["show", "--format=", "--find-renames", "--no-ext-diff", hash];
+
+    match run_git(repo_path, &args) {
+        Ok(stdout) => {
+            if stdout.contains("Binary files") {
+                let text_args = vec!["show", "--format=", "--text", "--no-ext-diff", hash];
+                match run_git(repo_path, &text_args) {
+                    Ok(text_diff) if !text_diff.is_empty() => {
+                        return Ok(GitDiffResult {
+                            content: text_diff,
+                            is_binary: false,
+                        });
+                    }
+                    _ => {
+                        return Ok(GitDiffResult {
+                            content: "Binary file - diff not available".to_string(),
+                            is_binary: true,
+                        });
+                    }
+                }
+            }
+
+            Ok(GitDiffResult {
+                content: stdout,
+                is_binary: false,
+            })
+        }
+        Err(e) => Ok(GitDiffResult {
+            content: format!("{e}"),
+            is_binary: false,
+        }),
+    }
+}
+
+/// Get the diff of a single file within a single commit
+/// (`git show <hash> -- <path>`).
+///
+/// `git show` is used instead of `git diff <hash>^ <hash>` because it also
+/// works for the root commit (compares against the empty tree) and for
+/// merge commits it shows the combined diff against the first parent.
+/// Binary files are detected the same way as `get_file_diff` / `get_commit_diff`.
+pub fn get_commit_file_diff(repo_path: &str, hash: &str, file_path: &str) -> Result<GitDiffResult> {
+    if !is_git_repo(repo_path) {
+        return Ok(GitDiffResult {
+            content: String::new(),
+            is_binary: false,
+        });
+    }
+
+    let args = vec![
+        "show",
+        "--format=",
+        "--find-renames",
+        "--no-ext-diff",
+        hash,
+        "--",
+        file_path,
+    ];
+
+    match run_git(repo_path, &args) {
+        Ok(stdout) => {
+            if stdout.contains("Binary files") {
+                let text_args = vec![
+                    "show",
+                    "--format=",
+                    "--text",
+                    "--no-ext-diff",
+                    hash,
+                    "--",
+                    file_path,
+                ];
+                match run_git(repo_path, &text_args) {
+                    Ok(text_diff) if !text_diff.is_empty() => {
+                        return Ok(GitDiffResult {
+                            content: text_diff,
+                            is_binary: false,
+                        });
+                    }
+                    _ => {
+                        return Ok(GitDiffResult {
+                            content: "Binary file - diff not available".to_string(),
+                            is_binary: true,
+                        });
+                    }
+                }
+            }
+
+            Ok(GitDiffResult {
+                content: stdout,
+                is_binary: false,
+            })
+        }
+        Err(e) => Ok(GitDiffResult {
+            content: format!("{e}"),
+            is_binary: false,
+        }),
+    }
+}
+
 /// Scan a directory for git repositories.
 ///
 /// Recursively walks `root_path` looking for subdirectories containing a

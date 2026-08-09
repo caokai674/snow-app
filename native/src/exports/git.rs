@@ -203,6 +203,37 @@ pub async fn get_git_commit_files(
     })?
 }
 
+/// Get the full diff introduced by a single commit. Runs on the blocking
+/// thread pool so `git show` never blocks the async runtime.
+#[napi]
+pub async fn get_commit_diff(repo_path: String, hash: String) -> napi::Result<GitDiffResult> {
+    tokio::task::spawn_blocking(move || {
+        crate::storage::services::git::get_commit_diff(&repo_path, &hash)
+    })
+    .await
+    .map_err(|join_error| {
+        napi::Error::from_reason(format!("Failed to get commit diff: {join_error}"))
+    })?
+}
+
+/// Get the diff of a single file within a single commit
+/// (`git show <hash> -- <path>`). Runs on the blocking thread pool so
+/// `git show` never blocks the async runtime.
+#[napi]
+pub async fn git_commit_file_diff(
+    repo_path: String,
+    hash: String,
+    file_path: String,
+) -> napi::Result<GitDiffResult> {
+    tokio::task::spawn_blocking(move || {
+        crate::storage::services::git::get_commit_file_diff(&repo_path, &hash, &file_path)
+    })
+    .await
+    .map_err(|join_error| {
+        napi::Error::from_reason(format!("Failed to get commit file diff: {join_error}"))
+    })?
+}
+
 /// Discover all git repositories within a directory tree.
 ///
 /// Recursively scans `root_path` for subdirectories containing a `.git`

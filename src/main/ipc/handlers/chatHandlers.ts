@@ -10,6 +10,7 @@ import {
   type RemoteRoleContext,
 } from "../../ssh/remoteWorkspaceCommand";
 import { snowLog } from "../../../utils/snowLogger";
+import { safeSend } from "../../utils/safeSend";
 
 const CHAT_CREATE_RESPONSE_CHUNK_CHANNEL = "chat:create-response:chunk";
 
@@ -88,9 +89,17 @@ const normalizeResponsesApiRequest = (value: unknown): ResponsesApiRequest => {
       typeof source.contextCompaction === "boolean"
         ? source.contextCompaction
         : undefined,
+    resumeAfterCompaction:
+      typeof source.resumeAfterCompaction === "boolean"
+        ? source.resumeAfterCompaction
+        : undefined,
     subAgentToolsJson:
       typeof source.subAgentToolsJson === "string"
         ? source.subAgentToolsJson
+        : undefined,
+    subAgentSystemPrompt:
+      typeof source.subAgentSystemPrompt === "string"
+        ? source.subAgentSystemPrompt
         : undefined,
     subAgentConfigProfile:
       typeof source.subAgentConfigProfile === "string"
@@ -161,11 +170,7 @@ export const registerChatHandlers = (native: NativeBridge): void => {
               : {}),
           },
           (chunk: ResponsesApiStreamChunk) => {
-            if (event.sender.isDestroyed()) {
-              return;
-            }
-
-            event.sender.send(CHAT_CREATE_RESPONSE_CHUNK_CHANNEL, {
+            safeSend(event.sender, CHAT_CREATE_RESPONSE_CHUNK_CHANNEL, {
               streamId: normalizedStreamId,
               chunk,
             });

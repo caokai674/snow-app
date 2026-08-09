@@ -54,6 +54,8 @@ const normalizeResponseStreamChunk = (
       typeof value.streamTokenCount === "number" ? value.streamTokenCount : 0,
     elapsedMs: typeof value.elapsedMs === "number" ? value.elapsedMs : 0,
     ttftMs: typeof value.ttftMs === "number" ? value.ttftMs : 0,
+    visionStatus:
+      typeof value.visionStatus === "string" ? value.visionStatus : undefined,
   };
 };
 
@@ -76,18 +78,6 @@ export const apiConfigApi = {
     ipcRenderer.invoke("settings:get-yolo-mode"),
   setYoloMode: (enabled: boolean): Promise<void> =>
     ipcRenderer.invoke("settings:set-yolo-mode", enabled),
-  getPlanMode: (): Promise<boolean> =>
-    ipcRenderer.invoke("settings:get-plan-mode"),
-  setPlanMode: (enabled: boolean): Promise<void> =>
-    ipcRenderer.invoke("settings:set-plan-mode", enabled),
-  getGoalMode: (): Promise<boolean> =>
-    ipcRenderer.invoke("settings:get-goal-mode"),
-  setGoalMode: (enabled: boolean): Promise<void> =>
-    ipcRenderer.invoke("settings:set-goal-mode", enabled),
-  getGoalModeTokenBudget: (): Promise<number> =>
-    ipcRenderer.invoke("settings:get-goal-mode-token-budget"),
-  setGoalModeTokenBudget: (budget: number): Promise<void> =>
-    ipcRenderer.invoke("settings:set-goal-mode-token-budget", budget),
   getConversationModes: (conversationId: string): Promise<ConversationModesResult> =>
     ipcRenderer.invoke("settings:get-conversation-modes", conversationId),
   setConversationModes: (
@@ -204,6 +194,8 @@ export const apiConfigApi = {
     ),
   detectTerminals: (): Promise<DetectedTerminal[]> =>
     ipcRenderer.invoke("terminal:detect-terminals"),
+  validateTerminalShellPath: (shellPath: string): Promise<{ valid: boolean; reason?: string }> =>
+    ipcRenderer.invoke("terminal-settings:validate-shell-path", shellPath),
   selectTerminalExecutable: (dialogTitle?: string): Promise<string | null> =>
     ipcRenderer.invoke("terminal-settings:select-executable", dialogTitle),
   generateThemePalette: (
@@ -274,7 +266,7 @@ export const apiConfigApi = {
   ): Promise<void> =>
     ipcRenderer.invoke("settings:set-keyboard-shortcuts", settings),
 
-  /** 把 upload 目录下的相对路径解析为 data URL（如 imagegen 参考图缩略图），失败返回 null */
+  /** 把参考图路径解析为 data URL（绝对磁盘路径或 upload/ 相对路径，如 imagegen 参考图缩略图），失败返回 null */
   resolveUploadImage: (relativePath: string): Promise<string | null> =>
     ipcRenderer.invoke("images:resolve-upload-image", relativePath),
 };

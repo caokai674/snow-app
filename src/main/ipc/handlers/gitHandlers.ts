@@ -8,6 +8,8 @@ import {
   remoteDiscoverGitRepos,
   remoteFetchRemote,
   remoteGetCommitFiles,
+  remoteGetCommitDiff,
+  remoteGetCommitFileDiff,
   remoteGetFileDiff,
   remoteGetGitBranches,
   remoteGetGitLog,
@@ -20,6 +22,7 @@ import {
   remoteUnstageAll,
   remoteUnstageFiles,
 } from "../../ssh/remoteGit";
+import { safeSend } from "../../utils/safeSend";
 
 const GIT_COMMIT_MSG_CHUNK_CHANNEL = "git:commit-msg:chunk";
 
@@ -272,6 +275,41 @@ export const registerGitHandlers = (native: NativeBridge): void => {
         : native.getGitCommitFiles(trimmed, hash.trim());
     }
   );
+
+  ipcMain.handle(
+    "git:commit-diff",
+    async (_event, repoPath: unknown, hash: unknown) => {
+      if (typeof repoPath !== "string" || !repoPath.trim()) {
+        throw new Error("Repository path is required");
+      }
+      if (typeof hash !== "string" || !hash.trim()) {
+        throw new Error("Commit hash is required");
+      }
+      const trimmed = repoPath.trim();
+      return isSshPath(trimmed)
+        ? remoteGetCommitDiff(trimmed, hash.trim())
+        : native.getCommitDiff(trimmed, hash.trim());
+    }
+  );
+
+  ipcMain.handle(
+    "git:commit-file-diff",
+    async (_event, repoPath: unknown, hash: unknown, filePath: unknown) => {
+      if (typeof repoPath !== "string" || !repoPath.trim()) {
+        throw new Error("Repository path is required");
+      }
+      if (typeof hash !== "string" || !hash.trim()) {
+        throw new Error("Commit hash is required");
+      }
+      if (typeof filePath !== "string" || !filePath.trim()) {
+        throw new Error("File path is required");
+      }
+      const trimmed = repoPath.trim();
+      return isSshPath(trimmed)
+        ? remoteGetCommitFileDiff(trimmed, hash.trim(), filePath.trim())
+        : native.gitCommitFileDiff(trimmed, hash.trim(), filePath.trim());
+    }
+  );
   // ===== Git repo discovery =====
   ipcMain.handle("git:discover-repos", async (_event, rootPath: unknown) => {
     if (typeof rootPath !== "string" || !rootPath.trim()) {
@@ -298,12 +336,10 @@ export const registerGitHandlers = (native: NativeBridge): void => {
       const trimmed = repoPath.trim();
 
       const onChunk = (chunk: ResponsesApiStreamChunk): void => {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send(GIT_COMMIT_MSG_CHUNK_CHANNEL, {
-            streamId: normalizedStreamId,
-            chunk,
-          });
-        }
+        safeSend(event.sender, GIT_COMMIT_MSG_CHUNK_CHANNEL, {
+          streamId: normalizedStreamId,
+          chunk,
+        });
       };
 
       if (isSshPath(trimmed)) {

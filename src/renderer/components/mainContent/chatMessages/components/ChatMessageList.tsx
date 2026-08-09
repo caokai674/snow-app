@@ -38,6 +38,7 @@ export const ChatMessageList = ({
     streamTokenCount,
     streamElapsedMs,
     streamTtftMs,
+    visionAnalysis,
   } = useChatConversationContext();
 
   const lastAssistantMessageId = useMemo(() => {
@@ -175,7 +176,20 @@ export const ChatMessageList = ({
       const isLastAssistant = message.id === lastAssistantMessageId;
       const hasToolCalls = (message.toolCalls?.length ?? 0) > 0;
       const isMessageStreaming = message.status === "sending";
-      // Show actions on:
+
+      // Hook records bound to a tool call of this message (via
+      // toolCallInteractionId) are rendered inside the tool card itself.
+      // Only unbound records — or bound records whose card is not in this
+      // message (should not happen) — stay in the message footer.
+      const boundInteractionIds = new Set(
+        (message.toolCalls ?? []).map((tc) => tc.interactionId)
+      );
+      const footerHookExecutions = (message.hookExecutions ?? []).filter(
+        (record) =>
+          !record.toolCallInteractionId ||
+          !boundInteractionIds.has(record.toolCallInteractionId)
+      );
+
       // - All assistant messages without tool calls (1-on-1 conversations)
       // - The last assistant message when it has tool calls (AI Loop ending)
       // - Never on a message that is currently streaming
@@ -209,6 +223,7 @@ export const ChatMessageList = ({
             thinking={message.thinking}
             showActions={showActions}
             toolCalls={message.toolCalls}
+            hookExecutions={message.hookExecutions}
             pendingToolAuthorizations={
               isLastAssistant
                 ? pendingToolAuthorizations.filter(
@@ -225,8 +240,8 @@ export const ChatMessageList = ({
             responseId={message.responseId}
             onFork={handleFork}
           />
-          {message.hookExecutions && message.hookExecutions.length > 0 ? (
-            <HookExecutionUI executions={message.hookExecutions} />
+          {footerHookExecutions.length > 0 ? (
+            <HookExecutionUI executions={footerHookExecutions} />
           ) : null}
         </div>
       );
@@ -245,6 +260,38 @@ export const ChatMessageList = ({
       streamTtftMs,
     ]
   );
+
+  // Intermediate status card shown while the backend describes user images
+  // with the external vision model (textify pass). Lives at the end of the
+  // message list, above the input area; disappears on the final done/error
+  // event. Fixed min-height keeps the virtualization scrollbar stable.
+  const renderVisionStatusCard = (): React.JSX.Element | null => {
+    if (
+      !visionAnalysis ||
+      (visionAnalysis.phase !== "describing" &&
+        visionAnalysis.phase !== "cached")
+    ) {
+      return null;
+    }
+    return (
+      <div className="chat-vision-status" role="status">
+        <span className="chat-vision-status-spinner" aria-hidden="true" />
+        <span className="chat-vision-status-text">
+          {t("chat.visionAnalyzing", {
+            defaultValue: "Analyzing images with vision model…",
+          })}
+        </span>
+        <span className="chat-vision-status-progress">
+          {visionAnalysis.index}/{visionAnalysis.total}
+        </span>
+        {visionAnalysis.model ? (
+          <span className="chat-vision-status-model" title={visionAnalysis.model}>
+            {visionAnalysis.model}
+          </span>
+        ) : null}
+      </div>
+    );
+  };
 
   // Keep the fork divider outside virtualization so it is always present when
   // visible (it is a single small node and never needs height preservation).
@@ -285,6 +332,7 @@ export const ChatMessageList = ({
         {forkDividerIndex === messages.length && forkedFromConversationId
           ? renderForkDivider()
           : null}
+        {renderVisionStatusCard()}
       </div>
     );
   }
@@ -300,6 +348,7 @@ export const ChatMessageList = ({
       {afterFork.map((message, index) =>
         renderItem(message, forkDividerIndex + index)
       )}
+      {renderVisionStatusCard()}
     </div>
   );
 };

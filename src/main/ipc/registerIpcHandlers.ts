@@ -7,6 +7,7 @@ import { registerChatHandlers } from "./handlers/chatHandlers";
 import { registerConfigHandlers } from "./handlers/configHandlers";
 import { registerConversationHandlers } from "./handlers/conversationHandlers";
 import { registerWorkspaceHandlers } from "./handlers/workspaceHandlers";
+import { registerIdeHandlers } from "./handlers/ideHandlers";
 import { registerSshHandlers } from "./handlers/sshHandlers";
 import { registerGitHandlers } from "./handlers/gitHandlers";
 import { registerWindowHandlers } from "./handlers/windowHandlers";
@@ -17,6 +18,7 @@ import { registerCodexHandlers } from "./handlers/codexHandlers";
 import { registerImportConfigHandlers } from "./handlers/importConfigHandlers";
 import { registerImageHandlers } from "./handlers/imageHandlers";
 import { registerImageLibraryHandlers } from "./handlers/imageLibraryHandlers";
+import { registerBrowserPasswordHandlers } from "./handlers/browserPasswordHandlers";
 import { PluginRuntimeManager } from "../plugins/pluginRuntimeManager";
 
 export const registerIpcHandlers = (native: NativeBridge): void => {
@@ -30,6 +32,7 @@ export const registerIpcHandlers = (native: NativeBridge): void => {
   registerConfigHandlers(native);
   registerConversationHandlers(native);
   registerWorkspaceHandlers(native);
+  registerIdeHandlers(native);
   registerSshHandlers(native);
   registerGitHandlers(native);
   registerWindowHandlers(native);
@@ -40,4 +43,5 @@ export const registerIpcHandlers = (native: NativeBridge): void => {
   registerImportConfigHandlers(native, pluginRuntime);
   registerImageHandlers(native);
   registerImageLibraryHandlers(native);
+  registerBrowserPasswordHandlers(native);
 };

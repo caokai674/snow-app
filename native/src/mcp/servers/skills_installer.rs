@@ -340,16 +340,12 @@ fn resolve_commit_sha(parsed: &ParsedGitHubUrl) -> napi::Result<ShaInfo> {
         parsed.owner, parsed.repo, ref_path
     );
     let client = build_http_client()?;
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "snow-app")
-        .send()
-        .map_err(|e| {
-            Error::new(
-                Status::GenericFailure,
-                format!("GitHub API request failed: {e}"),
-            )
-        })?;
+    let resp = client.get(&url).send().map_err(|e| {
+        Error::new(
+            Status::GenericFailure,
+            format!("GitHub API request failed: {e}"),
+        )
+    })?;
 
     if !resp.status().is_success() {
         // Fall back to the repo endpoint for default branch info
@@ -357,16 +353,12 @@ fn resolve_commit_sha(parsed: &ParsedGitHubUrl) -> napi::Result<ShaInfo> {
             "https://api.github.com/repos/{}/{}",
             parsed.owner, parsed.repo
         );
-        let repo_resp = client
-            .get(&repo_url)
-            .header("User-Agent", "snow-app")
-            .send()
-            .map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("GitHub repo API request failed: {e}"),
-                )
-            })?;
+        let repo_resp = client.get(&repo_url).send().map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("GitHub repo API request failed: {e}"),
+            )
+        })?;
         if !repo_resp.status().is_success() {
             return Err(Error::new(
                 Status::GenericFailure,
@@ -392,16 +384,12 @@ fn resolve_commit_sha(parsed: &ParsedGitHubUrl) -> napi::Result<ShaInfo> {
             "https://api.github.com/repos/{}/{}/commits/{}",
             parsed.owner, parsed.repo, default_branch
         );
-        let sha_resp = client
-            .get(&sha_url)
-            .header("User-Agent", "snow-app")
-            .send()
-            .map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("GitHub commits API request failed: {e}"),
-                )
-            })?;
+        let sha_resp = client.get(&sha_url).send().map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("GitHub commits API request failed: {e}"),
+            )
+        })?;
         if !sha_resp.status().is_success() {
             return Err(Error::new(
                 Status::GenericFailure,
@@ -446,7 +434,8 @@ fn resolve_commit_sha(parsed: &ParsedGitHubUrl) -> napi::Result<ShaInfo> {
 }
 
 fn build_http_client() -> napi::Result<reqwest::blocking::Client> {
-    let mut builder = reqwest::blocking::Client::builder().user_agent("snow-app");
+    let mut builder =
+        reqwest::blocking::Client::builder().user_agent(crate::api::http_client::app_user_agent());
     // Use a GitHub token when available to avoid unauthenticated API rate
     // limits (60 requests/hour per IP). Reads GITHUB_TOKEN first, then
     // GH_TOKEN (the environment variable used by the gh CLI, e.g. after

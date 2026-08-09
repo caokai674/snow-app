@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use napi::bindgen_prelude::*;
 use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::super::database;
@@ -30,9 +31,28 @@ pub struct ImageLibraryRecord {
     pub model: String,
     pub provider: String,
     pub created_at: String,
+    /// 所属相册 id；None = 未归类
+    pub album_id: Option<String>,
+}
+
+/// 相册记录（服务层结构体）。
+#[derive(Debug, Clone)]
+pub struct ImageAlbumRecord {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    /// 相册封面：最新一张图的图库相对路径（image/...）；空相册为 None
+    pub cover_path: Option<String>,
+    /// 相册内图片数量
+    pub image_count: i64,
 }
 
 /// 建表（B 模式：在 database.rs::create_schema() 末尾调用）
+///
+/// 兼容旧库迁移：
+/// - `image_albums` 表用 CREATE TABLE IF NOT EXISTS（新库直接建，旧库首次升级建）
+/// - `image_library.album_id` 列通过 pragma_table_info 检测后补列（幂等），
+///   旧数据 album_id 为 NULL = 未归类，删除相册时图片置 NULL 不删图。
 pub fn ensure_image_library_table(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS image_library (
@@ -49,8 +69,26 @@ pub fn ensure_image_library_table(connection: &rusqlite::Connection) -> rusqlite
            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
          );
          CREATE INDEX IF NOT EXISTS idx_image_library_created
-           ON image_library(created_at DESC, id DESC);",
-    )
+           ON image_library(created_at DESC, id DESC);
+         CREATE TABLE IF NOT EXISTS image_albums (
+           id TEXT PRIMARY KEY NOT NULL,
+           name TEXT NOT NULL,
+           created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+         );",
+    )?;
+
+    // 幂等补列：image_library.album_id（旧库升级路径）
+    let has_album_id: bool = connection
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('image_library') WHERE name = 'album_id'")?
+        .query_row([], |row| row.get(0))?;
+    if !has_album_id {
+        connection.execute_batch("ALTER TABLE image_library ADD COLUMN album_id TEXT;")?;
+    }
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_image_library_album ON image_library(album_id);",
+    )?;
+
+    Ok(())
 }
 
 /// 图片根目录：优先读取用户自定义路径（system_settings `image_library_dir`），
@@ -249,6 +287,7 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageLibraryRecord> {
         model: row.get(8)?,
         provider: row.get(9)?,
         created_at: row.get(10)?,
+        album_id: row.get(11)?,
     })
 }
 
@@ -258,7 +297,7 @@ pub fn list_images(database_path: &Path) -> Result<Vec<ImageLibraryRecord>> {
         .and_then(|connection| {
             let mut statement = connection.prepare(
                 "SELECT id, relative_path, file_name, mime_type, size_bytes, width, height,
-                        prompt, model, provider, created_at
+                        prompt, model, provider, created_at, album_id
                    FROM image_library
                   ORDER BY created_at DESC, id DESC",
             )?;
@@ -266,6 +305,140 @@ pub fn list_images(database_path: &Path) -> Result<Vec<ImageLibraryRecord>> {
             rows.collect()
         })
         .map_err(|error| database::database_error(database_path, "list image library", error))
+}
+
+/// 列出全部相册（按创建时间倒序），含封面路径（最新一张图）与图片数量。
+pub fn list_albums(database_path: &Path) -> Result<Vec<ImageAlbumRecord>> {
+    database::open_connection(database_path)
+        .and_then(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT a.id, a.name, a.created_at,
+                        (SELECT i.relative_path FROM image_library i
+                          WHERE i.album_id = a.id
+                          ORDER BY i.created_at DESC, i.id DESC LIMIT 1) AS cover_path,
+                        (SELECT COUNT(*) FROM image_library i WHERE i.album_id = a.id) AS image_count
+                   FROM image_albums a
+                  ORDER BY a.created_at DESC, a.id DESC",
+            )?;
+            let rows = statement.query_map([], map_album_row)?;
+            rows.collect()
+        })
+        .map_err(|error| database::database_error(database_path, "list image albums", error))
+}
+
+fn map_album_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageAlbumRecord> {
+    Ok(ImageAlbumRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        created_at: row.get(2)?,
+        cover_path: row.get(3)?,
+        image_count: row.get(4)?,
+    })
+}
+
+/// 按 id 查询相册（含封面与数量）。
+fn find_album(
+    connection: &rusqlite::Connection,
+    id: &str,
+) -> rusqlite::Result<Option<ImageAlbumRecord>> {
+    connection
+        .query_row(
+            "SELECT a.id, a.name, a.created_at,
+                    (SELECT i.relative_path FROM image_library i
+                      WHERE i.album_id = a.id
+                      ORDER BY i.created_at DESC, i.id DESC LIMIT 1) AS cover_path,
+                    (SELECT COUNT(*) FROM image_library i WHERE i.album_id = a.id) AS image_count
+               FROM image_albums a
+              WHERE a.id = ?1",
+            params![id],
+            map_album_row,
+        )
+        .optional()
+}
+
+/// 创建相册。名称去除首尾空白，不允许为空；名称不强制唯一。
+pub fn create_album(database_path: &Path, name: &str) -> Result<ImageAlbumRecord> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(napi::Error::from_reason(
+            "Image album name must not be empty".to_string(),
+        ));
+    }
+    let id = database::create_snowflake_id();
+    database::open_connection(database_path)
+        .and_then(|connection| {
+            connection.execute(
+                "INSERT INTO image_albums (id, name) VALUES (?1, ?2)",
+                params![id, name],
+            )?;
+            find_album(&connection, &id)
+                .and_then(|album| album.ok_or_else(|| rusqlite::Error::InvalidQuery))
+        })
+        .map_err(|error| database::database_error(database_path, "create image album", error))
+}
+
+/// 重命名相册。相册不存在时返回错误。
+pub fn rename_album(database_path: &Path, id: &str, name: &str) -> Result<ImageAlbumRecord> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(napi::Error::from_reason(
+            "Image album name must not be empty".to_string(),
+        ));
+    }
+    database::open_connection(database_path)
+        .and_then(|connection| {
+            let affected = connection.execute(
+                "UPDATE image_albums SET name = ?1 WHERE id = ?2",
+                params![name, id],
+            )?;
+            if affected == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            find_album(&connection, id)
+                .and_then(|album| album.ok_or(rusqlite::Error::QueryReturnedNoRows))
+        })
+        .map_err(|error| database::database_error(database_path, "rename image album", error))
+}
+
+/// 删除相册：相册内图片的 album_id 置 NULL（图片本身保留），相册封面随之失效。
+pub fn delete_album(database_path: &Path, id: &str) -> Result<()> {
+    database::open_connection(database_path)
+        .and_then(|connection| {
+            connection.execute(
+                "UPDATE image_library SET album_id = NULL WHERE album_id = ?1",
+                params![id],
+            )?;
+            connection.execute("DELETE FROM image_albums WHERE id = ?1", params![id])?;
+            Ok(())
+        })
+        .map_err(|error| database::database_error(database_path, "delete image album", error))
+}
+
+/// 将图片移入 / 移出相册（album_id 为 None 时移出）。
+/// 相册或图片不存在时返回错误。
+pub fn set_image_album(database_path: &Path, image_id: &str, album_id: Option<&str>) -> Result<()> {
+    database::open_connection(database_path)
+        .and_then(|connection| {
+            if let Some(album_id) = album_id {
+                let album_exists: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM image_albums WHERE id = ?1)",
+                    params![album_id],
+                    |row| row.get(0),
+                )?;
+                if !album_exists {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+            }
+            let affected = connection.execute(
+                "UPDATE image_library SET album_id = ?1 WHERE id = ?2",
+                params![album_id, image_id],
+            )?;
+            if affected == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            Ok(())
+        })
+        .map_err(|error| database::database_error(database_path, "set image album", error))
 }
 
 /// 将图库相对路径（image/...）解析为根目录下的绝对路径。
@@ -366,6 +539,125 @@ pub fn delete_image(database_path: &Path, id: &str) -> Result<()> {
         eprintln!("[image-library] deleted '{relative_path}', rewrote {rewritten} message(s)");
     }
     Ok(())
+}
+
+/// 按文件头魔数探测图片 MIME 类型（PNG/JPEG/GIF/WebP），未知时按扩展名推断。
+fn detect_mime(bytes: &[u8], fallback_ext: &str) -> String {
+    if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
+        return "image/png".to_string();
+    }
+    if bytes.len() >= 3 && &bytes[0..3] == b"GIF8" {
+        return "image/gif".to_string();
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return "image/webp".to_string();
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
+        return "image/jpeg".to_string();
+    }
+    match fallback_ext {
+        "jpg" | "jpeg" => "image/jpeg".to_string(),
+        "webp" => "image/webp".to_string(),
+        "gif" => "image/gif".to_string(),
+        _ => "image/png".to_string(),
+    }
+}
+
+/// 按 id 查询图片记录。
+fn find_image(
+    connection: &rusqlite::Connection,
+    id: &str,
+) -> rusqlite::Result<Option<ImageLibraryRecord>> {
+    connection
+        .query_row(
+            "SELECT id, relative_path, file_name, mime_type, size_bytes, width, height,
+                    prompt, model, provider, created_at, album_id
+               FROM image_library
+              WHERE id = ?1",
+            params![id],
+            map_row,
+        )
+        .optional()
+}
+
+/// 手动导入图片：将外部文件复制进图库目录（按当天日期子目录）并写入索引。
+/// 跳过不可读 / 空文件 / 复制失败的文件；返回成功导入的记录列表。
+/// 手动导入的图片无 prompt/model/provider（索引留空，前端展示文件名）。
+pub fn import_image_files(
+    database_path: &Path,
+    file_paths: &[String],
+) -> Result<Vec<ImageLibraryRecord>> {
+    let root = image_library_root()?;
+    let date_dir = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let target_dir = root.join(&date_dir);
+    fs::create_dir_all(&target_dir).map_err(|error| {
+        Error::from_reason(format!(
+            "Failed to create image library date directory '{}': {error}",
+            target_dir.display()
+        ))
+    })?;
+
+    let connection = database::open_connection(database_path)
+        .map_err(|error| database::database_error(database_path, "open for image import", error))?;
+
+    let mut imported: Vec<ImageLibraryRecord> = Vec::new();
+    for path_str in file_paths {
+        let source = PathBuf::from(path_str);
+        if !source.is_file() {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&source) else {
+            continue;
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        let fallback_ext = source
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let mime_type = detect_mime(&bytes, &fallback_ext);
+        let file_name = format!(
+            "img-{}-{}.{}",
+            chrono::Local::now().format("%Y%m%d%H%M%S"),
+            database::create_snowflake_id(),
+            ext_for_mime(&mime_type)
+        );
+        let abs_path = target_dir.join(&file_name);
+        if let Err(error) = fs::copy(&source, &abs_path) {
+            eprintln!(
+                "[image-library] failed to import '{}': {error}",
+                source.display()
+            );
+            continue;
+        }
+
+        let relative_path = format!("image/{date_dir}/{file_name}");
+        let (width, height) = probe_dimensions(&bytes, &mime_type);
+        let id = database::create_snowflake_id();
+        let insert_result = connection.execute(
+            "INSERT INTO image_library (
+               id, relative_path, file_name, mime_type, size_bytes, width, height
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, relative_path, file_name, mime_type, bytes.len() as i64, width, height],
+        );
+        match insert_result {
+            Ok(_) => {
+                if let Some(record) = find_image(&connection, &id).unwrap_or(None) {
+                    imported.push(record);
+                }
+            }
+            Err(error) => {
+                // 索引失败：清理已复制文件，避免孤儿文件
+                eprintln!(
+                    "[image-library] failed to index imported image '{relative_path}': {error}"
+                );
+                let _ = fs::remove_file(&abs_path);
+            }
+        }
+    }
+    Ok(imported)
 }
 
 /// 扫描并重写所有引用 `relative_path` 的消息。
@@ -638,4 +930,298 @@ fn strip_image_ref_from_raw_json(raw_json: &str, relative_path: &str) -> String 
         }
     }
     serde_json::to_string(&array).unwrap_or_else(|_| raw_json.to_string())
+}
+
+// ============================================================================
+// 图库目录迁移（更换保存目录时把现有图片复制到新根目录，支持取消与崩溃恢复）
+//
+// 流程：prepare 写入迁移日志（存放于应用数据目录，独立于图库根目录，
+// 保证任何情况下可发现）→ chunk 逐批复制并更新日志 → commit 写入新目录
+// 设置（提交点）并清理旧文件。用户取消或复制出错时调用 rollback 删除新
+// 目录中的副本；进程中途被杀时，下次启动由 recover_interrupted_migration
+// 自动回滚（未提交）或完成清理（已提交）。
+// ============================================================================
+
+/// 迁移日志文件名
+const MIGRATION_JOURNAL_FILE: &str = ".snow-image-migration.json";
+
+/// 迁移日志：prepare 时写入，chunk 逐文件更新 copied，commit 成功后删除。
+#[derive(Debug, Serialize, Deserialize)]
+struct MigrationJournal {
+    version: u32,
+    old_root: String,
+    new_root: String,
+    /// commit 时写入 system_settings 的值（"" 表示重置为默认目录）
+    setting_value: String,
+    /// 计划迁移的图库相对路径（image/...）
+    files: Vec<String>,
+    /// 已完成复制的相对路径
+    copied: Vec<String>,
+}
+
+fn migration_journal_path() -> Result<PathBuf> {
+    Ok(paths::app_storage_dir()?.join(MIGRATION_JOURNAL_FILE))
+}
+
+fn load_migration_journal() -> Result<Option<MigrationJournal>> {
+    let path = migration_journal_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path).map_err(|error| {
+        Error::from_reason(format!("Failed to read migration journal: {error}"))
+    })?;
+    match serde_json::from_str(&content) {
+        Ok(journal) => Ok(Some(journal)),
+        Err(error) => {
+            // 日志损坏无法安全回滚：移除并记录，避免阻塞后续迁移
+            let _ = fs::remove_file(&path);
+            eprintln!("[image-library] discarded corrupt migration journal: {error}");
+            Ok(None)
+        }
+    }
+}
+
+fn save_migration_journal(journal: &MigrationJournal) -> Result<()> {
+    let path = migration_journal_path()?;
+    let content = serde_json::to_string_pretty(journal).map_err(|error| {
+        Error::from_reason(format!("Failed to serialize migration journal: {error}"))
+    })?;
+    fs::write(&path, content)
+        .map_err(|error| Error::from_reason(format!("Failed to write migration journal: {error}")))
+}
+
+/// 规范化路径用于比较（目录存在时优先 canonicalize，处理大小写与分隔符差异）。
+fn normalized_for_compare(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// 校验并规范化图库相对路径（白名单：image/ 前缀 + 防穿越）。
+fn validated_rel_path(relative_path: &str) -> Option<String> {
+    let normalized = relative_path.trim().replace('\\', "/");
+    if !normalized.starts_with("image/") || normalized.contains("..") {
+        return None;
+    }
+    Some(normalized)
+}
+
+/// 从旧根复制一个图库文件到新根；源文件缺失视为已处理（跳过）。
+fn copy_library_file(old_root: &Path, new_root: &Path, relative_path: &str) -> std::io::Result<()> {
+    let source = library_file_path(old_root, relative_path);
+    if !source.exists() {
+        return Ok(());
+    }
+    let target = library_file_path(new_root, relative_path);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&source, &target)?;
+    Ok(())
+}
+
+/// 删除指定根目录下的图库文件（白名单校验防越界），失败不阻断。
+fn remove_library_file(root: &Path, relative_path: &str) {
+    let file_path = library_file_path(root, relative_path);
+    if let Ok(canonical_root) = root.canonicalize() {
+        if let Ok(canonical_file) = file_path.canonicalize() {
+            if canonical_file.starts_with(&canonical_root) {
+                let _ = fs::remove_file(&canonical_file);
+            }
+        }
+    }
+}
+
+/// 列出图库索引中的全部相对路径。
+fn list_relative_paths(database_path: &Path) -> Result<Vec<String>> {
+    database::open_connection(database_path)
+        .and_then(|connection| {
+            let mut statement = connection.prepare("SELECT relative_path FROM image_library")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect()
+        })
+        .map_err(|error| database::database_error(database_path, "list image library paths", error))
+}
+
+/// 准备图库迁移：解析目标根目录、校验路径关系、按索引列出现有图片并写入迁移日志。
+/// 返回待迁移图片数量；0 表示无需迁移（目标与当前相同或图库为空）。
+pub fn prepare_migration(database_path: &Path, target_dir: &str) -> Result<usize> {
+    let old_root = image_library_root()?;
+    let setting_value = target_dir.trim().to_string();
+    let new_root = if setting_value.is_empty() {
+        paths::app_storage_dir()?.join("image")
+    } else {
+        PathBuf::from(&setting_value)
+    };
+
+    fs::create_dir_all(&new_root).map_err(|error| {
+        Error::from_reason(format!(
+            "目标图片目录不可用 '{}': {error}",
+            new_root.display()
+        ))
+    })?;
+
+    let old_norm = normalized_for_compare(&old_root);
+    let new_norm = normalized_for_compare(&new_root);
+    if old_norm == new_norm {
+        return Ok(0); // 目标与当前相同，无需迁移
+    }
+    if new_norm.starts_with(&old_norm) {
+        return Err(Error::from_reason(
+            "目标目录不能位于当前图库目录内部".to_string(),
+        ));
+    }
+
+    let files: Vec<String> = list_relative_paths(database_path)?
+        .into_iter()
+        .filter_map(|path| validated_rel_path(&path))
+        .collect();
+    if files.is_empty() {
+        return Ok(0);
+    }
+
+    save_migration_journal(&MigrationJournal {
+        version: 1,
+        old_root: old_root.to_string_lossy().into_owned(),
+        new_root: new_root.to_string_lossy().into_owned(),
+        setting_value,
+        copied: Vec::new(),
+        files: files.clone(),
+    })?;
+    eprintln!(
+        "[image-library] migration prepared: {} -> {} ({} file(s))",
+        old_root.display(),
+        new_root.display(),
+        files.len()
+    );
+    Ok(files.len())
+}
+
+/// 复制下一批图库文件（最多 chunk_size 个），逐文件更新迁移日志。
+/// 返回 (已完成数, 总数, 是否完成)。
+pub fn migrate_chunk(chunk_size: usize) -> Result<(usize, usize, bool)> {
+    let Some(mut journal) = load_migration_journal()? else {
+        return Err(Error::from_reason("没有进行中的图片迁移".to_string()));
+    };
+    let old_root = PathBuf::from(&journal.old_root);
+    let new_root = PathBuf::from(&journal.new_root);
+
+    let mut batch = 0usize;
+    for relative_path in &journal.files {
+        if batch >= chunk_size {
+            break;
+        }
+        if journal.copied.contains(relative_path) {
+            continue;
+        }
+        copy_library_file(&old_root, &new_root, relative_path).map_err(|error| {
+            Error::from_reason(format!("迁移图片失败 '{relative_path}': {error}"))
+        })?;
+        journal.copied.push(relative_path.clone());
+        save_migration_journal(&journal)?;
+        batch += 1;
+    }
+
+    let total = journal.files.len();
+    let copied = journal.copied.len();
+    Ok((copied, total, copied >= total))
+}
+
+/// 提交迁移：写入新目录设置（提交点）→ 删除日志 → 清理旧根目录文件。
+/// 迁移期间新生成的图片在此兜底补迁，避免索引指向新根却缺文件。
+pub fn commit_migration(database_path: &Path) -> Result<()> {
+    let Some(mut journal) = load_migration_journal()? else {
+        return Err(Error::from_reason("没有进行中的图片迁移".to_string()));
+    };
+    let old_root = PathBuf::from(&journal.old_root);
+    let new_root = PathBuf::from(&journal.new_root);
+
+    // 兜底：迁移期间新增的图片一并复制（失败不阻断提交）
+    let current_paths = list_relative_paths(database_path).unwrap_or_default();
+    for relative_path in current_paths {
+        if let Some(rel) = validated_rel_path(&relative_path) {
+            if !journal.files.contains(&rel) {
+                if let Err(error) = copy_library_file(&old_root, &new_root, &rel) {
+                    eprintln!("[image-library] catch-up copy failed '{rel}': {error}");
+                }
+                journal.files.push(rel);
+            }
+        }
+    }
+
+    // 提交点：写入目录设置（此刻起图库根切换为新目录）
+    system_settings::set_image_library_dir(database_path, &journal.setting_value).map_err(
+        |error| Error::from_reason(format!("Failed to save image library directory: {error}")),
+    )?;
+
+    let journal_path = migration_journal_path()?;
+    let _ = fs::remove_file(&journal_path);
+
+    // 清理旧根目录文件（失败仅残留孤儿文件，不阻断提交）
+    for relative_path in &journal.files {
+        remove_library_file(&old_root, relative_path);
+    }
+
+    eprintln!(
+        "[image-library] migration committed: {} -> {} ({} file(s))",
+        old_root.display(),
+        new_root.display(),
+        journal.files.len()
+    );
+    Ok(())
+}
+
+/// 回滚迁移：删除新根目录下已复制的文件并移除日志（幂等）。
+/// 用户取消或迁移出错时调用；目录设置尚未写入，图库仍指向旧根目录。
+pub fn rollback_migration() -> Result<()> {
+    let Some(journal) = load_migration_journal()? else {
+        return Ok(()); // 无进行中的迁移
+    };
+    let new_root = PathBuf::from(&journal.new_root);
+    for relative_path in &journal.copied {
+        remove_library_file(&new_root, relative_path);
+    }
+    let journal_path = migration_journal_path()?;
+    let _ = fs::remove_file(&journal_path);
+    eprintln!(
+        "[image-library] migration rolled back, removed {} copied file(s) from {}",
+        journal.copied.len(),
+        new_root.display()
+    );
+    Ok(())
+}
+
+/// 启动时恢复中断的迁移（在 initialize_app_storage 中调用一次）：
+/// - 日志的 new_root 已是当前根目录 → 设置已提交，仅清理日志与旧根文件；
+/// - 否则 → 迁移未提交，回滚删除新根目录中的副本。
+pub fn recover_interrupted_migration() -> Result<()> {
+    let Some(journal) = load_migration_journal()? else {
+        return Ok(());
+    };
+    let journal_root = PathBuf::from(&journal.new_root);
+    let current_root = image_library_root()?;
+    let committed = normalized_for_compare(&current_root) == normalized_for_compare(&journal_root);
+
+    if committed {
+        let old_root = PathBuf::from(&journal.old_root);
+        for relative_path in &journal.files {
+            remove_library_file(&old_root, relative_path);
+        }
+        eprintln!(
+            "[image-library] recovered committed migration, cleaned up {}",
+            old_root.display()
+        );
+    } else {
+        for relative_path in &journal.copied {
+            remove_library_file(&journal_root, relative_path);
+        }
+        eprintln!(
+            "[image-library] recovered interrupted migration, rolled back {} copied file(s) from {}",
+            journal.copied.len(),
+            journal_root.display()
+        );
+    }
+
+    let journal_path = migration_journal_path()?;
+    let _ = fs::remove_file(&journal_path);
+    Ok(())
 }

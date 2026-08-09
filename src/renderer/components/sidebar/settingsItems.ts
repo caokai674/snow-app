@@ -1,10 +1,11 @@
 import {
   ChartColumn,
+  Compass,
   Database,
   Download,
   EyeOff,
-  Globe,
   FishingHook,
+  Globe,
   Image as ImageIcon,
   Images,
   Keyboard,
@@ -146,6 +147,13 @@ export const SETTINGS_ITEMS: SettingsItem[] = [
     labelKey: "settings.terminalSettings",
     defaultLabel: "Terminal settings",
     view: "terminal-settings",
+  },
+  {
+    id: "browser",
+    icon: Compass,
+    labelKey: "settings.browserSettings",
+    defaultLabel: "Browser settings",
+    view: "browser-settings",
   },
   {
     id: "keyboard-shortcuts",

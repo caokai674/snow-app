@@ -114,6 +114,11 @@ const SystemLogsPanel = lazy(() =>
     default: m.SystemLogsPanel,
   }))
 );
+const BrowserSettingsPanel = lazy(() =>
+  import("./sidebar/browserSettings/BrowserSettingsPanel").then((m) => ({
+    default: m.BrowserSettingsPanel,
+  }))
+);
 
 type MainContentProps = {
   activeDirectory?: WorkspaceDirectoryRecord | null;
@@ -162,6 +167,8 @@ export const MainContent = ({
             <ImageGenSettingsPanel onClose={() => onSelectView("chat")} />
           ) : activeView === "image-library" ? (
             <ImageLibraryPanel onClose={() => onSelectView("chat")} />
+          ) : activeView === "browser-settings" ? (
+            <BrowserSettingsPanel onClose={() => onSelectView("chat")} />
           ) : activeView === "proxy-browser-settings" ? (
             <ProxyBrowserSettingsPanel onClose={() => onSelectView("chat")} />
           ) : activeView === "codebase-settings" ? (
